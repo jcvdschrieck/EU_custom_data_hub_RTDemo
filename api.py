@@ -8,14 +8,16 @@ GET  /health
 GET  /api/queue                 latest 30 live transactions (real-time feed)
 GET  /api/transactions          paginated historical query
 GET  /api/metrics               VAT aggregates with filters
-GET  /api/simulation/status     current simulation state
+GET  /api/alarms                alarm list (active_only optional)
+GET  /api/suspicious            last 50 suspicious transactions
+GET  /api/simulation/status
 POST /api/simulation/start
 POST /api/simulation/pause
 POST /api/simulation/resume
 POST /api/simulation/speed      body: {"speed": <float>}
 POST /api/simulation/reset
-GET  /api/catalog/suppliers     list of supplier names
-GET  /api/catalog/countries     list of country codes + names
+GET  /api/catalog/suppliers
+GET  /api/catalog/countries
 """
 from __future__ import annotations
 
@@ -36,20 +38,45 @@ from lib.database import (
     query_transactions,
     reset_simulation_db,
     get_sim_counts,
+    get_alarms,
+    get_suspicious_transactions,
+    expire_old_alarms,
+    reset_alarms,
 )
 from lib.simulator import state, simulation_loop
 from lib.catalog import SUPPLIERS, COUNTRY_NAMES
 
-# ── Live queue (in-memory ring buffer, filled by simulation) ──────────────────
+# ── Live queue (in-memory ring buffer) ────────────────────────────────────────
 
-_live_queue: deque[dict] = deque(maxlen=QUEUE_SIZE)
+_live_queue:  deque[dict] = deque(maxlen=QUEUE_SIZE)
+_live_alarms: list[dict]  = []     # active alarms raised this session
 
 
 def _fire_transactions(rows: list[dict]) -> None:
-    """Called by the simulation loop when transactions are due."""
+    """Called by the simulation loop for each batch of due transactions."""
+    from lib.alarm_checker import check_alarm
+
     for row in rows:
         insert_transaction(row)
+
+        # Run alarm check after DB write (checker reads from European Custom DB)
+        alarm = check_alarm(row)
+        if alarm:
+            _live_alarms.insert(0, alarm)
+
+        # Refresh suspicious flag on the in-memory row for the live queue
+        row["suspicious"] = 0
+        if any(
+            a["alarm_key"] == f"{row['seller_id']}|{row['buyer_country']}"
+            for a in _live_alarms
+        ):
+            row["suspicious"] = 1
+
         _live_queue.appendleft(row)
+
+    # Expire stale alarms
+    if rows:
+        expire_old_alarms(rows[-1]["transaction_date"][:19])
 
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
@@ -91,14 +118,12 @@ def health():
 
 @app.get("/api/queue")
 def get_queue():
-    """Return the latest 30 transactions from the live simulation feed."""
-    # If simulation has not started yet, fall back to DB
     if not _live_queue:
         return {"items": get_latest_transactions(QUEUE_SIZE), "source": "db"}
     return {"items": list(_live_queue)[:QUEUE_SIZE], "source": "live"}
 
 
-# ── Historical transactions ────────────────────────────────────────────────────
+# ── Historical transactions ───────────────────────────────────────────────────
 
 @app.get("/api/transactions")
 def get_transactions(
@@ -141,6 +166,18 @@ def get_metrics(
     )
 
 
+# ── Alarms ────────────────────────────────────────────────────────────────────
+
+@app.get("/api/alarms")
+def api_get_alarms(active_only: bool = Query(False)):
+    return get_alarms(active_only=active_only)
+
+
+@app.get("/api/suspicious")
+def api_get_suspicious(limit: int = Query(50, ge=1, le=200)):
+    return get_suspicious_transactions(limit=limit)
+
+
 # ── Simulation control ────────────────────────────────────────────────────────
 
 @app.get("/api/simulation/status")
@@ -148,12 +185,14 @@ def sim_status():
     counts = get_sim_counts()
     s = state.to_dict()
     s.update(counts)
+    s["active_alarms"] = len([a for a in get_alarms(active_only=True)])
     return s
 
 
 @app.post("/api/simulation/start")
 def sim_start():
-    if state.sim_time >= __import__("lib.config", fromlist=["SIM_END_DT"]).SIM_END_DT:
+    from lib.config import SIM_END_DT
+    if state.sim_time >= SIM_END_DT:
         return {"ok": False, "reason": "simulation already finished — reset first"}
     state.running = True
     return {"ok": True, "status": state.to_dict()}
@@ -185,7 +224,9 @@ def sim_speed(payload: SpeedPayload):
 def sim_reset():
     state.reset()
     reset_simulation_db()
+    reset_alarms()
     _live_queue.clear()
+    _live_alarms.clear()
     return {"ok": True, "status": state.to_dict()}
 
 

@@ -43,6 +43,25 @@ ALTER TABLE transactions ADD COLUMN fired INTEGER NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS idx_fired ON transactions(fired, transaction_date);
 """
 
+_ALARM_DDL = """
+CREATE TABLE IF NOT EXISTS alarms (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    alarm_key        TEXT    NOT NULL,
+    supplier_id      TEXT    NOT NULL,
+    supplier_name    TEXT    NOT NULL,
+    buyer_country    TEXT    NOT NULL,
+    trigger_tx_id    TEXT    NOT NULL,
+    raised_at        TEXT    NOT NULL,
+    expires_at       TEXT    NOT NULL,
+    ratio_current    REAL    NOT NULL,
+    ratio_historical REAL    NOT NULL,
+    deviation_pct    REAL    NOT NULL,
+    active           INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_alarm_key     ON alarms(alarm_key, active);
+CREATE INDEX IF NOT EXISTS idx_alarm_expires ON alarms(expires_at);
+"""
+
 
 def _connect(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(path, check_same_thread=False)
@@ -52,6 +71,19 @@ def _connect(path: Path) -> sqlite3.Connection:
     return conn
 
 
+def _migrate_european_custom_db(conn: sqlite3.Connection) -> None:
+    """Add columns / tables introduced after initial schema."""
+    for col, default in [("suspicious", "0"), ("alarm_id", "NULL")]:
+        try:
+            conn.execute(f"ALTER TABLE transactions ADD COLUMN {col} INTEGER DEFAULT {default}")
+        except sqlite3.OperationalError:
+            pass   # already exists
+    for stmt in _ALARM_DDL.strip().split(";"):
+        s = stmt.strip()
+        if s:
+            conn.execute(s)
+
+
 def init_european_custom_db() -> None:
     conn = _connect(EUROPEAN_CUSTOM_DB)
     with conn:
@@ -59,6 +91,7 @@ def init_european_custom_db() -> None:
             s = stmt.strip()
             if s:
                 conn.execute(s)
+        _migrate_european_custom_db(conn)
     conn.close()
 
 
@@ -292,3 +325,53 @@ def get_sim_counts() -> dict[str, int]:
     fired = conn.execute("SELECT COUNT(*) FROM transactions WHERE fired=1").fetchone()[0]
     conn.close()
     return {"total": total, "fired": fired, "remaining": total - fired}
+
+
+# ── Alarm queries (European Custom DB) ───────────────────────────────────────
+
+def get_alarms(active_only: bool = False, limit: int = 50) -> list[dict]:
+    conn = _connect(EUROPEAN_CUSTOM_DB)
+    where = "WHERE active=1" if active_only else ""
+    rows = conn.execute(
+        f"SELECT * FROM alarms {where} ORDER BY id DESC LIMIT ?", (limit,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def expire_old_alarms(as_of: str) -> None:
+    """Deactivate alarms whose expiry has passed."""
+    conn = _connect(EUROPEAN_CUSTOM_DB)
+    with conn:
+        conn.execute(
+            "UPDATE alarms SET active=0 WHERE active=1 AND expires_at <= ?",
+            (as_of,),
+        )
+    conn.close()
+
+
+def get_suspicious_transactions(limit: int = 50) -> list[dict]:
+    conn = _connect(EUROPEAN_CUSTOM_DB)
+    rows = conn.execute(
+        """
+        SELECT t.*, a.deviation_pct, a.ratio_current, a.ratio_historical,
+               a.raised_at as alarm_raised_at, a.expires_at as alarm_expires_at
+        FROM transactions t
+        JOIN alarms a ON t.alarm_id = a.id
+        WHERE t.suspicious = 1
+        ORDER BY t.transaction_date DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def reset_alarms() -> None:
+    """Clear all alarms and suspicious flags (called on simulation reset)."""
+    conn = _connect(EUROPEAN_CUSTOM_DB)
+    with conn:
+        conn.execute("DELETE FROM alarms")
+        conn.execute("UPDATE transactions SET suspicious=0, alarm_id=NULL")
+    conn.close()

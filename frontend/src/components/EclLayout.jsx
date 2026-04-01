@@ -43,10 +43,13 @@ export default function EclLayout({ children }) {
 
       {/* Navigation */}
       <nav className="site-nav">
-        <NavLink to="/"          className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}
+        <NavLink to="/"           className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}
                  end>Main</NavLink>
-        <NavLink to="/dashboard" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
+        <NavLink to="/dashboard"  className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
           Dashboard
+        </NavLink>
+        <NavLink to="/suspicious" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
+          Suspicious Transactions
         </NavLink>
       </nav>
 

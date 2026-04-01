@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { getQueue, getMetrics } from '../api'
+import axios from 'axios'
 
 const COUNTRY = { FR:'France', DE:'Germany', ES:'Spain', IT:'Italy', NL:'Netherlands', PL:'Poland' }
 
@@ -108,18 +110,88 @@ function TxTable({ items, prevIds }) {
   )
 }
 
+const COUNTRY = { FR:'France', DE:'Germany', ES:'Spain', IT:'Italy', NL:'Netherlands', PL:'Poland' }
+
 // ── Alarms panel ──────────────────────────────────────────────────────────────
 function AlarmsPanel() {
+  const [alarms, setAlarms] = useState([])
+  const navigate = useNavigate()
+
+  useEffect(() => {
+    const fetch = () => axios.get('/api/alarms?active_only=true')
+      .then(r => setAlarms(r.data)).catch(() => {})
+    fetch()
+    const id = setInterval(fetch, 5000)
+    return () => clearInterval(id)
+  }, [])
+
+  const active = alarms.filter(a => a.active)
+
   return (
     <div className="card section-gap">
       <div className="card-header">
         🔔 Alarms
-        <span className="text-muted" style={{ fontWeight: 400 }}>0 active</span>
+        <span style={{
+          background: active.length ? '#fde8e8' : '#d4edda',
+          color: active.length ? 'var(--error)' : 'var(--success)',
+          padding: '2px 10px', borderRadius: 10, fontSize: 12, fontWeight: 700,
+        }}>
+          {active.length} active
+        </span>
       </div>
-      <div className="alarms-empty">
-        <div className="alarms-empty__icon">🔕</div>
-        <div className="alarms-empty__text">No alarms at this time. Alarm rules will be configurable in a future release.</div>
-      </div>
+
+      {active.length === 0 ? (
+        <div className="alarms-empty">
+          <div className="alarms-empty__icon">🔕</div>
+          <div className="alarms-empty__text">
+            No active alarms. VAT ratio deviation alarms will appear here when triggered.
+            <br />
+            <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+              Scenario: GourmetShop Lyon → PL alarm fires during week 2 of March 2026.
+            </span>
+          </div>
+        </div>
+      ) : (
+        <div style={{ padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {active.map(a => (
+            <div key={a.id} style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              padding: '10px 14px',
+              background: '#fff8f8',
+              border: '1px solid #f5c6cb',
+              borderLeft: '4px solid var(--error)',
+              borderRadius: 'var(--radius)',
+              gap: 16,
+            }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 700, color: 'var(--error)', fontSize: 13 }}>
+                  ⚠ {a.supplier_name} → {COUNTRY[a.buyer_country] || a.buyer_country}
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 3 }}>
+                  VAT/value ratio: <strong style={{ color: 'var(--error)' }}>{(a.ratio_current * 100).toFixed(2)}%</strong>
+                  {' vs historical '}
+                  <strong style={{ color: 'var(--success)' }}>{(a.ratio_historical * 100).toFixed(2)}%</strong>
+                  {' · deviation: '}
+                  <strong>+{a.deviation_pct.toFixed(1)}%</strong>
+                </div>
+                <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>
+                  Raised: {a.raised_at?.slice(0,16).replace('T',' ')} · Expires: {a.expires_at?.slice(0,10)}
+                </div>
+              </div>
+              <button
+                onClick={() => navigate('/suspicious')}
+                style={{
+                  background: 'var(--error)', color: '#fff', border: 'none',
+                  borderRadius: 'var(--radius)', padding: '5px 14px',
+                  fontSize: 12, fontWeight: 700, cursor: 'pointer', whiteSpace: 'nowrap',
+                }}
+              >
+                View suspicious →
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }

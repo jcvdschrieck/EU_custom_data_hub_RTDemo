@@ -119,14 +119,65 @@ def seed_european_custom_db() -> int:
     return len(rows)
 
 
+def _scenario_transactions(d: date) -> list[dict]:
+    """
+    Alarm scenario: GourmetShop Lyon (SUP007, FR) → PL
+    During week 2 of March (08–14), 8 transactions per day are injected where
+    the supplier mistakenly applies the Polish standard VAT rate (23%) instead
+    of the correct reduced food rate (8%).  This drives the 7-day VAT/value
+    ratio from ~5.5% (historical FR food rate applied by error) to ~19%,
+    far exceeding the 25% deviation threshold and triggering an alarm.
+    """
+    SCENARIO_SUPPLIER = next(s for s in SUPPLIERS if s["id"] == "SUP007")
+    BUYER_COUNTRY  = "PL"
+    WRONG_VAT_RATE = 0.23   # PL standard rate (food should be 8%)
+    CORRECT_RATE   = VAT_RATES[BUYER_COUNTRY]["food"]   # 0.08
+
+    rows = []
+    for _ in range(8):
+        description, category, base_price = random.choice(SCENARIO_SUPPLIER["products"])
+        value      = round(base_price * random.uniform(0.85, 1.15), 2)
+        vat_rate   = WRONG_VAT_RATE
+        vat_amount = round(value * vat_rate, 2)
+        tx_date    = _random_datetime(d)
+        import uuid as _uuid
+        tx_id      = str(_uuid.uuid4())
+        row = {
+            "transaction_id":   tx_id,
+            "transaction_date": tx_date,
+            "seller_id":        SCENARIO_SUPPLIER["id"],
+            "seller_name":      SCENARIO_SUPPLIER["name"],
+            "seller_country":   SCENARIO_SUPPLIER["country"],
+            "item_description": description,
+            "item_category":    category,
+            "value":            value,
+            "vat_rate":         vat_rate,
+            "vat_amount":       vat_amount,
+            "buyer_country":    BUYER_COUNTRY,
+            "correct_vat_rate": CORRECT_RATE,
+            "has_error":        1,
+            "xml_message":      None,
+            "created_at":       tx_date,
+            "fired":            0,
+        }
+        from lib.xml_generator import transaction_to_xml
+        row["xml_message"] = transaction_to_xml(row)
+        rows.append(row)
+    return rows
+
+
 def seed_simulation_db() -> int:
     init_simulation_db()
     start = date(2026, 3, 1)
     end   = date(2026, 3, 31)
     rows  = []
+    # Scenario week 2 = March 8–14
+    scenario_days = {date(2026, 3, d) for d in range(8, 15)}
     for d in _date_range(start, end):
         n = max(20, int(random.gauss(_DAILY_MEAN, _DAILY_STD)))
         rows.extend(_generate_transaction(d) for _ in range(n))
+        if d in scenario_days:
+            rows.extend(_scenario_transactions(d))
     rows.sort(key=lambda r: r["transaction_date"])
     # Add fired=0 for simulation DB
     for r in rows:
