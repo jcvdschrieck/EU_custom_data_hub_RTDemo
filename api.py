@@ -8,39 +8,34 @@ Simulation loop
     │
     │  publishes each transaction to broker topic "incoming"
     ▼
-┌──────────────────────────────────┐
-│         Message Broker           │
-│  topic: "incoming"               │
-└────────────┬─────────────────────┘
-             │ fan-out to subscribers
-             ▼
-    ┌─────────────────────┐
-    │  _db_store_worker   │  ← Subscriber 1
-    │  insert_transaction │    stores the raw record in European Custom DB
-    │  publishes "stored" │    then publishes to "stored" so alarm checker
-    └────────┬────────────┘    can safely query the DB
-             │
-             ▼ topic: "stored"
-    ┌─────────────────────┐
-    │  _alarm_worker      │  ← Subscriber 2 (of "stored")
-    │  check_alarm()      │    reads VAT-ratio stats from DB
-    │  updates live queue │    updates in-memory live queue & SSE clients
-    │  publishes          │    if suspicious → publishes to "alarm_fired"
-    │  "alarm_fired"      │
-    └──────┬──────────────┘
-           │ fan-out to subscribers
-           ▼ topic: "alarm_fired"
-    ┌──────┴────────────────────────────┐
-    │                                   │
-    ▼                                   ▼
-┌──────────────────┐        ┌───────────────────────┐
-│ _db_flag_worker  │        │ _agent_worker          │
-│ Subscriber A     │        │ Subscriber B            │
-│ UPDATE tx SET    │        │ AI analysis (Claude)    │
-│ suspicious=1     │        │ verdict → DB log        │
-│ alarm_id=?       │        │ incorrect → ireland_q   │
-│ suspicion='medium'│        │ correct   → clear flag  │
-└──────────────────┘        └───────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│                   Message Broker                     │
+│  topic: "incoming"                                   │
+└────────────┬──────────────────────┬──────────────────┘
+             │ Subscriber 1         │ Subscriber 2
+             ▼                      ▼
+    ┌─────────────────┐    ┌──────────────────────┐
+    │ _db_store_worker│    │ _alarm_worker         │
+    │ insert_          │    │ check_alarm()         │
+    │ transaction()   │    │ (current tx injected  │
+    │                 │    │  into ratio — no DB   │
+    │                 │    │  dependency on store) │
+    └─────────────────┘    │ updates live queue    │
+                           │ publishes "alarm_fired"│
+                           └──────────┬────────────┘
+                                      │ fan-out
+                           ▼ topic: "alarm_fired"
+                  ┌─────────────────────────────────┐
+                  │                                 │
+                  ▼                                 ▼
+       ┌──────────────────┐          ┌─────────────────────┐
+       │ _db_flag_worker  │          │ _agent_worker        │
+       │ Subscriber A     │          │ Subscriber B         │
+       │ UPDATE tx SET    │          │ AI analysis (Claude) │
+       │ suspicious=1     │          │ verdict → DB log     │
+       │ alarm_id=?       │          │ incorrect→ireland_q  │
+       │ level='medium'   │          │ correct →clear flag  │
+       └──────────────────┘          └─────────────────────┘
 
 Endpoints
 ─────────
@@ -133,28 +128,29 @@ async def _fire_transactions(rows: list[dict]) -> None:
 async def _db_store_worker() -> None:
     """
     Subscribes to 'incoming'.
-    Persists the raw transaction in the European Custom DB, then publishes
-    to 'stored' so the alarm worker can safely query the DB for ratio stats.
+    Persists the raw transaction in the European Custom DB.
+    Peer subscriber alongside _alarm_worker — no ordering dependency.
     """
     q = broker.subscribe("incoming")
     while True:
         row = await q.get()
         insert_transaction(row)
-        await broker.publish("stored", row)
 
 
 # ── Worker 2: Alarm checker subscriber ───────────────────────────────────────
 
 async def _alarm_worker() -> None:
     """
-    Subscribes to 'stored' (guaranteed: transaction is in DB).
-    Runs the VAT-ratio deviation check.
+    Subscribes to 'incoming' as a peer of _db_store_worker.
+    The current transaction's value/vat are injected directly into the
+    ratio calculation (see alarm_checker._vat_ratio extra_* params) so
+    there is no dependency on the row being committed to the DB first.
     Updates in-memory live queue and SSE clients for every transaction.
     When a transaction is flagged, publishes to 'alarm_fired'.
     """
     from lib.alarm_checker import check_alarm
 
-    q = broker.subscribe("stored")
+    q = broker.subscribe("incoming")
     while True:
         row = await q.get()
 

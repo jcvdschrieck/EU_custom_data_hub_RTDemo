@@ -46,9 +46,23 @@ def _conn():
     return c
 
 
-def _vat_ratio(supplier_id: str, buyer_country: str,
-               date_from: str, date_to: str) -> dict | None:
-    """Return {ratio, count} for the supplier/country window, or None if too few rows."""
+def _vat_ratio(
+    supplier_id: str,
+    buyer_country: str,
+    date_from: str,
+    date_to: str,
+    extra_value: float = 0.0,
+    extra_vat: float = 0.0,
+    extra_count: int = 0,
+) -> dict | None:
+    """
+    Return {ratio, count} for the supplier/country window, or None if too few rows.
+
+    extra_value / extra_vat / extra_count let the caller inject the current
+    transaction's figures without requiring it to already be stored in the DB.
+    This allows _alarm_worker to subscribe to 'incoming' in parallel with
+    _db_store_worker rather than being chained after it.
+    """
     conn = _conn()
     row = conn.execute(
         """
@@ -64,9 +78,12 @@ def _vat_ratio(supplier_id: str, buyer_country: str,
         (supplier_id, buyer_country, date_from, date_to),
     ).fetchone()
     conn.close()
-    if not row or not row["n"] or not row["total_value"]:
+    n           = (row["n"]           or 0) + extra_count
+    total_value = (row["total_value"] or 0) + extra_value
+    total_vat   = (row["total_vat"]   or 0) + extra_vat
+    if not n or not total_value:
         return None
-    return {"ratio": row["total_vat"] / row["total_value"], "count": row["n"]}
+    return {"ratio": total_vat / total_value, "count": n}
 
 
 def _get_active_alarm(alarm_key: str, as_of: str) -> dict | None:
@@ -164,7 +181,15 @@ def check_alarm(tx: dict) -> dict | None:
     w8w_from = (sim_dt - timedelta(days=63)).strftime("%Y-%m-%dT%H:%M:%S")
     w8w_to   = (sim_dt - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%S")
 
-    current    = _vat_ratio(supplier_id, buyer_country, w7_from,  w7_to)
+    # Include the current transaction in the 7-day ratio directly so the
+    # alarm checker does not need the row to be committed to the DB first.
+    current    = _vat_ratio(
+        supplier_id, buyer_country, w7_from, w7_to,
+        extra_value=tx.get("value", 0.0),
+        extra_vat=tx.get("vat_amount", 0.0),
+        extra_count=1,
+    )
+    # Historical baseline is past data only — no injection needed.
     historical = _vat_ratio(supplier_id, buyer_country, w8w_from, w8w_to)
 
     if not current    or current["count"]    < MIN_CURRENT_TX:
