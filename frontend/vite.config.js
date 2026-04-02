@@ -6,7 +6,18 @@ export default defineConfig({
   server: {
     port: 5175,
     proxy: {
-      '/api': { target: 'http://localhost:8505', changeOrigin: true },
+      '/api': {
+        target: 'http://localhost:8505',
+        changeOrigin: true,
+        // Disable response buffering so SSE events stream through immediately
+        configure: (proxy) => {
+          proxy.on('proxyRes', (proxyRes) => {
+            if (proxyRes.headers['content-type']?.includes('text/event-stream')) {
+              proxyRes.headers['x-accel-buffering'] = 'no'
+            }
+          })
+        },
+      },
       '/health': { target: 'http://localhost:8505', changeOrigin: true },
     },
   },

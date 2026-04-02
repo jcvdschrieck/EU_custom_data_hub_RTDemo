@@ -97,7 +97,7 @@ async def simulation_loop(fire_callback) -> None:
 
         # Fetch due transactions from simulation DB
         up_to = state.sim_time.strftime("%Y-%m-%dT%H:%M:%S")
-        pending = get_pending_sim_transactions(up_to, batch=200)
+        pending = get_pending_sim_transactions(up_to, batch=5)
 
         if pending:
             ids = [r["transaction_id"] for r in pending]

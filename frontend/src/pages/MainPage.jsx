@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { getQueue, getMetrics } from '../api'
+const QUEUE_SIZE = 30
 import axios from 'axios'
 
 const COUNTRY = { FR:'France', DE:'Germany', ES:'Spain', IT:'Italy', NL:'Netherlands', PL:'Poland', IE:'Ireland' }
@@ -205,8 +206,6 @@ export default function MainPage() {
   const [metricsLoading, setML]     = useState(false)
   const [queue, setQueue]           = useState([])
   const [simTime, setSimTime]       = useState(null)        // current simulation date
-  const prevIds = useRef(new Set())
-
   // Poll simulation time so period selectors are relative to the sim clock
   useEffect(() => {
     const fetch = () => axios.get('/api/simulation/status')
@@ -234,17 +233,6 @@ export default function MainPage() {
     setML(false)
   }, [dateFrom, dateTo])
 
-  // Fetch live queue (polls every 2s)
-  const fetchQueue = useCallback(async () => {
-    try {
-      const data = await getQueue()
-      const items = data.items || []
-      const newIds = new Set(items.map(r => r.transaction_id))
-      prevIds.current = newIds
-      setQueue(items)
-    } catch { /* ignore */ }
-  }, [])
-
   // Initial + periodic metrics refresh
   useEffect(() => { fetchMetrics() }, [fetchMetrics])
   useEffect(() => {
@@ -252,18 +240,49 @@ export default function MainPage() {
     return () => clearInterval(id)
   }, [fetchMetrics])
 
-  // Live queue — every 2s
-  useEffect(() => {
-    fetchQueue()
-    const id = setInterval(fetchQueue, 2000)
-    return () => clearInterval(id)
-  }, [fetchQueue])
-
-  // Track new rows for flash animation
+  // Live queue — SSE for one-by-one delivery, fallback snapshot on connect
   const trackedIds = useRef(new Set())
   useEffect(() => {
-    queue.forEach(r => trackedIds.current.add(r.transaction_id))
-  }, [queue])
+    let es = null
+    let cancelled = false
+
+    // Load initial snapshot from REST endpoint
+    getQueue().then(data => {
+      if (cancelled) return
+      const items = (data.items || []).slice(0, QUEUE_SIZE)
+      items.forEach(r => trackedIds.current.add(r.transaction_id))
+      setQueue(items)
+    }).catch(() => {})
+
+    // Open SSE stream for subsequent live updates
+    es = new EventSource('/api/queue/stream')
+
+    es.onmessage = (evt) => {
+      if (cancelled) return
+      if (evt.data === '__reset__') {
+        trackedIds.current = new Set()
+        setQueue([])
+        return
+      }
+      try {
+        const row = JSON.parse(evt.data)
+        setQueue(prev => {
+          if (trackedIds.current.has(row.transaction_id)) return prev
+          trackedIds.current.add(row.transaction_id)
+          const next = [row, ...prev].slice(0, QUEUE_SIZE)
+          return next
+        })
+      } catch { /* ignore parse errors */ }
+    }
+
+    es.onerror = () => { /* browser auto-reconnects */ }
+
+    return () => {
+      cancelled = true
+      es?.close()
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   return (
     <div className="page-container">
@@ -298,7 +317,7 @@ export default function MainPage() {
       <div className="card section-gap">
         <div className="card-header">
           <span><span className="live-dot" />Live Transaction Queue — last 30</span>
-          <span className="text-muted" style={{ fontSize: 11 }}>auto-refresh every 2 s</span>
+          <span className="text-muted" style={{ fontSize: 11 }}>live stream</span>
         </div>
         <TxTable items={queue} prevIds={trackedIds} />
       </div>

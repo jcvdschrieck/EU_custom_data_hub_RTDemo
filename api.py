@@ -33,9 +33,9 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -69,6 +69,7 @@ _live_queue:       deque[dict] = deque(maxlen=QUEUE_SIZE)
 _live_alarms:      list[dict]  = []
 _agent_processing: dict[str, dict] = {}   # tx_id → {seller, item, started_at}
 _agent_queue:      asyncio.Queue   = None  # type: ignore — initialised in lifespan
+_sse_queues:       set[asyncio.Queue] = set()  # SSE clients
 
 
 # ── Simulation fire callback ──────────────────────────────────────────────────
@@ -90,6 +91,17 @@ async def _fire_transactions(rows: list[dict]) -> None:
 
         _live_queue.appendleft(row)
 
+        # Push to SSE clients — one transaction at a time
+        if _sse_queues:
+            payload = _json.dumps(row)
+            dead = set()
+            for q in _sse_queues:
+                try:
+                    q.put_nowait(payload)
+                except asyncio.QueueFull:
+                    dead.add(q)
+            _sse_queues.difference_update(dead)
+
         if row.get("suspicious") and _agent_queue is not None:
             alarm_context = next(
                 (a for a in _live_alarms
@@ -97,6 +109,9 @@ async def _fire_transactions(rows: list[dict]) -> None:
                 {},
             )
             _agent_queue.put_nowait({"tx": row, "alarm": alarm_context})
+
+        # Small delay so each transaction arrives individually on the client
+        await asyncio.sleep(0.12)
 
     if rows:
         expire_old_alarms(rows[-1]["transaction_date"][:19])
@@ -230,6 +245,35 @@ def get_queue():
     if not _live_queue:
         return {"items": get_latest_transactions(QUEUE_SIZE), "source": "db"}
     return {"items": list(_live_queue)[:QUEUE_SIZE], "source": "live"}
+
+
+@app.get("/api/queue/stream")
+async def queue_stream(request: Request):
+    """Server-Sent Events stream — one transaction per event."""
+    q: asyncio.Queue = asyncio.Queue(maxsize=200)
+    _sse_queues.add(q)
+
+    async def event_generator():
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    payload = await asyncio.wait_for(q.get(), timeout=15.0)
+                    yield f"data: {payload}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": heartbeat\n\n"
+        finally:
+            _sse_queues.discard(q)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # ── Historical transactions ───────────────────────────────────────────────────
@@ -367,6 +411,12 @@ def sim_reset():
     _live_queue.clear()
     _live_alarms.clear()
     _agent_processing.clear()
+    # Notify SSE clients to clear their local queue
+    for q in list(_sse_queues):
+        try:
+            q.put_nowait("__reset__")
+        except asyncio.QueueFull:
+            pass
     return {"ok": True, "status": state.to_dict()}
 
 
