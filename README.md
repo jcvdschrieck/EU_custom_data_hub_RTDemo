@@ -161,7 +161,7 @@ This creates two SQLite databases in `data/`:
 ## Running
 
 ```bash
-uvicorn api:app --host 0.0.0.0 --port 8505
+python -m uvicorn api:app --host 0.0.0.0 --port 8505
 ```
 
 Then open [http://localhost:8505](http://localhost:8505).
