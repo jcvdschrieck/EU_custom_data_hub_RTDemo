@@ -3,8 +3,9 @@ Simulation engine state (shared between FastAPI and the background task).
 
 The simulation replays March-2026 transactions in chronological order.
 Speed is expressed as simulated minutes per real second:
-  - 120  → 2 sim-hours / real-sec → full March in ~6 real minutes (default)
-  - 1440 → 1 sim-day   / real-sec → full March in ~31 real seconds
+  - 50   → full March in ~15 real minutes (default)
+  - 150  → full March in  ~5 real minutes
+  - 900  → full March in ~50 real seconds
 """
 from __future__ import annotations
 

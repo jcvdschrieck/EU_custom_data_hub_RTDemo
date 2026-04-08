@@ -4,12 +4,15 @@ import {
   simStart, simPause, simResume, simReset, simSetSpeed,
 } from '../api'
 
+// Speed = sim-minutes per real-second.  Full March (44 640 sim-min):
+//   10  → ~74 min   |  50  → ~15 min (default)  |  150 → ~5 min
+//  450  → ~100 sec  | 1500 → ~30 sec
 const SPEEDS = [
-  { label: '1×',    value: 1 },
-  { label: '30×',   value: 30 },
-  { label: '120×',  value: 120 },
-  { label: '360×',  value: 360 },
-  { label: '1440×', value: 1440 },
+  { label: '10×',   value: 10   },
+  { label: '50×',   value: 50   },
+  { label: '150×',  value: 150  },
+  { label: '450×',  value: 450  },
+  { label: '1500×', value: 1500 },
 ]
 
 function fmt(n) {

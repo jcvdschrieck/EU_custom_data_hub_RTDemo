@@ -6,7 +6,7 @@ Message flow (publish-subscribe)
 ─────────────────────────────────────────────────────────────────────────────
 
  Simulation loop
-     │  publishes each raw transaction (120 ms inter-message delay)
+     │  publishes each raw transaction (inter-event pacing per sim clock)
      ▼
  ┌────────────────────────────────────────────────────────────────────────┐
  │  Sales-order Event Broker  (topic: sales_order_event)                 │
@@ -279,35 +279,38 @@ async def _order_validation_factory() -> None:
     """
     Subscriber of Sales-order Event Broker.
     Validates the incoming sales order (required fields, numeric sanity,
-    known country code).  Produces a copy of the sales order enriched
-    with a validation_flag and any validation_errors.
+    known country code) after a uniformly-distributed real-time delay of 3–5 s.
+
+    Each order is handled by an independent asyncio task — unlimited concurrency,
+    no order waits behind another in this factory.
     Publishes to Order_validation_broker.
     """
+    import random
     from lib.catalog import COUNTRIES
 
-    q = broker.subscribe(SALES_ORDER_EVENT)
-    while True:
-        tx = await q.get()
-
+    async def _validate(tx: dict) -> None:
+        await asyncio.sleep(random.uniform(3.0, 5.0))
         errors: list[str] = []
-
         for field in ("transaction_id", "seller_id", "seller_name",
                       "buyer_country", "value", "vat_rate", "vat_amount"):
             if tx.get(field) is None:
                 errors.append(f"missing field: {field}")
-
         if tx.get("value", 0) <= 0:
             errors.append("value must be positive")
         if tx.get("vat_rate", -1) < 0:
             errors.append("vat_rate must be >= 0")
         if tx.get("buyer_country") not in COUNTRIES:
             errors.append(f"unknown buyer_country: {tx.get('buyer_country')}")
-
         await broker.publish(ORDER_VALIDATION, {
-            "tx":               tx,
-            "validated":        len(errors) == 0,
+            "tx":                tx,
+            "validated":         len(errors) == 0,
             "validation_errors": errors,
         })
+
+    q = broker.subscribe(SALES_ORDER_EVENT)
+    while True:
+        tx = await q.get()
+        asyncio.create_task(_validate(tx))
 
 
 # ── Arrival Notification Factory ─────────────────────────────────────────────
@@ -315,54 +318,29 @@ async def _order_validation_factory() -> None:
 async def _arrival_notification_factory() -> None:
     """
     Subscribes to Sales-order Event Broker.
-    For each sales order, schedules an arrival notification after an
-    exponentially-distributed sim-time delay (mean = 12 sim-hours, cap 48h).
-    Monitors state.sim_time and publishes to ARRIVAL_NOTIFICATION when due.
-    No visual link to the sales order broker is shown in the UI.
+    For each sales order, spawns an independent asyncio task that waits an
+    exponentially-distributed real-time delay (mean 60 s) then publishes
+    to ARRIVAL_NOTIFICATION.
+
+    Unlimited concurrency — each order is scheduled independently; no order
+    ever blocks behind another in this factory.
     """
     import random
+    from lib.message_factory import build_arrival_notification
     from lib.simulator import state as _state
 
-    MEAN_SIM_HOURS = 12.0
-    MAX_SIM_HOURS  = 48.0
+    MEAN_REAL_SECONDS = 60.0
 
-    # pending: list of (target_sim_datetime, payload)
-    pending: list[tuple[datetime, dict]] = []
+    async def _schedule(tx: dict) -> None:
+        delay = random.expovariate(1.0 / MEAN_REAL_SECONDS)
+        await asyncio.sleep(delay)
+        payload = build_arrival_notification(tx, _state.sim_time)
+        await broker.publish(ARRIVAL_NOTIFICATION, payload)
 
     q = broker.subscribe(SALES_ORDER_EVENT)
-
-    async def _schedule_listener():
-        while True:
-            tx = await q.get()
-            tx_time_str = (
-                tx.get("documentIssueDateAndTime")
-                or tx.get("transaction_date", "")
-            )
-            try:
-                tx_time = datetime.fromisoformat(tx_time_str.rstrip("Z"))
-                if tx_time.tzinfo is None:
-                    tx_time = tx_time.replace(tzinfo=timezone.utc)
-            except Exception:
-                tx_time = _state.sim_time
-            delay_hours = min(random.expovariate(1.0 / MEAN_SIM_HOURS), MAX_SIM_HOURS)
-            from datetime import timedelta
-            target_time = tx_time + timedelta(hours=delay_hours)
-            from lib.message_factory import build_arrival_notification
-            payload = build_arrival_notification(tx, target_time)
-            pending.append((target_time, payload))
-
-    async def _clock_emitter():
-        while True:
-            await asyncio.sleep(0.1)
-            if not _state.running:
-                continue
-            now = _state.sim_time
-            due = [(t, p) for (t, p) in pending if t <= now]
-            for item in due:
-                pending.remove(item)
-                await broker.publish(ARRIVAL_NOTIFICATION, item[1])
-
-    await asyncio.gather(_schedule_listener(), _clock_emitter())
+    while True:
+        tx = await q.get()
+        asyncio.create_task(_schedule(tx))
 
 
 # ── Release Factory (GREEN path) ─────────────────────────────────────────────
@@ -1098,12 +1076,14 @@ def sim_status():
 def sim_start():
     from lib.config import SIM_END_DT
     from lib.event_store import flush_events
+    from lib.alarm_checker import bootstrap_scenario_alarm
     if state.sim_time >= SIM_END_DT:
         return {"ok": False, "reason": "simulation already finished — reset first"}
-    # Flush persisted events on first launch (fired_count == 0).
+    # Flush persisted events and bootstrap alarm on first launch (fired_count == 0).
     # Pause → resume does not flush (fired_count > 0 at that point).
     if state.fired_count == 0:
         flush_events()
+        bootstrap_scenario_alarm()
     state.running = True
     return {"ok": True, "status": state.to_dict()}
 
@@ -1134,6 +1114,7 @@ def sim_speed(payload: SpeedPayload):
 def sim_reset():
     from lib.event_store import flush_events
     from lib.seeder import seed_european_custom_db
+    from lib.alarm_checker import bootstrap_scenario_alarm
     state.reset()
     reset_simulation_db()
     reset_alarms()          # removes March+ rows, keeps Sep–Feb history
@@ -1141,6 +1122,7 @@ def sim_reset():
     # Re-seed historical data if it was wiped (e.g. first run or manual DB delete)
     if historical_transaction_count() == 0:
         seed_european_custom_db()
+    bootstrap_scenario_alarm()   # pre-seed SUP001→IE alarm from day 1
     _live_queue.clear()
     _live_alarms.clear()
     _agent_processing.clear()

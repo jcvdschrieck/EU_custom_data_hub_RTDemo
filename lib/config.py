@@ -18,9 +18,11 @@ SIM_START_DT  = datetime.fromisoformat(SIM_START_STR).replace(tzinfo=timezone.ut
 SIM_END_DT    = datetime.fromisoformat(SIM_END_STR).replace(tzinfo=timezone.utc)
 
 # Speed: simulated minutes that advance per real second
-# 120 → 2 sim-hours/real-sec → full March plays in ~6 real minutes
-DEFAULT_SPEED = 120.0
+# 50  → full March plays in ~15 real minutes  (default)
+# 150 → full March plays in  ~5 real minutes
+# 900 → full March plays in  ~50 real seconds
+DEFAULT_SPEED = 50.0
 MIN_SPEED     = 1.0
-MAX_SPEED     = 2880.0
+MAX_SPEED     = 1500.0
 
 QUEUE_SIZE = 30   # transactions shown in live queue

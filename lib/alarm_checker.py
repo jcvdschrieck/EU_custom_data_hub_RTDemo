@@ -238,3 +238,49 @@ def check_alarm(tx: dict) -> dict | None:
         "active":           1,
     }
     return {"suspicious": True, "alarm_id": alarm_id, "new_alarm": new_alarm}
+
+
+# ── Bootstrap helper ──────────────────────────────────────────────────────────
+
+def bootstrap_scenario_alarm() -> None:
+    """
+    Pre-seed the VAT ratio alarm for the TechZone GmbH (SUP001) → IE scenario
+    so that flagging begins from the very first simulation transaction.
+
+    Called at sim_start (fired_count == 0) and after sim_reset.
+    Uses the actual historical ratio in the European Custom DB (Sep 2025 – Feb 2026)
+    and models the fraudulent current ratio as near-zero (0% VAT applied).
+    """
+    SUPPLIER_ID   = "SUP001"
+    SUPPLIER_NAME = "TechZone GmbH"
+    BUYER_COUNTRY = "IE"
+    ALARM_KEY     = f"{SUPPLIER_ID}|{BUYER_COUNTRY}"
+
+    # Do not double-insert if already active
+    if _get_active_alarm(ALARM_KEY, "2026-03-01T00:00:00"):
+        return
+
+    # 8-week historical window as the alarm_checker would compute for sim day 1
+    # (63 → 7 days before 2026-03-01)
+    hist_from = "2025-12-28T00:00:00"
+    hist_to   = "2026-02-22T00:00:00"
+    hist = _vat_ratio(SUPPLIER_ID, BUYER_COUNTRY, hist_from, hist_to)
+    if not hist or hist["count"] < MIN_HISTORICAL_TX:
+        return   # Historical data not seeded yet — cannot bootstrap
+
+    ratio_hist = hist["ratio"]
+    ratio_curr = 0.001   # near-zero: fraudulent 0%-VAT transactions
+    deviation  = abs(ratio_curr - ratio_hist) / ratio_hist if ratio_hist else 0.0
+
+    _insert_alarm(
+        alarm_key        = ALARM_KEY,
+        supplier_id      = SUPPLIER_ID,
+        supplier_name    = SUPPLIER_NAME,
+        buyer_country    = BUYER_COUNTRY,
+        trigger_tx_id    = "bootstrap",
+        raised_at        = "2026-02-28T00:00:00",
+        expires_at       = "2026-04-07T00:00:00",   # covers full simulation + 7 days
+        ratio_current    = round(ratio_curr, 6),
+        ratio_historical = round(ratio_hist, 6),
+        deviation_pct    = round(deviation * 100, 1),
+    )
