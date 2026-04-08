@@ -173,7 +173,7 @@ def insert_transaction(row: dict) -> None:
     with conn:
         conn.execute(
             """
-            INSERT OR IGNORE INTO transactions
+            INSERT INTO transactions
             (transaction_id, transaction_date, seller_id, seller_name,
              seller_country, item_description, item_category,
              value, vat_rate, vat_amount, buyer_country,
@@ -183,6 +183,15 @@ def insert_transaction(row: dict) -> None:
              :seller_country, :item_description, :item_category,
              :value, :vat_rate, :vat_amount, :buyer_country,
              :correct_vat_rate, :has_error, :xml_message, :created_at)
+            ON CONFLICT(transaction_id) DO UPDATE SET
+              transaction_date  = excluded.transaction_date,
+              seller_name       = excluded.seller_name,
+              item_description  = excluded.item_description,
+              value             = excluded.value,
+              vat_rate          = excluded.vat_rate,
+              vat_amount        = excluded.vat_amount,
+              correct_vat_rate  = excluded.correct_vat_rate,
+              has_error         = excluded.has_error
             """,
             row,
         )
@@ -349,6 +358,16 @@ def get_vat_metrics(
 
 # ── Simulation DB ─────────────────────────────────────────────────────────────
 
+def get_next_sim_transaction() -> dict | None:
+    """Return the single next unfired transaction in chronological order."""
+    conn = _connect(SIMULATION_DB)
+    row = conn.execute(
+        "SELECT * FROM transactions WHERE fired=0 ORDER BY transaction_date LIMIT 1"
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
 def get_pending_sim_transactions(up_to_date: str, batch: int = 100) -> list[dict]:
     """Return unfired simulation transactions whose date <= up_to_date."""
     conn = _connect(SIMULATION_DB)
@@ -428,9 +447,18 @@ def get_suspicious_transactions(limit: int = 50) -> list[dict]:
 
 
 def reset_alarms() -> None:
-    """Clear all alarms, suspicious flags, agent log and ireland queue (simulation reset)."""
+    """
+    Prepare the European Custom DB for a fresh simulation run:
+      - Remove simulation-period transactions (≥ 2026-03-01) so the pipeline
+        can re-insert them with updated risk scores.
+      - Clear alarms, agent log and ireland queue.
+      - Reset suspicious flags on the retained historical records.
+    Historical rows (Sep 2025 – Feb 2026) are kept intact as baseline context.
+    """
+    from lib.config import SIM_START_STR
     conn = _connect(EUROPEAN_CUSTOM_DB)
     with conn:
+        conn.execute("DELETE FROM transactions WHERE transaction_date >= ?", (SIM_START_STR,))
         conn.execute("DELETE FROM alarms")
         conn.execute("DELETE FROM agent_log")
         conn.execute("DELETE FROM ireland_queue")
@@ -438,6 +466,17 @@ def reset_alarms() -> None:
             "UPDATE transactions SET suspicious=0, alarm_id=NULL, suspicion_level=NULL"
         )
     conn.close()
+
+
+def historical_transaction_count() -> int:
+    """Number of pre-simulation transactions in the European Custom DB."""
+    from lib.config import SIM_START_STR
+    conn = _connect(EUROPEAN_CUSTOM_DB)
+    n = conn.execute(
+        "SELECT COUNT(*) FROM transactions WHERE transaction_date < ?", (SIM_START_STR,)
+    ).fetchone()[0]
+    conn.close()
+    return n
 
 
 # ── Agent log ─────────────────────────────────────────────────────────────────

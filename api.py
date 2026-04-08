@@ -100,7 +100,7 @@ from pydantic import BaseModel
 from lib.broker import (
     broker,
     SALES_ORDER_EVENT, RT_RISK_1_OUTCOME, RT_RISK_2_OUTCOME,
-    RT_SCORE, ORDER_VALIDATION, RELEASE_EVENT,
+    RT_SCORE, ORDER_VALIDATION, ARRIVAL_NOTIFICATION, RELEASE_EVENT,
 )
 from lib.config import DEFAULT_SPEED, MIN_SPEED, MAX_SPEED, QUEUE_SIZE
 from lib.database import (
@@ -116,6 +116,7 @@ from lib.database import (
     get_suspicious_transactions,
     expire_old_alarms,
     reset_alarms,
+    historical_transaction_count,
     flag_transaction_suspicious,
     insert_agent_log,
     get_agent_log,
@@ -141,13 +142,12 @@ _agent_queue:      asyncio.Queue | None = None  # populated by POST /api/agent/a
 
 async def _fire_transactions(rows: list[dict]) -> None:
     """
-    Entry point called by the simulation loop.
-    Publishes each transaction individually to the Sales-order Event Broker.
-    The 120 ms delay ensures clients receive messages one by one via SSE.
+    Entry point called by the simulation loop (always called with a single row).
+    Publishes the transaction to the Sales-order Event Broker.
+    Inter-event pacing is handled entirely by the simulation loop.
     """
     for row in rows:
         await broker.publish(SALES_ORDER_EVENT, row)
-        await asyncio.sleep(0.12)
 
 
 # ── RT Risk Monitoring 1 Factory (VAT ratio deviation) ───────────────────────
@@ -305,19 +305,76 @@ async def _order_validation_factory() -> None:
         })
 
 
+# ── Arrival Notification Factory ─────────────────────────────────────────────
+
+async def _arrival_notification_factory() -> None:
+    """
+    Subscribes to Sales-order Event Broker.
+    For each sales order, schedules an arrival notification after an
+    exponentially-distributed sim-time delay (mean = 12 sim-hours, cap 48h).
+    Monitors state.sim_time and publishes to ARRIVAL_NOTIFICATION when due.
+    No visual link to the sales order broker is shown in the UI.
+    """
+    import random
+    from lib.simulator import state as _state
+
+    MEAN_SIM_HOURS = 12.0
+    MAX_SIM_HOURS  = 48.0
+
+    # pending: list of (target_sim_datetime, payload)
+    pending: list[tuple[datetime, dict]] = []
+
+    q = broker.subscribe(SALES_ORDER_EVENT)
+
+    async def _schedule_listener():
+        while True:
+            tx = await q.get()
+            tx_time_str = tx.get("transaction_date", "")
+            try:
+                tx_time = datetime.fromisoformat(tx_time_str)
+                if tx_time.tzinfo is None:
+                    tx_time = tx_time.replace(tzinfo=timezone.utc)
+            except Exception:
+                tx_time = _state.sim_time
+            delay_hours = min(random.expovariate(1.0 / MEAN_SIM_HOURS), MAX_SIM_HOURS)
+            from datetime import timedelta
+            target_time = tx_time + timedelta(hours=delay_hours)
+            payload = {
+                "sales_order_id":   tx.get("transaction_id") or tx.get("sales_order_id"),
+                "transaction_id":   tx.get("transaction_id") or tx.get("sales_order_id"),
+                "arrival_notif_at": target_time.isoformat(),
+                "seller_id":        tx.get("seller_id"),
+                "buyer_country":    tx.get("buyer_country"),
+            }
+            pending.append((target_time, payload))
+
+    async def _clock_emitter():
+        while True:
+            await asyncio.sleep(0.1)
+            if not _state.running:
+                continue
+            now = _state.sim_time
+            due = [(t, p) for (t, p) in pending if t <= now]
+            for item in due:
+                pending.remove(item)
+                await broker.publish(ARRIVAL_NOTIFICATION, item[1])
+
+    await asyncio.gather(_schedule_listener(), _clock_emitter())
+
+
 # ── Release Factory ───────────────────────────────────────────────────────────
 
 async def _release_factory() -> None:
     """
-    Subscribes to Order_validation_broker AND RT_score_broker.
-    Correlates both by transaction_id, combines the payloads, and
-    publishes the enriched release message to Release_Event_Broker.
+    Subscribes to Order_validation_broker, RT_score_broker, and
+    Arrival_notification_broker.
+    Correlates all three by transaction_id and publishes to Release_Event_Broker.
     """
     _buffer: dict[str, dict] = {}
 
     async def _emit_if_ready(tx_id: str) -> None:
         entry = _buffer.get(tx_id, {})
-        if "validation" not in entry or "score" not in entry:
+        if "validation" not in entry or "score" not in entry or "arrival" not in entry:
             return
         del _buffer[tx_id]
 
@@ -351,7 +408,16 @@ async def _release_factory() -> None:
             _buffer.setdefault(tx_id, {})["score"] = item
             await _emit_if_ready(tx_id)
 
-    await asyncio.gather(_drain_validation(), _drain_score())
+    async def _drain_arrival() -> None:
+        q = broker.subscribe(ARRIVAL_NOTIFICATION)
+        while True:
+            item = await q.get()
+            tx_id = item.get("transaction_id") or item.get("sales_order_id")
+            if tx_id:
+                _buffer.setdefault(tx_id, {})["arrival"] = item
+                await _emit_if_ready(tx_id)
+
+    await asyncio.gather(_drain_validation(), _drain_score(), _drain_arrival())
 
 
 # ── DB Store Worker (subscriber of Release_Event_Broker) ─────────────────────
@@ -496,6 +562,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_RT_risk_monitoring_2_factory())
     asyncio.create_task(_RT_consolidation_factory())
     asyncio.create_task(_order_validation_factory())
+    asyncio.create_task(_arrival_notification_factory())
     asyncio.create_task(_release_factory())
     asyncio.create_task(_db_store_worker())
     asyncio.create_task(_agent_worker())
@@ -673,6 +740,33 @@ def api_ireland_case(transaction_id: str):
 
 # ── Simulation control ────────────────────────────────────────────────────────
 
+@app.get("/api/simulation/pipeline")
+def sim_pipeline():
+    """Return per-topic event counts (persisted files) and live broker queue sizes."""
+    from lib.event_store import event_count, count_field_value
+    from lib.broker import (
+        SALES_ORDER_EVENT, RT_RISK_1_OUTCOME, RT_RISK_2_OUTCOME,
+        RT_SCORE, ORDER_VALIDATION, ARRIVAL_NOTIFICATION, RELEASE_EVENT,
+        broker as _broker,
+    )
+    topics = [
+        SALES_ORDER_EVENT, RT_RISK_1_OUTCOME, RT_RISK_2_OUTCOME,
+        RT_SCORE, ORDER_VALIDATION, ARRIVAL_NOTIFICATION, RELEASE_EVENT,
+    ]
+    return {
+        "events": {t: event_count(t) for t in topics},
+        "queues": {t: _broker.qsize(t) for t in topics},
+        "stored_count": get_transaction_count(),
+        "risk_flags": {
+            "rt_risk_1_flagged": count_field_value(RT_RISK_1_OUTCOME, "flagged", True),
+            "rt_risk_2_flagged": count_field_value(RT_RISK_2_OUTCOME, "flagged", True),
+            "rt_score_green":    count_field_value(RT_SCORE, "risk_score", "green"),
+            "rt_score_amber":    count_field_value(RT_SCORE, "risk_score", "amber"),
+            "rt_score_red":      count_field_value(RT_SCORE, "risk_score", "red"),
+        },
+    }
+
+
 @app.get("/api/simulation/status")
 def sim_status():
     counts = get_sim_counts()
@@ -687,8 +781,13 @@ def sim_status():
 @app.post("/api/simulation/start")
 def sim_start():
     from lib.config import SIM_END_DT
+    from lib.event_store import flush_events
     if state.sim_time >= SIM_END_DT:
         return {"ok": False, "reason": "simulation already finished — reset first"}
+    # Flush persisted events on first launch (fired_count == 0).
+    # Pause → resume does not flush (fired_count > 0 at that point).
+    if state.fired_count == 0:
+        flush_events()
     state.running = True
     return {"ok": True, "status": state.to_dict()}
 
@@ -717,9 +816,15 @@ def sim_speed(payload: SpeedPayload):
 
 @app.post("/api/simulation/reset")
 def sim_reset():
+    from lib.event_store import flush_events
+    from lib.seeder import seed_european_custom_db
     state.reset()
     reset_simulation_db()
-    reset_alarms()
+    reset_alarms()          # removes March+ rows, keeps Sep–Feb history
+    flush_events()
+    # Re-seed historical data if it was wiped (e.g. first run or manual DB delete)
+    if historical_transaction_count() == 0:
+        seed_european_custom_db()
     _live_queue.clear()
     _live_alarms.clear()
     _agent_processing.clear()
@@ -744,9 +849,29 @@ def catalog_countries():
     return [{"code": k, "name": v} for k, v in COUNTRY_NAMES.items()]
 
 
-# ── Ireland app static files (must be last) ───────────────────────────────────
+# ── Ireland app static files ──────────────────────────────────────────────────
 
 _ireland_app_dir = Path(__file__).parent / "ireland_app"
 if _ireland_app_dir.exists():
     app.mount("/ireland-app", StaticFiles(directory=str(_ireland_app_dir), html=True),
               name="ireland_app")
+
+
+# ── Main frontend (must be absolutely last) ───────────────────────────────────
+# Serves the Vite build.  Static assets (JS/CSS) are served directly;
+# all other GET requests fall back to index.html for client-side routing.
+
+_frontend_dist = Path(__file__).parent / "frontend" / "dist"
+
+if _frontend_dist.exists():
+    from fastapi.responses import FileResponse as _FileResponse
+
+    app.mount("/assets", StaticFiles(directory=str(_frontend_dist / "assets")),
+              name="frontend_assets")
+
+    @app.get("/{full_path:path}")
+    async def _spa_fallback(full_path: str):
+        candidate = _frontend_dist / full_path
+        if candidate.is_file():
+            return _FileResponse(str(candidate))
+        return _FileResponse(str(_frontend_dist / "index.html"))

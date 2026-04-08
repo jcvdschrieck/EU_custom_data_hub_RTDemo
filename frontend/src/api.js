@@ -4,8 +4,9 @@ const http = axios.create({ baseURL: '' })
 
 // ── Queue & simulation ────────────────────────────────────────────────────────
 export const getQueue       = ()       => http.get('/api/queue').then(r => r.data)
-export const getSimStatus   = ()       => http.get('/api/simulation/status').then(r => r.data)
-export const simStart       = ()       => http.post('/api/simulation/start').then(r => r.data)
+export const getSimStatus     = ()       => http.get('/api/simulation/status').then(r => r.data)
+export const getPipelineStats = ()       => http.get('/api/simulation/pipeline').then(r => r.data)
+export const simStart         = ()       => http.post('/api/simulation/start').then(r => r.data)
 export const simPause       = ()       => http.post('/api/simulation/pause').then(r => r.data)
 export const simResume      = ()       => http.post('/api/simulation/resume').then(r => r.data)
 export const simReset       = ()       => http.post('/api/simulation/reset').then(r => r.data)

@@ -63,46 +63,64 @@ state = SimState()
 
 async def simulation_loop(fire_callback) -> None:
     """
-    Tick every 50 ms. When running, advance simulated time and fire any
-    pending transactions whose timestamp has passed.
+    Event-driven simulation loop — fires exactly one transaction at a time.
 
-    fire_callback(rows) must be an async coroutine function that writes rows
-    to the European Custom DB and pushes them to the live queue.
+    For each event:
+      1. Load the next unfired transaction.
+      2. Compute the real-time delay proportional to the simulated time gap
+         between the current clock and that event's timestamp.
+      3. Sleep (in 50 ms slices so pause/speed changes take effect promptly).
+      4. Advance the simulated clock to the event timestamp and fire it.
+
+    Speed semantics: sim-minutes per real-second.
+      120  → 2 sim-hours/real-sec  (~6 min for full March)
+      1440 → 1 sim-day/real-sec    (~31 sec for full March)
     """
-    from lib.database import get_pending_sim_transactions, mark_fired, get_sim_counts
+    from lib.database import get_next_sim_transaction, mark_fired, get_sim_counts
 
     state.total_count = get_sim_counts()["total"]
+
+    _next_tx: dict | None = None      # pre-loaded next event
+    _wait_start: float | None = None  # real monotonic time when we started waiting
 
     while True:
         await asyncio.sleep(0.05)
 
         if not state.running:
-            state.last_tick = None
+            # On pause: keep _next_tx so we resume on the same event,
+            # but reset _wait_start so the inter-event delay restarts.
+            _wait_start = None
             continue
 
-        now = time.monotonic()
-        if state.last_tick is None:
-            state.last_tick = now
-            continue
+        # ── Load next event if needed ──────────────────────────────────────────
+        if _next_tx is None:
+            _next_tx = get_next_sim_transaction()
+            if _next_tx is None:
+                state.sim_time = SIM_END_DT
+                state.running  = False
+                continue
+            _wait_start = time.monotonic()
 
-        # Advance simulated clock
-        elapsed_real   = now - state.last_tick
-        state.last_tick = now
-        advance_sec     = elapsed_real * state.speed * 60    # speed is sim-min/real-sec
-        state.sim_time  = state.sim_time + timedelta(seconds=advance_sec)
+        elif _wait_start is None:
+            # Resumed after a pause
+            _wait_start = time.monotonic()
 
-        if state.sim_time >= SIM_END_DT:
-            state.sim_time = SIM_END_DT
-            state.running  = False
+        # ── Compute real-time delay for this event ─────────────────────────────
+        next_time = datetime.fromisoformat(_next_tx["transaction_date"])
+        if next_time.tzinfo is None:
+            next_time = next_time.replace(tzinfo=timezone.utc)
 
-        # Fetch due transactions from simulation DB
-        up_to = state.sim_time.strftime("%Y-%m-%dT%H:%M:%S")
-        pending = get_pending_sim_transactions(up_to, batch=5)
+        sim_gap_sec   = max(0.0, (next_time - state.sim_time).total_seconds())
+        real_delay_sec = max(0.05, sim_gap_sec / (state.speed * 60))
 
-        if pending:
-            ids = [r["transaction_id"] for r in pending]
-            mark_fired(ids)
-            await fire_callback(pending)
-            state.fired_count += len(pending)
-            for tx in pending:
-                state.add_recent(tx)
+        if time.monotonic() - _wait_start < real_delay_sec:
+            continue   # not yet — keep waiting
+
+        # ── Fire ──────────────────────────────────────────────────────────────
+        state.sim_time = next_time
+        mark_fired([_next_tx["transaction_id"]])
+        await fire_callback([_next_tx])
+        state.fired_count += 1
+        state.add_recent(_next_tx)
+        _next_tx    = None
+        _wait_start = None

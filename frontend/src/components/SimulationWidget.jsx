@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { getSimStatus, simStart, simPause, simResume, simReset, simSetSpeed } from '../api'
 
 const SPEEDS = [
+  { label: '1×',    value: 1 },
   { label: '30×',   value: 30 },
   { label: '120×',  value: 120 },
   { label: '360×',  value: 360 },

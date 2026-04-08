@@ -619,11 +619,11 @@
 
   <!-- ── Navigation bar ───────────────────────────────────────────────────── -->
   <nav class="revenue-nav">
-    <a href="#" class="active">Investigation Queue</a>
-    <a href="#">Alarm Evidence</a>
-    <a href="#">Case Management</a>
-    <a href="#">Reports</a>
-    <a href="#">Help</a>
+    <a href="#" class="active" data-tab="queue">Investigation Queue</a>
+    <a href="#" data-tab="alarm-evidence">Alarm Evidence</a>
+    <a href="#" data-tab="case-management">Case Management</a>
+    <a href="#" data-tab="reports">Reports</a>
+    <a href="#" data-tab="help">Help</a>
   </nav>
 
   <!-- ── Page content ─────────────────────────────────────────────────────── -->
@@ -700,6 +700,31 @@
       </div>
     </div>
 
+  </main>
+
+  <!-- ── Coming soon panel (hidden by default) ────────────────────────────── -->
+  <main class="page-wrap" id="coming-soon-panel" style="display:none;">
+    <div style="
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      min-height: 340px; text-align: center;
+    ">
+      <div style="font-size: 64px; margin-bottom: 20px; opacity: 0.25;">🚧</div>
+      <h2 id="coming-soon-title" style="font-size: 22px; font-weight: 700; color: #0b0c0c; margin-bottom: 10px;">
+        Section coming soon
+      </h2>
+      <p style="font-size: 15px; color: #505a5f; max-width: 420px; line-height: 1.6;">
+        This section is under development and will be available in a future release of the
+        Automated VAT Compliance System.
+      </p>
+      <div style="
+        margin-top: 28px; padding: 12px 24px;
+        background: #fff8e6; border: 1px solid #f47738; border-radius: 3px;
+        font-size: 13px; color: #6f4000; display: flex; align-items: center; gap: 8px;
+      ">
+        <span style="font-size: 16px;">ℹ️</span>
+        For live case data, use the <strong>Investigation Queue</strong> tab.
+      </div>
+    </div>
   </main>
 
   <!-- ── Footer ───────────────────────────────────────────────────────────── -->
@@ -1087,6 +1112,39 @@
     // Close on Escape key
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') closeDrawer();
+    });
+
+    // ── Tab navigation ────────────────────────────────────────────────────────
+
+    const TAB_LABELS = {
+      'alarm-evidence':  'Alarm Evidence',
+      'case-management': 'Case Management',
+      'reports':         'Reports',
+      'help':            'Help',
+    };
+
+    document.querySelectorAll('.revenue-nav a[data-tab]').forEach(link => {
+      link.addEventListener('click', (e) => {
+        e.preventDefault();
+        const tab = link.dataset.tab;
+
+        // Update active state
+        document.querySelectorAll('.revenue-nav a').forEach(a => a.classList.remove('active'));
+        link.classList.add('active');
+
+        const queueMain    = document.querySelector('main.page-wrap:not(#coming-soon-panel)');
+        const comingSoon   = document.getElementById('coming-soon-panel');
+
+        if (tab === 'queue') {
+          queueMain.style.display = '';
+          comingSoon.style.display = 'none';
+        } else {
+          document.getElementById('coming-soon-title').textContent =
+            (TAB_LABELS[tab] || tab) + ' — Coming Soon';
+          queueMain.style.display = 'none';
+          comingSoon.style.display = '';
+        }
+      });
     });
 
     // ── Bootstrap ────────────────────────────────────────────────────────────

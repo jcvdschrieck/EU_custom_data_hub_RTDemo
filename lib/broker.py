@@ -1,12 +1,19 @@
 """
-In-memory publish-subscribe message broker.
+Sales-order Event Broker and downstream topic brokers.
 
-Topics used in EU Custom Data Hub
-──────────────────────────────────
-"incoming"      raw transaction dict — published by the simulation loop
-"stored"        same dict — published by the DB-store worker after INSERT
-"alarm_fired"   {"tx": dict, "alarm_id": int, "alarm": dict | None}
-                published by the alarm worker when a transaction is flagged
+Every published message is:
+  1. Enriched with a sales_order_id (= originating transaction_id) so any
+     downstream consumer can reconcile back to the initial sales order.
+  2. Persisted as a JSON file via lib.event_store before fan-out to subscribers.
+
+Topics
+──────
+SALES_ORDER_EVENT   simulation loop → risk factories + order validation
+RT_RISK_1_OUTCOME   VAT-ratio factory    → RT consolidation factory
+RT_RISK_2_OUTCOME   watchlist factory    → RT consolidation factory
+RT_SCORE            consolidation        → release factory
+ORDER_VALIDATION    order validation     → release factory
+RELEASE_EVENT       release factory      → DB store worker
 """
 from __future__ import annotations
 
@@ -14,10 +21,32 @@ import asyncio
 from collections import defaultdict
 
 
+def _inject_sales_order_id(message: dict) -> None:
+    """
+    Ensure every message carries sales_order_id at the top level.
+    Derived from the first available source in priority order:
+      existing sales_order_id → top-level transaction_id → tx.sales_order_id → tx.transaction_id
+    Mutates the dict in-place so the field propagates to all subscribers.
+    """
+    if message.get("sales_order_id"):
+        return
+    soid = (
+        message.get("transaction_id")
+        or (message.get("tx") or {}).get("sales_order_id")
+        or (message.get("tx") or {}).get("transaction_id")
+    )
+    if soid:
+        message["sales_order_id"] = soid
+
+
 class MessageBroker:
     """
     Simple fan-out broker.  Each call to subscribe() returns an independent
-    asyncio.Queue so every subscriber receives every message on the topic.
+    asyncio.Queue so every subscriber receives every message on that topic.
+
+    Before delivering, every message is:
+      • enriched with sales_order_id (reconciliation key)
+      • written to data/events/<topic>/ as a JSON file
     """
 
     def __init__(self) -> None:
@@ -39,13 +68,22 @@ class MessageBroker:
 
     # ── Publishing ────────────────────────────────────────────────────────────
 
-    async def publish(self, topic: str, message) -> None:
-        """Deliver *message* to every subscriber of *topic* (back-pressured)."""
+    async def publish(self, topic: str, message: dict) -> None:
+        """
+        Enrich → persist → fan-out.
+        Delivers *message* to every subscriber queue for *topic*.
+        """
+        from lib.event_store import write_event
+        _inject_sales_order_id(message)
+        write_event(topic, message)
         for q in self._queues[topic]:
             await q.put(message)
 
-    def publish_nowait(self, topic: str, message) -> None:
+    def publish_nowait(self, topic: str, message: dict) -> None:
         """Non-blocking publish; silently drops for any full subscriber queue."""
+        from lib.event_store import write_event
+        _inject_sales_order_id(message)
+        write_event(topic, message)
         for q in self._queues[topic]:
             try:
                 q.put_nowait(message)
@@ -64,12 +102,13 @@ class MessageBroker:
 
 # ── Topic name constants ──────────────────────────────────────────────────────
 
-SALES_ORDER_EVENT  = "sales_order_event"   # simulation → all risk factories + order validation
-RT_RISK_1_OUTCOME  = "rt_risk_1_outcome"   # VAT-ratio factory → consolidation
-RT_RISK_2_OUTCOME  = "rt_risk_2_outcome"   # watchlist factory  → consolidation
-RT_SCORE           = "rt_score"            # consolidation → release factory
-ORDER_VALIDATION   = "order_validation"    # order validation   → release factory
-RELEASE_EVENT      = "release_event"       # release factory    → db store worker
+SALES_ORDER_EVENT    = "sales_order_event"     # simulation → all risk factories + order validation
+RT_RISK_1_OUTCOME    = "rt_risk_1_outcome"   # VAT-ratio factory   → consolidation
+RT_RISK_2_OUTCOME    = "rt_risk_2_outcome"   # watchlist factory   → consolidation
+RT_SCORE             = "rt_score"            # consolidation       → release factory
+ORDER_VALIDATION     = "order_validation"    # order validation    → release factory
+ARRIVAL_NOTIFICATION = "arrival_notification"  # delayed arrival notif → release factory
+RELEASE_EVENT        = "release_event"       # release factory     → DB store worker
 
 
 # ── Singleton used across api.py and workers ─────────────────────────────────
