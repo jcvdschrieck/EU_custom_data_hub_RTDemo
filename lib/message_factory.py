@@ -50,6 +50,11 @@ _TOPIC_RT_SCORE       = "rt_score"
 _TOPIC_ORDER_VAL      = "order_validation"
 _TOPIC_ARRIVAL        = "arrival_notification"
 _TOPIC_RELEASE        = "release_event"
+_TOPIC_RETAIN         = "retain_event"
+_TOPIC_INVESTIGATE    = "investigate_event"
+_TOPIC_AGENT_RETAIN   = "agent_retain_event"
+_TOPIC_AGENT_RELEASE  = "agent_release_event"
+_TOPIC_RELEASE_AFTER  = "release_after_investigation_event"
 
 # Flat fields that are internal-only and should be stripped from file payloads
 _INTERNAL_FLAT_FIELDS = frozenset({
@@ -265,6 +270,19 @@ def build_file_payload(topic: str, message: dict) -> dict:
             "validated":  message.get("validated"),
             "risk_score": message.get("risk_score"),
         }
+    elif topic == _TOPIC_RETAIN:
+        outcome = {"risk_score": message.get("risk_score", "red")}
+    elif topic == _TOPIC_INVESTIGATE:
+        outcome = {
+            "risk_score": message.get("risk_score", "amber"),
+            "validated":  message.get("validated"),
+        }
+    elif topic == _TOPIC_AGENT_RETAIN:
+        outcome = {"verdict": message.get("verdict"), "risk_score": "retained"}
+    elif topic == _TOPIC_AGENT_RELEASE:
+        outcome = {"verdict": message.get("verdict")}
+    elif topic == _TOPIC_RELEASE_AFTER:
+        outcome = {"verdict": message.get("verdict"), "risk_score": "cleared"}
     else:
         outcome = {}
 

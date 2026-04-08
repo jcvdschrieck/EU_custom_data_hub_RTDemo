@@ -108,13 +108,18 @@ class MessageBroker:
 
 # ── Topic name constants ──────────────────────────────────────────────────────
 
-SALES_ORDER_EVENT    = "sales_order_event"     # simulation → all risk factories + order validation
-RT_RISK_1_OUTCOME    = "rt_risk_1_outcome"   # VAT-ratio factory   → consolidation
-RT_RISK_2_OUTCOME    = "rt_risk_2_outcome"   # watchlist factory   → consolidation
-RT_SCORE             = "rt_score"            # consolidation       → release factory
-ORDER_VALIDATION     = "order_validation"    # order validation    → release factory
-ARRIVAL_NOTIFICATION = "arrival_notification"  # delayed arrival notif → release factory
-RELEASE_EVENT        = "release_event"       # release factory     → DB store worker
+SALES_ORDER_EVENT    = "sales_order_event"      # simulation → risk factories + order validation
+RT_RISK_1_OUTCOME    = "rt_risk_1_outcome"    # VAT-ratio factory      → consolidation
+RT_RISK_2_OUTCOME    = "rt_risk_2_outcome"    # watchlist factory      → consolidation
+RT_SCORE             = "rt_score"             # consolidation          → routing factories
+ORDER_VALIDATION     = "order_validation"     # validation factory     → routing factories
+ARRIVAL_NOTIFICATION = "arrival_notification" # arrival factory        → routing + release factories
+RELEASE_EVENT        = "release_event"        # green path             → DB store worker
+RETAIN_EVENT         = "retain_event"         # red path (immediate)   → DB store worker
+INVESTIGATE_EVENT    = "investigate_event"    # amber path             → investigator factory
+AGENT_RETAIN_EVENT   = "agent_retain_event"   # agent: incorrect       → DB store worker
+AGENT_RELEASE_EVENT  = "agent_release_event"  # agent: correct/uncertain → release-after-inv factory
+RELEASE_AFTER_INVESTIGATION_EVENT = "release_after_investigation_event"  # cleared → DB store worker
 
 
 # ── Singleton used across api.py and workers ─────────────────────────────────

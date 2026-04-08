@@ -100,7 +100,9 @@ from pydantic import BaseModel
 from lib.broker import (
     broker,
     SALES_ORDER_EVENT, RT_RISK_1_OUTCOME, RT_RISK_2_OUTCOME,
-    RT_SCORE, ORDER_VALIDATION, ARRIVAL_NOTIFICATION, RELEASE_EVENT,
+    RT_SCORE, ORDER_VALIDATION, ARRIVAL_NOTIFICATION,
+    RELEASE_EVENT, RETAIN_EVENT, INVESTIGATE_EVENT,
+    AGENT_RETAIN_EVENT, AGENT_RELEASE_EVENT, RELEASE_AFTER_INVESTIGATION_EVENT,
 )
 from lib.config import DEFAULT_SPEED, MIN_SPEED, MAX_SPEED, QUEUE_SIZE
 from lib.database import (
@@ -131,11 +133,12 @@ from lib.catalog import SUPPLIERS, COUNTRY_NAMES
 
 # ── In-memory state ───────────────────────────────────────────────────────────
 
-_live_queue:       deque[dict]        = deque(maxlen=QUEUE_SIZE)
-_live_alarms:      list[dict]         = []
-_agent_processing: dict[str, dict]    = {}   # tx_id → snapshot while analysing
-_sse_queues:       set[asyncio.Queue] = set()
-_agent_queue:      asyncio.Queue | None = None  # populated by POST /api/agent/analyse
+_live_queue:          deque[dict]        = deque(maxlen=QUEUE_SIZE)
+_live_alarms:         list[dict]         = []
+_agent_processing:    dict[str, dict]    = {}   # tx_id → snapshot while analysing
+_sse_queues:          set[asyncio.Queue] = set()
+_agent_queue:         asyncio.Queue | None = None  # manual POST /api/agent/analyse
+_investigation_queue: asyncio.Queue | None = None  # automatic investigation pipeline
 
 
 # ── Simulation: publish to Sales-order Event Broker ──────────────────────────
@@ -362,34 +365,32 @@ async def _arrival_notification_factory() -> None:
     await asyncio.gather(_schedule_listener(), _clock_emitter())
 
 
-# ── Release Factory ───────────────────────────────────────────────────────────
+# ── Release Factory (GREEN path) ─────────────────────────────────────────────
 
 async def _release_factory() -> None:
     """
-    Subscribes to Order_validation_broker, RT_score_broker, and
-    Arrival_notification_broker.
-    Correlates all three by transaction_id and publishes to Release_Event_Broker.
+    GREEN path: validation + green RT score + arrival notification → RELEASE_EVENT.
+    Non-green scores are ignored (handled by _retain_factory / _investigate_dispatch_factory).
     """
     _buffer: dict[str, dict] = {}
+    _skip:   set[str]        = set()
 
     async def _emit_if_ready(tx_id: str) -> None:
         entry = _buffer.get(tx_id, {})
         if "validation" not in entry or "score" not in entry or "arrival" not in entry:
             return
         del _buffer[tx_id]
-
-        val   = entry["validation"]
-        score = entry["score"]
-
+        _skip.discard(tx_id)
+        val, score = entry["validation"], entry["score"]
         await broker.publish(RELEASE_EVENT, {
-            "tx":               val["tx"],
-            "validated":        val["validated"],
+            "tx":                val["tx"],
+            "validated":         val["validated"],
             "validation_errors": val["validation_errors"],
-            "risk_score":       score["risk_score"],
-            "risk_1_flagged":   score["risk_1_flagged"],
-            "risk_2_flagged":   score["risk_2_flagged"],
-            "alarm_id":         score["alarm_id"],
-            "alarm":            score["alarm"],
+            "risk_score":        score["risk_score"],
+            "risk_1_flagged":    score["risk_1_flagged"],
+            "risk_2_flagged":    score["risk_2_flagged"],
+            "alarm_id":          score["alarm_id"],
+            "alarm":             score["alarm"],
         })
 
     async def _drain_validation() -> None:
@@ -397,16 +398,21 @@ async def _release_factory() -> None:
         while True:
             item = await q.get()
             tx_id = item["tx"]["transaction_id"]
-            _buffer.setdefault(tx_id, {})["validation"] = item
-            await _emit_if_ready(tx_id)
+            if tx_id not in _skip:
+                _buffer.setdefault(tx_id, {})["validation"] = item
+                await _emit_if_ready(tx_id)
 
     async def _drain_score() -> None:
         q = broker.subscribe(RT_SCORE)
         while True:
             item = await q.get()
             tx_id = item["tx"]["transaction_id"]
-            _buffer.setdefault(tx_id, {})["score"] = item
-            await _emit_if_ready(tx_id)
+            if item["risk_score"] == "green":
+                _buffer.setdefault(tx_id, {})["score"] = item
+                await _emit_if_ready(tx_id)
+            else:
+                _skip.add(tx_id)
+                _buffer.pop(tx_id, None)
 
     async def _drain_arrival() -> None:
         q = broker.subscribe(ARRIVAL_NOTIFICATION)
@@ -418,51 +424,350 @@ async def _release_factory() -> None:
                 or item.get("sales_order_id")
                 or ((item.get("HouseConsignment") or {}).get("Order") or {}).get("orderIdentifier")
             )
-            if tx_id:
+            if tx_id and tx_id not in _skip:
                 _buffer.setdefault(tx_id, {})["arrival"] = item
                 await _emit_if_ready(tx_id)
 
     await asyncio.gather(_drain_validation(), _drain_score(), _drain_arrival())
 
 
-# ── DB Store Worker (subscriber of Release_Event_Broker) ─────────────────────
+# ── Retain Factory (RED path — immediate) ────────────────────────────────────
+
+async def _retain_factory() -> None:
+    """
+    RED path: red RT score → RETAIN_EVENT immediately, no other conditions needed.
+    """
+    q = broker.subscribe(RT_SCORE)
+    while True:
+        item = await q.get()
+        if item["risk_score"] != "red":
+            continue
+        tx = item["tx"]
+        await broker.publish(RETAIN_EVENT, {
+            "tx":             tx,
+            "risk_score":     "red",
+            "risk_1_flagged": item["risk_1_flagged"],
+            "risk_2_flagged": item["risk_2_flagged"],
+            "alarm_id":       item["alarm_id"],
+            "alarm":          item["alarm"],
+        })
+
+
+# ── Investigate Dispatch Factory (AMBER path) ─────────────────────────────────
+
+async def _investigate_dispatch_factory() -> None:
+    """
+    AMBER path: amber RT score + order validation → INVESTIGATE_EVENT.
+    Non-amber scores are discarded immediately.
+    """
+    _buffer: dict[str, dict] = {}
+    _skip:   set[str]        = set()
+
+    async def _emit_if_ready(tx_id: str) -> None:
+        entry = _buffer.get(tx_id, {})
+        if "validation" not in entry or "score" not in entry:
+            return
+        del _buffer[tx_id]
+        _skip.discard(tx_id)
+        val, score = entry["validation"], entry["score"]
+        await broker.publish(INVESTIGATE_EVENT, {
+            "tx":                val["tx"],
+            "validated":         val["validated"],
+            "validation_errors": val["validation_errors"],
+            "risk_score":        "amber",
+            "alarm_id":          score["alarm_id"],
+            "alarm":             score["alarm"],
+        })
+
+    async def _drain_validation() -> None:
+        q = broker.subscribe(ORDER_VALIDATION)
+        while True:
+            item = await q.get()
+            tx_id = item["tx"]["transaction_id"]
+            if tx_id not in _skip:
+                _buffer.setdefault(tx_id, {})["validation"] = item
+                await _emit_if_ready(tx_id)
+
+    async def _drain_score() -> None:
+        q = broker.subscribe(RT_SCORE)
+        while True:
+            item = await q.get()
+            tx_id = item["tx"]["transaction_id"]
+            if item["risk_score"] == "amber":
+                _buffer.setdefault(tx_id, {})["score"] = item
+                await _emit_if_ready(tx_id)
+            else:
+                _skip.add(tx_id)
+                _buffer.pop(tx_id, None)
+
+    await asyncio.gather(_drain_validation(), _drain_score())
+
+
+# ── Investigator Factory ──────────────────────────────────────────────────────
+
+async def _investigator_factory() -> None:
+    """
+    Subscribes to INVESTIGATE_EVENT.
+    IE-bound orders → pushed to _investigation_queue for VAT agent processing.
+    Non-IE orders   → auto-released via AGENT_RELEASE_EVENT (uncertain verdict).
+    """
+    q = broker.subscribe(INVESTIGATE_EVENT)
+    while True:
+        msg = await q.get()
+        tx = msg["tx"]
+        buyer_country = tx.get("buyer_country") or (
+            (tx.get("CountryOfDestination") or {}).get("country", "")
+        )
+        item = {"tx": tx, "alarm": msg.get("alarm", {})}
+        if buyer_country == "IE" and _investigation_queue is not None:
+            await _investigation_queue.put(item)
+        else:
+            # Non-IE amber orders: auto-release without deep investigation
+            await broker.publish(AGENT_RELEASE_EVENT, {
+                "tx":               tx,
+                "verdict":          "uncertain",
+                "reasoning":        "Non-IE order: auto-released without deep investigation.",
+                "legislation_refs": [],
+            })
+
+
+# ── Investigation Agent Worker ────────────────────────────────────────────────
+
+async def _investigation_agent_worker() -> None:
+    """
+    Processes _investigation_queue (FIFO) with the VAT fraud detection agent.
+      incorrect        → AGENT_RETAIN_EVENT + ireland_queue + agent_log
+      correct/uncertain → AGENT_RELEASE_EVENT + agent_log
+    """
+    import concurrent.futures
+    from lib.agent_bridge import analyse_transaction_sync
+
+    loop     = asyncio.get_event_loop()
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+
+    while True:
+        item  = await _investigation_queue.get()
+        tx    = item["tx"]
+        alarm = item.get("alarm", {})
+        tx_id = tx["transaction_id"]
+
+        if tx_id in _agent_processing:
+            _investigation_queue.task_done()
+            continue
+
+        _agent_processing[tx_id] = {
+            "transaction_id":   tx_id,
+            "seller_name":      tx.get("seller_name", ""),
+            "item_description": tx.get("item_description", ""),
+            "value":            tx.get("value"),
+            "vat_rate":         tx.get("vat_rate"),
+            "started_at":       datetime.now(timezone.utc).isoformat(),
+            "source":           "investigation_pipeline",
+        }
+
+        try:
+            result           = await loop.run_in_executor(executor, analyse_transaction_sync, tx)
+            verdict          = result.get("verdict", "uncertain")
+            reasoning        = result.get("reasoning", "")
+            legislation_refs = result.get("legislation_refs", [])
+            now_str          = datetime.now(timezone.utc).isoformat()
+
+            insert_agent_log({
+                "transaction_id":   tx_id,
+                "seller_name":      tx.get("seller_name", ""),
+                "buyer_country":    tx.get("buyer_country", ""),
+                "item_description": tx.get("item_description", ""),
+                "item_category":    tx.get("item_category", ""),
+                "value":            tx.get("value"),
+                "vat_rate":         tx.get("vat_rate"),
+                "correct_vat_rate": tx.get("correct_vat_rate"),
+                "verdict":          verdict,
+                "reasoning":        reasoning,
+                "legislation_refs": _json.dumps(legislation_refs),
+                "sent_to_ireland":  1 if verdict == "incorrect" else 0,
+                "processed_at":     now_str,
+            })
+
+            if verdict == "incorrect":
+                update_suspicion_level(tx_id, "high")
+                insert_ireland_queue({
+                    "transaction_id":   tx_id,
+                    "seller_name":      tx.get("seller_name", ""),
+                    "seller_country":   tx.get("seller_country", ""),
+                    "item_description": tx.get("item_description", ""),
+                    "item_category":    tx.get("item_category", ""),
+                    "value":            tx.get("value"),
+                    "vat_rate":         tx.get("vat_rate"),
+                    "correct_vat_rate": tx.get("correct_vat_rate"),
+                    "vat_amount":       tx.get("vat_amount"),
+                    "transaction_date": tx.get("transaction_date", ""),
+                    "alarm_key":        alarm.get("alarm_key", ""),
+                    "deviation_pct":    alarm.get("deviation_pct"),
+                    "ratio_current":    alarm.get("ratio_current"),
+                    "ratio_historical": alarm.get("ratio_historical"),
+                    "agent_verdict":    verdict,
+                    "agent_reasoning":  reasoning,
+                    "queued_at":        now_str,
+                })
+                await broker.publish(AGENT_RETAIN_EVENT, {
+                    "tx":         tx,
+                    "verdict":    verdict,
+                    "reasoning":  reasoning,
+                    "risk_score": "retained",
+                    "alarm_id":   alarm.get("id"),
+                    "alarm":      alarm,
+                })
+            else:
+                clear_suspicious_flag(tx_id)
+                await broker.publish(AGENT_RELEASE_EVENT, {
+                    "tx":               tx,
+                    "verdict":          verdict,
+                    "reasoning":        reasoning,
+                    "legislation_refs": legislation_refs,
+                })
+
+        except Exception as exc:
+            import traceback
+            print(f"[investigation_agent_worker] error: {exc}\n{traceback.format_exc()}")
+            await broker.publish(AGENT_RELEASE_EVENT, {
+                "tx":               tx,
+                "verdict":          "uncertain",
+                "reasoning":        f"Agent error: {exc}",
+                "legislation_refs": [],
+            })
+        finally:
+            _agent_processing.pop(tx_id, None)
+            _investigation_queue.task_done()
+
+
+# ── Release After Investigation Factory ──────────────────────────────────────
+
+async def _release_after_investigation_factory() -> None:
+    """
+    Subscribes to AGENT_RELEASE_EVENT, ORDER_VALIDATION, ARRIVAL_NOTIFICATION.
+    Correlates all three by order identifier → RELEASE_AFTER_INVESTIGATION_EVENT.
+
+    Validation and arrival typically arrive well before the agent verdict, so
+    they are pre-buffered and matched when AGENT_RELEASE_EVENT eventually arrives.
+    """
+    _buffer:          dict[str, dict] = {}
+    _pre_validation:  dict[str, dict] = {}
+    _pre_arrival:     dict[str, dict] = {}
+
+    async def _emit_if_ready(tx_id: str) -> None:
+        entry = _buffer.get(tx_id, {})
+        if "agent_release" not in entry or "validation" not in entry or "arrival" not in entry:
+            return
+        del _buffer[tx_id]
+        ar  = entry["agent_release"]
+        val = entry["validation"]
+        await broker.publish(RELEASE_AFTER_INVESTIGATION_EVENT, {
+            "tx":         ar["tx"],
+            "verdict":    ar.get("verdict"),
+            "reasoning":  ar.get("reasoning"),
+            "validated":  val["validated"],
+            "risk_score": "cleared",
+        })
+
+    async def _drain_agent_release() -> None:
+        q = broker.subscribe(AGENT_RELEASE_EVENT)
+        while True:
+            item  = await q.get()
+            tx_id = item["tx"]["transaction_id"]
+            _buffer[tx_id] = {"agent_release": item}
+            if tx_id in _pre_validation:
+                _buffer[tx_id]["validation"] = _pre_validation.pop(tx_id)
+            if tx_id in _pre_arrival:
+                _buffer[tx_id]["arrival"] = _pre_arrival.pop(tx_id)
+            await _emit_if_ready(tx_id)
+
+    async def _drain_validation() -> None:
+        q = broker.subscribe(ORDER_VALIDATION)
+        while True:
+            item  = await q.get()
+            tx_id = item["tx"]["transaction_id"]
+            if tx_id in _buffer:
+                _buffer[tx_id]["validation"] = item
+                await _emit_if_ready(tx_id)
+            else:
+                _pre_validation[tx_id] = item
+
+    async def _drain_arrival() -> None:
+        q = broker.subscribe(ARRIVAL_NOTIFICATION)
+        while True:
+            item  = await q.get()
+            tx_id = (
+                item.get("orderIdentifier")
+                or item.get("transaction_id")
+                or item.get("sales_order_id")
+                or ((item.get("HouseConsignment") or {}).get("Order") or {}).get("orderIdentifier")
+            )
+            if not tx_id:
+                continue
+            if tx_id in _buffer:
+                _buffer[tx_id]["arrival"] = item
+                await _emit_if_ready(tx_id)
+            else:
+                _pre_arrival[tx_id] = item
+
+    await asyncio.gather(_drain_agent_release(), _drain_validation(), _drain_arrival())
+
+
+# ── DB Store Worker (all terminal event topics) ───────────────────────────────
 
 async def _db_store_worker() -> None:
     """
-    Subscriber of Release_Event_Broker.
-    Persists the fully validated and scored transaction in the European
-    Custom DB, then updates the in-memory live queue and SSE clients.
-    If risk_score is amber or red the suspicious flag is set via identifier.
+    Terminal worker — persists fully processed transactions to the European
+    Custom DB, live queue, and SSE clients.
+
+    Subscribes to all four terminal event topics:
+      RELEASE_EVENT                     — green path  (no suspicious flag)
+      RETAIN_EVENT                      — red path    (suspicious flag set)
+      RELEASE_AFTER_INVESTIGATION_EVENT — cleared     (no suspicious flag)
+      AGENT_RETAIN_EVENT                — retained after investigation (flag set)
     """
-    q = broker.subscribe(RELEASE_EVENT)
-    while True:
-        msg = await q.get()
+    async def _push_sse(row: dict) -> None:
+        if not _sse_queues:
+            return
+        payload = _json.dumps(row)
+        dead    = set()
+        for sse_q in _sse_queues:
+            try:
+                sse_q.put_nowait(payload)
+            except asyncio.QueueFull:
+                dead.add(sse_q)
+        _sse_queues.difference_update(dead)
+
+    async def _store(msg: dict, suspicious: bool) -> None:
         tx         = msg["tx"]
-        risk_score = msg["risk_score"]
+        risk_score = msg.get("risk_score", "green")
         alarm_id   = msg.get("alarm_id")
 
         insert_transaction(tx)
 
-        if risk_score in ("amber", "red"):
+        if suspicious:
             flag_transaction_suspicious(tx["transaction_id"], alarm_id, risk_score)
 
-        # Enrich row for live queue and SSE
         row = dict(tx)
-        row["suspicious"]    = 1 if risk_score in ("amber", "red") else 0
-        row["risk_score"]    = risk_score
-        row["risk_1_flagged"] = msg["risk_1_flagged"]
-        row["risk_2_flagged"] = msg["risk_2_flagged"]
+        row["suspicious"]     = 1 if suspicious else 0
+        row["risk_score"]     = risk_score
+        row["risk_1_flagged"] = msg.get("risk_1_flagged", False)
+        row["risk_2_flagged"] = msg.get("risk_2_flagged", False)
         _live_queue.appendleft(row)
+        await _push_sse(row)
 
-        if _sse_queues:
-            payload = _json.dumps(row)
-            dead = set()
-            for sse_q in _sse_queues:
-                try:
-                    sse_q.put_nowait(payload)
-                except asyncio.QueueFull:
-                    dead.add(sse_q)
-            _sse_queues.difference_update(dead)
+    async def _drain(topic: str, suspicious: bool) -> None:
+        q = broker.subscribe(topic)
+        while True:
+            msg = await q.get()
+            await _store(msg, suspicious)
+
+    await asyncio.gather(
+        _drain(RELEASE_EVENT,                     False),
+        _drain(RETAIN_EVENT,                      True),
+        _drain(RELEASE_AFTER_INVESTIGATION_EVENT,  False),
+        _drain(AGENT_RETAIN_EVENT,                True),
+    )
 
 
 # ── Agent Worker (triggered manually from dashboard) ─────────────────────────
@@ -555,12 +860,13 @@ async def _agent_worker() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _agent_queue
+    global _agent_queue, _investigation_queue
     from lib.database import init_european_custom_db, init_simulation_db
     init_european_custom_db()
     init_simulation_db()
 
-    _agent_queue = asyncio.Queue()
+    _agent_queue         = asyncio.Queue()
+    _investigation_queue = asyncio.Queue()
 
     asyncio.create_task(simulation_loop(_fire_transactions))
     asyncio.create_task(_RT_risk_monitoring_1_factory())
@@ -569,6 +875,11 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_order_validation_factory())
     asyncio.create_task(_arrival_notification_factory())
     asyncio.create_task(_release_factory())
+    asyncio.create_task(_retain_factory())
+    asyncio.create_task(_investigate_dispatch_factory())
+    asyncio.create_task(_investigator_factory())
+    asyncio.create_task(_investigation_agent_worker())
+    asyncio.create_task(_release_after_investigation_factory())
     asyncio.create_task(_db_store_worker())
     asyncio.create_task(_agent_worker())
 
@@ -749,19 +1060,18 @@ def api_ireland_case(transaction_id: str):
 def sim_pipeline():
     """Return per-topic event counts (persisted files) and live broker queue sizes."""
     from lib.event_store import event_count, count_field_value
-    from lib.broker import (
-        SALES_ORDER_EVENT, RT_RISK_1_OUTCOME, RT_RISK_2_OUTCOME,
-        RT_SCORE, ORDER_VALIDATION, ARRIVAL_NOTIFICATION, RELEASE_EVENT,
-        broker as _broker,
-    )
+    from lib.broker import broker as _broker
     topics = [
         SALES_ORDER_EVENT, RT_RISK_1_OUTCOME, RT_RISK_2_OUTCOME,
-        RT_SCORE, ORDER_VALIDATION, ARRIVAL_NOTIFICATION, RELEASE_EVENT,
+        RT_SCORE, ORDER_VALIDATION, ARRIVAL_NOTIFICATION,
+        RELEASE_EVENT, RETAIN_EVENT, INVESTIGATE_EVENT,
+        AGENT_RETAIN_EVENT, AGENT_RELEASE_EVENT, RELEASE_AFTER_INVESTIGATION_EVENT,
     ]
     return {
-        "events": {t: event_count(t) for t in topics},
-        "queues": {t: _broker.qsize(t) for t in topics},
-        "stored_count": get_transaction_count(),
+        "events":             {t: event_count(t) for t in topics},
+        "queues":             {t: _broker.qsize(t) for t in topics},
+        "stored_count":       get_transaction_count(),
+        "investigation_queue": _investigation_queue.qsize() if _investigation_queue else 0,
         "risk_flags": {
             "rt_risk_1_flagged": count_field_value(RT_RISK_1_OUTCOME, "outcome.flagged", True),
             "rt_risk_2_flagged": count_field_value(RT_RISK_2_OUTCOME, "outcome.flagged", True),
@@ -777,9 +1087,10 @@ def sim_status():
     counts = get_sim_counts()
     s = state.to_dict()
     s.update(counts)
-    s["active_alarms"]    = len(get_alarms(active_only=True))
-    s["agent_queue_len"]  = _agent_queue.qsize() if _agent_queue else 0
-    s["agent_processing"] = len(_agent_processing)
+    s["active_alarms"]           = len(get_alarms(active_only=True))
+    s["agent_queue_len"]         = _agent_queue.qsize() if _agent_queue else 0
+    s["investigation_queue_len"] = _investigation_queue.qsize() if _investigation_queue else 0
+    s["agent_processing"]        = len(_agent_processing)
     return s
 
 
@@ -833,6 +1144,10 @@ def sim_reset():
     _live_queue.clear()
     _live_alarms.clear()
     _agent_processing.clear()
+    if _investigation_queue:
+        while not _investigation_queue.empty():
+            try: _investigation_queue.get_nowait()
+            except Exception: break
     for sse_q in list(_sse_queues):
         try:
             sse_q.put_nowait("__reset__")
