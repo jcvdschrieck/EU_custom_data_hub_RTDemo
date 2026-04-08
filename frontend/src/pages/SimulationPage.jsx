@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import {
   getSimStatus, getPipelineStats,
   simStart, simPause, simResume, simReset, simSetSpeed,
@@ -273,6 +273,31 @@ function FanOutSVG({ height, targetYs, color = '#adb5bd', width = 48, dashed = f
   )
 }
 
+// Fan-out with per-target color + dash (used for entry broker → mixed lanes)
+function FanOutMixedSVG({ height, targets, width = 56 }) {
+  if (!targets?.length) return null
+  const spineX = 8
+  const ys = targets.map(t => t.y)
+  const y0 = Math.min(...ys), y1 = Math.max(...ys)
+  return (
+    <svg width={width} height={height} style={{ flex: `0 0 ${width}px`, overflow: 'visible' }}>
+      <line x1={spineX} y1={y0} x2={spineX} y2={y1} stroke="#adb5bd" strokeWidth={2} />
+      {targets.map((t, i) => {
+        const dash = t.dashed ? '4,3' : undefined
+        const col  = t.color || '#adb5bd'
+        return (
+          <g key={i}>
+            <circle cx={spineX} cy={t.y} r={3} fill={col} />
+            <line x1={spineX} y1={t.y} x2={width - 6} y2={t.y}
+              stroke={col} strokeWidth={2} strokeDasharray={dash} />
+            <polygon points={`${width-6},${t.y-4} ${width},${t.y} ${width-6},${t.y+4}`} fill={col} />
+          </g>
+        )
+      })}
+    </svg>
+  )
+}
+
 function FanInSVG({ height, inputYs, outputY, color = '#adb5bd', width = 48 }) {
   if (!inputYs || !inputYs.length) return null
   const spineX = width - 8
@@ -293,49 +318,38 @@ function FanInSVG({ height, inputYs, outputY, color = '#adb5bd', width = 48 }) {
 
 // ── Pipeline Diagram ──────────────────────────────────────────────────────────
 
-function PipelineDiagram({ pipeline, status }) {
-  const ev  = pipeline?.events            || {}
-  const q   = pipeline?.queues            || {}
-  const rf  = pipeline?.risk_flags        || {}
-  const inv = pipeline?.investigation_queue ?? null
-  const stored = pipeline?.stored_count ?? null
+function PipelineDiagram({ pipeline }) {
+  const ev     = pipeline?.events             || {}
+  const q      = pipeline?.queues             || {}
+  const rf     = pipeline?.risk_flags         || {}
+  const inv    = pipeline?.investigation_queue ?? null
+  const stored = pipeline?.stored_count        ?? null
 
-  const GAP = 14
+  // Fixed row heights for the three parallel lanes
+  const OV_H   = 80
+  const RT_H   = 210
+  const AN_H   = 80
+  const LGAP   = 16
+  const totalH = OV_H + LGAP + RT_H + LGAP + AN_H  // 402
 
-  // Measure lane heights for exact SVG connector alignment
-  const laneOVRef  = useRef(null)
-  const laneRTRef  = useRef(null)
-  const laneANRef  = useRef(null)
-  const [laneH, setLaneH] = useState([80, 180, 80])
+  // y-center of each lane (for SVG fan-out from entry broker)
+  const yOV = OV_H / 2                                    // 40
+  const yRT = OV_H + LGAP + RT_H / 2                      // 201
+  const yAN = OV_H + LGAP + RT_H + LGAP + AN_H / 2       // 362
 
-  useEffect(() => {
-    const h = [
-      laneOVRef.current?.offsetHeight ?? 80,
-      laneRTRef.current?.offsetHeight ?? 180,
-      laneANRef.current?.offsetHeight ?? 80,
-    ]
-    setLaneH(prev => h.every((v, i) => v === prev[i]) ? prev : h)
-  })
+  // Routing section: three well-spread output rows
+  const RROW  = 100
+  const RGAP  = 20
+  const routeH = RROW * 3 + RGAP * 2  // 340
+  const ryG   = RROW / 2                                   // 50
+  const ryR   = RROW + RGAP + RROW / 2                     // 170
+  const ryA   = RROW * 2 + RGAP * 2 + RROW / 2            // 290
 
-  const [h0, h1, h2] = laneH
-  const totalH = h0 + GAP + h1 + GAP + h2
-  const yc0    = h0 / 2
-  const yc1    = h0 + GAP + h1 / 2
-  const yc2    = h0 + GAP + h1 + GAP + h2 / 2
-
-  // ── Routing section: three output rows from RT Score
-  const routeRowH = 72
-  const routeGap  = 10
-  const routeTotalH = routeRowH * 3 + routeGap * 2
-  // y-centers for Green / Red / Amber rows (top-aligned to routeTotalH)
-  const ryGreen = routeRowH / 2
-  const ryRed   = routeRowH + routeGap + routeRowH / 2
-  const ryAmber = routeRowH * 2 + routeGap * 2 + routeRowH / 2
-
-  const laneBox = (accent) => ({
-    border: `2px solid ${accent}`, borderRadius: 6, padding: '8px 10px',
-    display: 'flex', alignItems: 'center', gap: 8,
-  })
+  // DB fan-in: only green + red feed directly into DB Store Factory
+  const dbH   = ryR + RROW / 2 - ryG + RROW / 2           // spans green row center to red row center
+  // inputYs relative to a container starting at ryG - RROW/2
+  const dbIn0 = ryG
+  const dbIn1 = ryR
 
   return (
     <div className="card section-gap">
@@ -345,44 +359,37 @@ function PipelineDiagram({ pipeline, status }) {
       </div>
 
       {/* ── MAIN PIPELINE ── */}
-      <div style={{ overflowX: 'auto', padding: '20px 20px 8px' }}>
-        <div style={{ display: 'flex', alignItems: 'flex-start', minWidth: 'max-content', gap: 0 }}>
+      <div style={{ overflowX: 'auto', padding: '20px 20px 4px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', minWidth: 'max-content', gap: 0 }}>
 
-          {/* Col 1: Entry Broker — vertically spans OV + RT Risk lanes */}
-          <div style={{ height: totalH, display: 'flex', flexDirection: 'column', justifyContent: 'flex-start' }}>
-            <div style={{ height: h0 + GAP + h1, display: 'flex', alignItems: 'center' }}>
-              <Zone label="Entry Broker">
-                <BrokerNode
-                  label="Sales-order Event Broker"
-                  topicKey="SALES_ORDER_EVENT"
-                  count={ev.sales_order_event}
-                  queueSize={q.sales_order_event}
-                />
-              </Zone>
-            </div>
-          </div>
+          {/* 1. Entry Broker */}
+          <Zone label="Entry Broker">
+            <BrokerNode
+              label="Sales-order Event Broker"
+              topicKey="SALES_ORDER_EVENT"
+              count={ev.sales_order_event}
+              queueSize={q.sales_order_event}
+            />
+          </Zone>
 
-          {/* Col 2: Fan-out — OV and RT Risk lanes (solid); Arrival lane (dashed) */}
-          <FanOutSVG height={totalH} targetYs={[yc0, yc1]} width={48} />
+          {/* 2. Mixed fan-out: solid → OV + RT  |  dashed orange → Transport */}
+          <FanOutMixedSVG height={totalH} width={56} targets={[
+            { y: yOV, color: '#adb5bd', dashed: false },
+            { y: yRT, color: '#adb5bd', dashed: false },
+            { y: yAN, color: '#e67e22', dashed: true  },
+          ]} />
 
-          {/* Col 3: Three parallel lanes */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: GAP }}>
+          {/* 3. Factory column (variable width, rows fixed height) */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: LGAP }}>
 
-            {/* Lane A: Order Validation */}
-            <div ref={laneOVRef}>
-              <ZoneLabel>Order Validation</ZoneLabel>
-              <div style={laneBox('#1f7a3c')}>
-                <FactoryNode icon="✅" label="Order Validation" description="Field completeness" />
-                <Arrow />
-                <BrokerNode label="Order Validation" topicKey="ORDER_VALIDATION"
-                  count={ev.order_validation} queueSize={q.order_validation} />
-              </div>
+            {/* OV factory row */}
+            <div style={{ height: OV_H, display: 'flex', alignItems: 'center' }}>
+              <FactoryNode icon="✅" label="Order Validation" description="3–5 s · unlimited" />
             </div>
 
-            {/* Lane B: RT Risk Monitoring */}
-            <div ref={laneRTRef}>
-              <ZoneLabel>RT Risk Monitoring</ZoneLabel>
-              <div style={laneBox('#6f42c1')}>
+            {/* RT Risk block */}
+            <div style={{ height: RT_H, display: 'flex', alignItems: 'center' }}>
+              <Zone label="RT Risk Monitoring" style={{ width: '100%' }}>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <FactoryNode icon="⚖️" label="RT Risk Mon. 1" description="VAT ratio deviation" />
@@ -400,122 +407,137 @@ function PipelineDiagram({ pipeline, status }) {
                       <FlaggedBadge flagged={rf.rt_risk_2_flagged} total={ev.rt_risk_2_outcome} />
                     </BrokerNode>
                   </div>
+                  <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 4 }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
+                      <svg width={64} height={18}>
+                        <line x1={14} y1={0} x2={32} y2={14} stroke="#adb5bd" strokeWidth={1.5} />
+                        <line x1={50} y1={0} x2={32} y2={14} stroke="#adb5bd" strokeWidth={1.5} />
+                        <polygon points="28,12 36,12 32,18" fill="#adb5bd" />
+                      </svg>
+                      <FactoryNode icon="🔄" label="RT Consolidation" description="GREEN / AMBER / RED" />
+                    </div>
+                  </div>
                 </div>
-                <Arrow label="merge" />
-                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
-                  <FactoryNode icon="🔄" label="RT Consolidation" description="GREEN / AMBER / RED" />
-                  <Arrow down />
-                  <BrokerNode label="RT Score" topicKey="RT_SCORE"
-                    count={ev.rt_score} queueSize={q.rt_score}>
-                    <ScoreBadges green={rf.rt_score_green} amber={rf.rt_score_amber} red={rf.rt_score_red} />
-                  </BrokerNode>
-                </div>
-              </div>
+              </Zone>
             </div>
 
-            {/* Lane C: Arrival Notification (dotted — triggered by goods transport, not by broker) */}
-            <div ref={laneANRef}>
-              <ZoneLabel color="#e67e22">Goods Transport → Arrival Notification</ZoneLabel>
-              <div style={{ ...laneBox('#e67e22'), borderStyle: 'dashed' }}>
-                <FactoryNode icon="🚢" label="Transport" description="exponential delay" accent="#e67e22" />
-                <Arrow dashed color="#e67e22" />
-                <FactoryNode icon="📦" label="Arrival Notif. Factory" description="goods available" accent="#e67e22" />
-                <Arrow color="#e67e22" />
-                <BrokerNode label="Arrival Notification" topicKey="ARRIVAL_NOTIFICATION"
-                  count={ev.arrival_notification} queueSize={q.arrival_notification} accent="#e67e22" />
-              </div>
+            {/* Transport row — merged transport + arrival factory */}
+            <div style={{ height: AN_H, display: 'flex', alignItems: 'center' }}>
+              <FactoryNode icon="🚢" label="Transport" description="exp. delay ~60 s · unlimited" accent="#e67e22" />
+            </div>
+
+          </div>
+
+          {/* 4. Arrows: factory → brokers */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: LGAP }}>
+            <div style={{ height: OV_H,   display: 'flex', alignItems: 'center' }}><Arrow /></div>
+            <div style={{ height: RT_H,   display: 'flex', alignItems: 'center' }}><Arrow /></div>
+            <div style={{ height: AN_H,   display: 'flex', alignItems: 'center' }}><Arrow color="#e67e22" /></div>
+          </div>
+
+          {/* 5. Brokers column — all three aligned on same vertical */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: LGAP }}>
+            <div style={{ height: OV_H, display: 'flex', alignItems: 'center' }}>
+              <BrokerNode label="Order Validation" topicKey="ORDER_VALIDATION"
+                count={ev.order_validation} queueSize={q.order_validation} />
+            </div>
+            <div style={{ height: RT_H, display: 'flex', alignItems: 'center' }}>
+              <BrokerNode label="RT Score" topicKey="RT_SCORE"
+                count={ev.rt_score} queueSize={q.rt_score}>
+                <ScoreBadges green={rf.rt_score_green} amber={rf.rt_score_amber} red={rf.rt_score_red} />
+              </BrokerNode>
+            </div>
+            <div style={{ height: AN_H, display: 'flex', alignItems: 'center' }}>
+              <BrokerNode label="Arrival Notification" topicKey="ARRIVAL_NOTIFICATION"
+                count={ev.arrival_notification} queueSize={q.arrival_notification} accent="#e67e22" />
             </div>
           </div>
 
-          {/* Dotted connector from Entry Broker to Arrival Notification lane */}
-          <FanOutSVG height={totalH} targetYs={[yc2]} width={48} color="#e67e22" dashed />
+          {/* 6. Fan-in: all three brokers → Risk Routing Factory */}
+          <FanInSVG height={totalH} inputYs={[yOV, yRT, yAN]} outputY={totalH / 2} width={52} />
 
-          {/* Col 4: RT Score + OV fan-in to routing section */}
-          <FanInSVG height={totalH} inputYs={[yc0, yc1, yc2]} outputY={totalH / 2} width={48} />
+          {/* 7. Risk Routing Factory — single node, routes by score */}
+          <Zone label="Risk Routing">
+            <FactoryNode icon="🎯" label="Risk Routing Factory" description="routes by score + validation" />
+          </Zone>
 
-          {/* Col 5: Three routing outputs — Green / Red / Amber */}
-          <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', height: totalH }}>
-            <Zone label="Risk Routing" style={{ height: routeTotalH }}>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: routeGap }}>
+          {/* 8. Fan-out: one factory → three event brokers */}
+          <FanOutSVG height={routeH} targetYs={[ryG, ryR, ryA]} width={52} />
 
-                {/* GREEN path */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, height: routeRowH }}>
-                  <FactoryNode icon="🟢" label="Release Factory" description="validation+green+arrival" accent="#1f7a3c" />
-                  <Arrow color="#1f7a3c" />
-                  <BrokerNode label="Release Event" topicKey="RELEASE_EVENT"
-                    count={ev.release_event} queueSize={q.release_event} accent="#1f7a3c" />
-                  <Arrow color="#1f7a3c" label="→ DB" />
-                </div>
+          {/* 9. Three event brokers — well spread */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: RGAP, height: routeH }}>
 
-                {/* RED path */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, height: routeRowH }}>
-                  <FactoryNode icon="🔴" label="Retain Factory" description="red score only" accent="#c0392b" />
-                  <Arrow color="#c0392b" />
-                  <BrokerNode label="Retain Event" topicKey="RETAIN_EVENT"
-                    count={ev.retain_event} queueSize={q.retain_event} accent="#c0392b" />
-                  <Arrow color="#c0392b" label="→ DB" />
-                </div>
+            <div style={{ height: RROW, display: 'flex', alignItems: 'center' }}>
+              <BrokerNode label="Release Event" topicKey="RELEASE_EVENT"
+                count={ev.release_event} queueSize={q.release_event} accent="#1f7a3c" />
+            </div>
 
-                {/* AMBER path */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, height: routeRowH }}>
-                  <FactoryNode icon="🟡" label="Investigate Dispatch" description="amber+validation" accent="#e6820a" />
-                  <Arrow color="#e6820a" />
-                  <BrokerNode label="Investigate Event" topicKey="INVESTIGATE_EVENT"
-                    count={ev.investigate_event} queueSize={q.investigate_event} accent="#e6820a" />
-                  <Arrow color="#e6820a" label="↓ inv." />
-                </div>
+            <div style={{ height: RROW, display: 'flex', alignItems: 'center' }}>
+              <BrokerNode label="Retain Event" topicKey="RETAIN_EVENT"
+                count={ev.retain_event} queueSize={q.retain_event} accent="#c0392b" />
+            </div>
 
-              </div>
-            </Zone>
+            <div style={{ height: RROW, display: 'flex', alignItems: 'center' }}>
+              <BrokerNode label="Investigate Event" topicKey="INVESTIGATE_EVENT"
+                count={ev.investigate_event} queueSize={q.investigate_event} accent="#e6820a">
+                <div style={{ fontSize: 9, color: '#e6820a', marginTop: 4, fontWeight: 700 }}>↓ investigation pipeline</div>
+              </BrokerNode>
+            </div>
+
           </div>
 
-          {/* Col 6: DB Sink — receives green and red releases */}
-          <div style={{ height: totalH, display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
-            <Zone label="Sink">
-              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
-                <FactoryNode icon="💾" label="DB Store Worker" description="Insert + flag suspicious" />
-                <Arrow down />
-                <DBSinkNode count={stored} />
-              </div>
-            </Zone>
-          </div>
+          {/* 10. Fan-in: Release + Retain → DB Store Factory */}
+          <FanInSVG height={routeH} inputYs={[ryG, ryR]} outputY={(ryG + ryR) / 2} width={48} color="#1f7a3c" />
+
+          {/* 11. DB Store Factory + DB Sink */}
+          <Zone label="Sink">
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
+              <FactoryNode icon="💾" label="DB Store Factory" description="Insert + flag suspicious" />
+              <Arrow down />
+              <DBSinkNode count={stored} />
+            </div>
+          </Zone>
 
         </div>
       </div>
 
       {/* ── INVESTIGATION SUB-PIPELINE ── */}
-      <div style={{ margin: '0 20px 4px', padding: '12px 14px', background: '#fdf6ff', border: '1.5px solid #9c27b066', borderRadius: 8 }}>
-        <div style={{ fontSize: 10, fontWeight: 700, color: '#7b1fa2', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 12 }}>
-          Investigation Sub-Pipeline (AMBER / Ireland)
+      <div style={{ margin: '4px 20px 4px', padding: '12px 14px', background: '#fdf6ff', border: '1.5px solid #9c27b066', borderRadius: 8 }}>
+        <div style={{ fontSize: 10, fontWeight: 700, color: '#7b1fa2', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 10 }}>
+          Investigation Sub-Pipeline — from Investigate Event broker (AMBER / Ireland)
         </div>
         <div style={{ overflowX: 'auto' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 0, minWidth: 'max-content' }}>
 
-            {/* From INVESTIGATE_EVENT → Investigator Factory */}
-            <FactoryNode icon="🕵️" label="Investigator Factory" description="IE-filter · FIFO queue" accent="#9c27b0" />
-            <Arrow color="#9c27b0" />
+            {/* Source label (links visually to the amber broker above) */}
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', marginRight: 6 }}>
+              <div style={{ fontSize: 9, color: '#e6820a', fontWeight: 700, border: '1px dashed #e6820a', borderRadius: 4, padding: '2px 6px', whiteSpace: 'nowrap' }}>
+                INVESTIGATE_EVENT
+              </div>
+              <Arrow color="#e6820a" />
+            </div>
 
-            {/* Investigation Queue */}
+            <FactoryNode icon="🕵️" label="Investigator Factory" description="IE filter · FIFO queue" accent="#9c27b0" />
+            <Arrow color="#9c27b0" />
             <QueueNode label="Investigation Queue" count={inv} accent="#9c27b0" />
             <Arrow color="#9c27b0" />
-
-            {/* VAT Agent Worker */}
             <FactoryNode icon="🤖" label="VAT Agent Worker" description="LM Studio · fraud detection" accent="#9c27b0" />
 
-            {/* Agent fork: incorrect → retain / correct → release */}
-            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 8, marginLeft: 8 }}>
+            {/* Fork: incorrect vs correct/uncertain */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginLeft: 6 }}>
 
               {/* Incorrect → retain */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <Arrow color="#c0392b" />
-                <BrokerNode label="Retained after Investigation" topicKey="AGENT_RETAIN_EVENT"
+                <Arrow color="#c0392b" label="incorrect" />
+                <BrokerNode label="Retained after Inv." topicKey="AGENT_RETAIN_EVENT"
                   count={ev.agent_retain_event} queueSize={q.agent_retain_event} accent="#c0392b" />
-                <Arrow color="#c0392b" label="→ DB" />
+                <Arrow color="#c0392b" />
+                <div style={{ fontSize: 9, color: '#c0392b', fontWeight: 700, border: '1px dashed #c0392b', borderRadius: 4, padding: '2px 6px' }}>→ DB Store Factory</div>
               </div>
 
-              {/* Correct/uncertain → release path */}
+              {/* Correct/uncertain → release after investigation */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <Arrow color="#1f7a3c" />
+                <Arrow color="#1f7a3c" label="correct/uncertain" />
                 <BrokerNode label="To Be Released after Inv." topicKey="AGENT_RELEASE_EVENT"
                   count={ev.agent_release_event} queueSize={q.agent_release_event} accent="#1f7a3c" />
                 <Arrow color="#1f7a3c" />
@@ -524,10 +546,11 @@ function PipelineDiagram({ pipeline, status }) {
                 <BrokerNode label="Release After Investigation" topicKey="RELEASE_AFTER_INVESTIGATION_EVENT"
                   count={ev.release_after_investigation_event}
                   queueSize={q.release_after_investigation_event} accent="#1f7a3c" />
-                <Arrow color="#1f7a3c" label="→ DB" />
+                <Arrow color="#1f7a3c" />
+                <div style={{ fontSize: 9, color: '#1f7a3c', fontWeight: 700, border: '1px dashed #1f7a3c', borderRadius: 4, padding: '2px 6px' }}>→ DB Store Factory</div>
               </div>
-            </div>
 
+            </div>
           </div>
         </div>
       </div>
@@ -535,13 +558,13 @@ function PipelineDiagram({ pipeline, status }) {
       {/* Legend */}
       <div style={{ padding: '10px 20px 16px', display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'center', borderTop: '1px solid var(--border-light)' }}>
         <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-muted)' }}>Legend:</span>
-        <LegendItem color="var(--eu-blue)" bg="var(--eu-blue-light)" label="Broker (solid)" />
+        <LegendItem color="var(--eu-blue)" bg="var(--eu-blue-light)" label="Broker" />
         <LegendItem color="var(--border)" bg="#f8f9fa" label="Factory" />
         <LegendItem color="#1f7a3c" bg="#e8f5e9" label="GREEN — release" />
         <LegendItem color="#c0392b" bg="#fde8e8" label="RED — retain" />
         <LegendItem color="#e6820a" bg="#fff3e0" label="AMBER — investigate" />
         <LegendItem color="#9c27b0" bg="#fdf6ff" label="Investigation pipeline" />
-        <LegendItem color="#e67e22" bg="#fff8f0" label="Arrival Notification (dashed)" dashed />
+        <LegendItem color="#e67e22" bg="#fff8f0" label="Transport / Arrival (dashed)" dashed />
         <div style={{ marginLeft: 8, fontSize: 11, color: 'var(--text-muted)' }}>
           Counts reflect JSON events persisted to <code>data/events/</code> since last reset.
         </div>
