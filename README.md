@@ -1,50 +1,82 @@
 # EU Custom Data Hub — Real-Time Demo
 
-A real-time simulation of the European Commission's **Taxation and Customs Union** transaction monitoring system.  
-The application streams B2C cross-border e-commerce transactions across 7 EU member states, detects VAT rate anomalies, and routes suspicious cases to an AI agent that produces a compliance verdict with legislation references.
+A real-time simulation of the European Commission's **Taxation and Customs Union** transaction monitoring system.
+The application streams B2C cross-border e-commerce transactions across 27 EU member states, detects VAT rate anomalies, and routes suspicious cases to an AI agent that produces a compliance verdict with legislation references.
 
 ---
 
 ## Architecture overview
 
 ```
-┌─────────────────────────────────────────────┐
-│  FastAPI backend (port 8505)                │
-│  ├─ Simulation engine  — replays March 2026 │
-│  ├─ Alarm checker      — VAT ratio monitor  │
-│  ├─ Agent worker       — Claude AI analysis │
-│  └─ SSE stream         — live queue push    │
-└────────────────┬────────────────────────────┘
-                 │ HTTP / SSE
-┌────────────────▼────────────────────────────┐
-│  React + Vite frontend (port 5175)          │
-│  ├─ Main        — live transaction stream   │
-│  ├─ Dashboard   — VAT metrics & charts      │
-│  ├─ Suspicious  — flagged transactions      │
-│  └─ Agent Log   — AI analysis console       │
-└─────────────────────────────────────────────┘
-                 │ static mount
-┌────────────────▼────────────────────────────┐
-│  Ireland Revenue app  /ireland-app/          │
-│  Standalone HTML — investigation queue      │
-└─────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│  FastAPI backend (port 8505)                                    │
+│  ├─ Simulation engine  — event-driven replay of March 2026      │
+│  ├─ Pub/sub pipeline   — brokers + factory workers              │
+│  │   ├─ RT Risk 1      — VAT ratio deviation alarm              │
+│  │   ├─ RT Risk 2      — watchlist lookup                       │
+│  │   ├─ Consolidation  — GREEN / AMBER / RED scoring            │
+│  │   ├─ Order Validation — field completeness                   │
+│  │   ├─ Arrival Notification — exponential-delay arrival event  │
+│  │   └─ Release Factory — combines all three streams            │
+│  ├─ Agent worker       — local LLM analysis via LM Studio       │
+│  └─ SSE stream         — live queue push                        │
+└────────────────┬────────────────────────────────────────────────┘
+                 │ HTTP / SSE / static
+┌────────────────▼────────────────────────────────────────────────┐
+│  React + Vite frontend  (served at port 8505)                   │
+│  ├─ Simulation  — pipeline diagram, controls, event counts      │
+│  ├─ Main        — live transaction stream                       │
+│  ├─ Dashboard   — VAT metrics & charts                          │
+│  ├─ Suspicious  — flagged transactions                          │
+│  └─ Agent Log   — AI analysis console                           │
+└─────────────────────────────────────────────────────────────────┘
+                 │ static mount  /ireland-app/
+┌────────────────▼────────────────────────────────────────────────┐
+│  Ireland Revenue app                                            │
+│  Standalone HTML — investigation queue                          │
+└─────────────────────────────────────────────────────────────────┘
                  │ subprocess
-┌────────────────▼────────────────────────────┐
-│  vat_fraud_detection/ (git submodule)       │
-│  Claude-powered VAT compliance analyser     │
-│  with RAG over EU VAT legislation           │
-└─────────────────────────────────────────────┘
+┌────────────────▼────────────────────────────────────────────────┐
+│  vat_fraud_detection/ (git submodule)                           │
+│  Local-LLM-powered VAT compliance analyser                      │
+│  with RAG over EU VAT legislation (ChromaDB)                    │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## Prerequisites
 
-| Tool | Version |
-|------|---------|
-| Python | 3.11 + |
-| Node.js | 18 + |
-| npm | 9 + |
+| Tool | Version | Notes |
+|------|---------|-------|
+| Python | 3.11+ | |
+| Node.js | 18+ | Required to build the frontend |
+| npm | 9+ | Bundled with Node.js |
+| LM Studio | Latest | For the AI agent (optional) |
+
+### Installing Node.js and npm
+
+`npm` is bundled with Node.js — installing Node.js is all you need.
+
+**Windows**
+1. Go to [https://nodejs.org](https://nodejs.org) and download the **LTS** installer (`.msi`)
+2. Run the installer and follow the prompts — leave all defaults selected
+3. Open a **new** PowerShell or Command Prompt window (existing windows won't see the updated PATH)
+4. Verify: `node --version` and `npm --version`
+
+**macOS**
+```bash
+# Using Homebrew (recommended)
+brew install node
+
+# Or download the .pkg installer from https://nodejs.org
+```
+
+**Linux (Debian / Ubuntu)**
+```bash
+curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
+sudo apt-get install -y nodejs
+```
 
 ---
 
@@ -69,24 +101,44 @@ git submodule update --init --recursive
 pip install -r requirements.txt
 ```
 
-### 3. AI agent API key
+### 3. AI agent — LM Studio (optional)
 
-The VAT fraud detection agent calls the **Anthropic Claude API**. Copy the example env file and add your key:
+The VAT fraud detection agent calls a **locally hosted LLM via [LM Studio](https://lmstudio.ai)**.
+No API key or internet connection is needed for the agent — it runs entirely on your machine.
+
+**Setup:**
+1. Download and install [LM Studio](https://lmstudio.ai)
+2. Download a model (any instruction-tuned model works; a 7–8B model is recommended)
+3. In LM Studio, go to the **Developer** tab and start the local server (default port: `1234`)
+4. Copy the env example and set your model identifier:
 
 ```bash
 cp vat_fraud_detection/.env.example vat_fraud_detection/.env
-# then edit vat_fraud_detection/.env and set ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-> Without a key the agent will still run — suspicious transactions will receive an `uncertain` verdict instead of an AI-powered compliance analysis.
+Edit `vat_fraud_detection/.env`:
+```
+LM_STUDIO_BASE_URL=http://localhost:1234/v1
+LM_STUDIO_MODEL=your-model-identifier-here
+```
 
-### 4. Frontend dependencies
+To find the exact model identifier, query LM Studio's API:
+```bash
+curl http://localhost:1234/v1/models
+```
+
+> **Without LM Studio running**, the agent will still function — suspicious transactions will receive an `uncertain` verdict instead of a full AI-powered compliance analysis.
+
+### 4. Frontend dependencies and build
 
 ```bash
 cd frontend
 npm install
+npm run build
 cd ..
 ```
+
+This compiles the React app into `frontend/dist/`, which FastAPI then serves automatically.
 
 ### 5. Seed the databases
 
@@ -95,29 +147,24 @@ python seed_databases.py
 ```
 
 This creates two SQLite databases in `data/`:
-- `european_custom.db` — ~9 000 historical transactions (Feb 2026)
+- `european_custom.db` — ~9 000 historical transactions (Sep 2025 – Feb 2026)
 - `simulation.db`      — ~1 500 March 2026 transactions ready to be replayed
 
 ---
 
 ## Running
 
-Open two terminals:
-
-**Terminal 1 — API**
 ```bash
-uvicorn api:app --port 8505 --reload
+uvicorn api:app --host 0.0.0.0 --port 8505
 ```
 
-**Terminal 2 — Frontend**
-```bash
-cd frontend
-npm run dev
-```
+Then open [http://localhost:8505](http://localhost:8505).
 
-Then open [http://localhost:5175](http://localhost:5175).
+You will land on the **Simulation** page. Click **▶ Start** to begin the simulation.
 
-Use the **▶ Play** button in the header to start the simulation.
+> The frontend is served directly by FastAPI — no separate `npm run dev` is needed in production mode.
+> If you are actively developing the frontend, you can run `npm run dev` in the `frontend/` directory
+> and point your browser to `http://localhost:5175` instead.
 
 ---
 
@@ -125,23 +172,32 @@ Use the **▶ Play** button in the header to start the simulation.
 
 | Page | URL | Description |
 |------|-----|-------------|
-| Main | `/` | Live transaction stream (SSE), KPI tiles, active alarms |
+| Simulation | `/simulation` | Pipeline diagram, controls, event counts — **start here** |
+| Main | `/main` | Live transaction stream (SSE), KPI tiles, active alarms |
 | Dashboard | `/dashboard` | VAT metrics, charts by country & category |
 | Suspicious | `/suspicious` | Transactions flagged by the alarm system |
-| Agent Log | `/agent-log` | Console view of AI analysis events with legislation references |
-| Ireland Queue | `http://localhost:8505/ireland-app/` | Irish Revenue investigation app (separate design) |
+| Agent Log | `/agent-log` | AI analysis console with legislation references |
+| Country Queue | Nav dropdown | Per-country investigation queue (Ireland live, others placeholder) |
 
 ---
 
 ## Simulation scenario
 
-The simulation replays **March 2026** at configurable speed (default: 2 sim-hours / real-second → full month in ~6 minutes).
+The simulation replays **March 2026** at configurable speed:
+
+| Speed | Description |
+|-------|-------------|
+| 1× | Real time — one event fires at its actual inter-arrival gap |
+| 30× | 1 sim-day ≈ 48 real-seconds |
+| 120× | Full month in ~12 minutes |
+| 360× | Full month in ~4 minutes |
+| 1440× | Full month in ~1 minute |
 
 A fraud scenario is embedded:
 - **Supplier**: TechZone GmbH (Germany) — sells electronics B2C to Irish consumers
 - **Fraud**: applies 0% VAT (food/zero-rated rate) instead of the correct 23% Irish standard rate
 - **Detection**: the alarm engine detects the VAT/value ratio deviation during week 2 of March
-- **Investigation**: flagged transactions are analysed by the Claude agent and forwarded to the Ireland Revenue queue with full legislation references
+- **Investigation**: flagged transactions are analysed by the local LLM agent and forwarded to the Ireland Revenue queue with full legislation references
 
 ---
 
@@ -149,29 +205,35 @@ A fraud scenario is embedded:
 
 ```
 EU_custom_data_hub_RTDemo/
-├── api.py                    # FastAPI app — all endpoints + SSE stream
+├── api.py                    # FastAPI app — all endpoints, pub/sub pipeline, SSE
 ├── seed_databases.py         # One-time DB seeder
 ├── requirements.txt
 ├── lib/
+│   ├── broker.py             # Pub/sub MessageBroker + topic constants
 │   ├── config.py             # Ports, paths, simulation time window
 │   ├── catalog.py            # Suppliers, countries, VAT rates
-│   ├── database.py           # SQLite helpers
+│   ├── database.py           # SQLite helpers (upsert, historical seeding)
+│   ├── event_store.py        # JSON event persistence (data/events/)
 │   ├── seeder.py             # Historical + simulation data generator
-│   ├── simulator.py          # Async simulation loop
+│   ├── simulator.py          # Async event-driven simulation loop
 │   ├── alarm_checker.py      # VAT ratio deviation alarm engine
+│   ├── watchlist.py          # Seller/country watchlist
 │   └── agent_bridge.py       # Subprocess bridge → vat_fraud_detection
-├── frontend/                 # React + Vite (port 5175)
+├── frontend/                 # React + Vite (built output served by FastAPI)
 │   └── src/
-│       ├── pages/            # Main, Dashboard, Suspicious, Agent Log
+│       ├── pages/            # Simulation, Main, Dashboard, Suspicious, Agent Log
 │       └── components/       # EclLayout, SimulationWidget, charts
 ├── ireland_app/
 │   └── index.html            # Standalone Irish Revenue investigation app
-├── vat_fraud_detection/      # Git submodule — Claude VAT compliance agent
+├── vat_fraud_detection/      # Git submodule — local LLM VAT compliance agent
 │   ├── _analyse_tx.py        # Subprocess entry point (called by agent_bridge)
-│   ├── lib/analyser.py       # Core AI analysis engine
+│   ├── lib/analyser.py       # Core AI analysis engine (LM Studio / OpenAI-compatible)
 │   ├── data/chroma_db/       # RAG vector store (EU VAT legislation)
 │   └── prompts/              # LLM system prompts
-└── data/                     # SQLite databases (git-ignored, created by seeder)
+└── data/                     # SQLite databases + event files (git-ignored)
+    ├── european_custom.db
+    ├── simulation.db
+    └── events/               # Per-topic JSON event files (flushed on reset)
 ```
 
 ---
@@ -189,13 +251,18 @@ EU_custom_data_hub_RTDemo/
 | GET | `/api/suspicious` | Last 50 suspicious transactions |
 | GET | `/api/agent-log` | AI analysis history with legislation refs |
 | GET | `/api/agent-processing` | Transactions currently being analysed |
+| POST | `/api/agent/analyse/{id}` | Trigger AI agent on a transaction |
 | GET | `/api/ireland-queue` | Cases forwarded to Ireland investigation |
 | GET | `/api/ireland-case/{id}` | Full case detail |
+| GET | `/api/simulation/status` | Simulation state + progress |
+| GET | `/api/simulation/pipeline` | Per-topic event counts and queue sizes |
 | POST | `/api/simulation/start` | Start simulation |
 | POST | `/api/simulation/pause` | Pause |
 | POST | `/api/simulation/resume` | Resume |
 | POST | `/api/simulation/speed` | Set speed `{"speed": <float>}` |
-| POST | `/api/simulation/reset` | Reset to start |
+| POST | `/api/simulation/reset` | Reset to start (preserves historical data) |
+| GET | `/api/catalog/suppliers` | Supplier catalogue |
+| GET | `/api/catalog/countries` | Country list |
 
 ---
 
