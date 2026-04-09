@@ -1,7 +1,7 @@
 # EU Custom Data Hub — Real-Time Demo
 
 A real-time simulation of the European Commission's **Taxation and Customs Union** transaction monitoring system.
-The application streams B2C cross-border e-commerce transactions across 27 EU member states, detects VAT rate anomalies, and routes suspicious cases to an AI agent that produces a compliance verdict with legislation references.
+The application streams B2C cross-border e-commerce transactions across 27 EU member states, detects VAT rate anomalies, routes suspicious cases through a configurable investigation pipeline, and lets a tax officer review them in a companion **Revenue Guardian** UI before deciding to release or retain.
 
 ---
 
@@ -10,26 +10,35 @@ The application streams B2C cross-border e-commerce transactions across 27 EU me
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  FastAPI backend (port 8505)                                    │
-│  ├─ Simulation engine  — event-driven replay of March 2026      │
+│  ├─ Simulation engine  — continuous-clock replay of a 15-min    │
+│  │                       compressed March 2026 window           │
 │  ├─ Pub/sub pipeline   — brokers + factory workers              │
 │  │   ├─ RT Risk 1      — VAT ratio deviation alarm              │
 │  │   ├─ RT Risk 2      — watchlist lookup                       │
 │  │   ├─ Consolidation  — GREEN / AMBER / RED scoring            │
 │  │   ├─ Order Validation — field completeness                   │
 │  │   ├─ Arrival Notification — exponential-delay arrival event  │
-│  │   └─ Release Factory — combines all three streams            │
+│  │   ├─ Release Factory  — three-way routing by score           │
+│  │   └─ Holding Worker   — drains INVESTIGATE_EVENT into the    │
+│  │                         in-memory pending dict (manual mode) │
+│  ├─ Manual investigation API  — pending list, SSE stream,       │
+│  │                              run-agent, decide, timeline     │
 │  ├─ Agent worker       — local LLM analysis via LM Studio       │
-│  └─ SSE stream         — live queue push                        │
-└────────────────┬────────────────────────────────────────────────┘
-                 │ HTTP / SSE / static
-┌────────────────▼────────────────────────────────────────────────┐
-│  React + Vite frontend  (served at port 8505)                   │
-│  ├─ Simulation  — pipeline diagram, controls, event counts      │
-│  ├─ Main        — live transaction stream                       │
-│  ├─ Dashboard   — VAT metrics & charts                          │
-│  ├─ Suspicious  — flagged transactions                          │
-│  └─ Agent Log   — AI analysis console                           │
-└─────────────────────────────────────────────────────────────────┘
+│  └─ SSE streams        — live queue push + sim-state push       │
+└────────────────┬───────────────────────────┬────────────────────┘
+                 │ HTTP / SSE / static       │ HTTP + SSE + CORS
+┌────────────────▼─────────────────┐ ┌───────▼────────────────────┐
+│  Internal React + Vite frontend  │ │  Revenue Guardian (sibling │
+│  served at port 8505             │ │  repo, port 8080 in dev)   │
+│  ├─ Simulation diagram & ctrl    │ │  Vite + React + shadcn/ui  │
+│  ├─ Main / Dashboard / Suspicious│ │  ├─ Customs Authority      │
+│  └─ Agent Log                    │ │  ├─ Tax Authority (live    │
+│                                  │ │     SSE-driven human-in-   │
+│                                  │ │     the-loop investigation │
+│                                  │ │     review queue)          │
+│                                  │ │  └─ Investigation case     │
+│                                  │ │     detail (timeline)      │
+└────────────────┬─────────────────┘ └────────────────────────────┘
                  │ static mount  /ireland-app/
 ┌────────────────▼────────────────────────────────────────────────┐
 │  Ireland Revenue app                                            │
@@ -42,6 +51,16 @@ The application streams B2C cross-border e-commerce transactions across 27 EU me
 │  with RAG over EU VAT legislation (ChromaDB)                    │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+### Investigation flow modes
+
+The investigation pipeline runs in **one of two modes**, gated by the
+`AUTO_INVESTIGATION_AGENT` constant in `api.py`:
+
+| Mode | Constant | Behavior |
+|---|---|---|
+| **Manual** (default) | `False` | `INVESTIGATE_EVENT` items land in the in-memory `_pending_investigations` dict via the holding worker. The Revenue Guardian operator on `:8080` reviews each one, manually triggers the VAT fraud detection agent, and publishes the final release/retain decision. |
+| **Auto** (legacy) | `True` | The original `_investigator_factory` + `_investigation_agent_worker` auto-route IE-bound items through the agent and emit terminal events without human input. Code is preserved for one-line reactivation when demoing without the UI. |
 
 ---
 
@@ -172,16 +191,47 @@ You will land on the **Simulation** page. Click **▶ Start** to begin the simul
 > If you are actively developing the frontend, you can run `npm run dev` in the `frontend/` directory
 > and point your browser to `http://localhost:5175` instead.
 
+### Running alongside Revenue Guardian (UI integration)
+
+The companion **revenue-guardian** UI (sibling repo) consumes this backend's
+investigation API to drive the human-in-the-loop VAT fraud review flow. To run
+both apps together:
+
+```bash
+# Terminal 1 — this repo
+python -m uvicorn api:app --host 0.0.0.0 --port 8505
+
+# Terminal 2 — sibling repo
+cd ../revenue-guardian
+npm install   # first time only
+npm run dev   # serves on http://localhost:8080
+```
+
+Open the EU Customs Data Hub at `:8505` (start the simulation), then the
+Revenue Guardian dashboard at `:8080`. Investigations routed by the simulation
+pipeline (`INVESTIGATE_EVENT`) will appear in the Revenue Guardian **Tax
+Authority** page, where they wait for the operator to trigger the agent and
+make a release / retain decision. See the integration endpoints under
+`GET /api/investigations/pending`, `GET /api/investigations/stream`,
+`POST /api/investigations/{tx_id}/run-agent`,
+`POST /api/investigations/{tx_id}/decide`, and
+`GET /api/transactions/{tx_id}/timeline`.
+
+When `AUTO_INVESTIGATION_AGENT = False` (default in `api.py`), the legacy
+auto-driven `_investigation_agent_worker` is disabled and Revenue Guardian
+becomes the only entry point to the agent. Flip the constant to re-enable the
+auto pipeline if you need to demo without the UI.
+
 ---
 
 ## Application pages
 
 | Page | URL | Description |
 |------|-----|-------------|
-| Simulation | `/simulation` | Pipeline diagram, controls, event counts — **start here** |
+| Simulation | `/simulation` | Pipeline diagram (with the human-in-the-loop investigation band), controls, event counts — **start here** |
 | Main | `/main` | Live transaction stream (SSE), KPI tiles, active alarms |
 | Dashboard | `/dashboard` | VAT metrics, charts by country & category |
-| Suspicious | `/suspicious` | Transactions flagged by the alarm system |
+| Suspicious | `/suspicious` | Transactions flagged by the alarm system. The per-row Analyse button is disabled in manual mode — agent control has moved to the Revenue Guardian Tax Authority page on `:8080` |
 | Agent Log | `/agent-log` | AI analysis console with legislation references |
 | Country Queue | Nav dropdown | Per-country investigation queue (Ireland live, others placeholder) |
 
@@ -189,21 +239,29 @@ You will land on the **Simulation** page. Click **▶ Start** to begin the simul
 
 ## Simulation scenario
 
-The simulation replays **March 2026** at configurable speed:
+All March-2026 source transactions are rescaled at seed time so their
+timestamps fall inside a **15-sim-minute window** starting at March 1st 00:00:00.
+The continuous-clock simulation loop advances `sim_time` smoothly between events
+(no freezing during quiet periods) at one of three user-facing multipliers
+(sim-seconds per real-second):
 
-| Speed | Description |
-|-------|-------------|
-| 1× | Real time — one event fires at its actual inter-arrival gap |
-| 30× | 1 sim-day ≈ 48 real-seconds |
-| 120× | Full month in ~12 minutes |
-| 360× | Full month in ~4 minutes |
-| 1440× | Full month in ~1 minute |
+| Multiplier | sim-sec / real-sec | Wall-clock playback |
+|------------|--------------------|---------------------|
+| **×1** (default) | 1 | 15 sim-min in 15 real-min — real-time |
+| **×10** | 10 | 15 sim-min in ~1.5 real-min |
+| **×100** | 100 | 15 sim-min in ~9 real-sec |
 
 A fraud scenario is embedded:
 - **Supplier**: TechZone GmbH (Germany) — sells electronics B2C to Irish consumers
 - **Fraud**: applies 0% VAT (food/zero-rated rate) instead of the correct 23% Irish standard rate
-- **Detection**: the alarm engine detects the VAT/value ratio deviation during week 2 of March
-- **Investigation**: flagged transactions are analysed by the local LLM agent and forwarded to the Ireland Revenue queue with full legislation references
+- **Detection**: the alarm engine detects the VAT/value ratio deviation early in the run
+- **Investigation (manual mode, default)**: flagged AMBER-path transactions land in the
+  in-memory holding dict and appear in the Revenue Guardian Tax Authority page
+  on `:8080`. The operator clicks **Run Agent** to invoke the local LLM, then
+  picks **Release** or **Retain** based on the verdict + reasoning.
+- **Investigation (auto mode)**: when `AUTO_INVESTIGATION_AGENT = True`, IE-bound
+  items are auto-routed through the agent and forwarded to the Ireland Revenue
+  queue with legislation references — no UI required.
 
 ---
 
@@ -246,29 +304,47 @@ EU_custom_data_hub_RTDemo/
 
 ## API reference
 
+### Core endpoints
+
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/health` | Health check |
 | GET | `/api/queue` | Latest 30 transactions (REST snapshot) |
 | GET | `/api/queue/stream` | SSE stream — one transaction per event |
 | GET | `/api/transactions` | Paginated historical query |
+| GET | `/api/transactions/{id}/timeline` | Full chronological broker-event history for a single transaction (used by the Revenue Guardian case-detail page) |
 | GET | `/api/metrics` | VAT aggregates with filters |
 | GET | `/api/alarms` | Alarm list |
-| GET | `/api/suspicious` | Last 50 suspicious transactions |
+| GET | `/api/suspicious` | Last 50 suspicious transactions (used by the Revenue Guardian Customs Authority dashboard) |
 | GET | `/api/agent-log` | AI analysis history with legislation refs |
 | GET | `/api/agent-processing` | Transactions currently being analysed |
-| POST | `/api/agent/analyse/{id}` | Trigger AI agent on a transaction |
+| POST | `/api/agent/analyse/{id}` | Trigger AI agent on a transaction (legacy entry point — disabled in the internal Suspicious page UI) |
 | GET | `/api/ireland-queue` | Cases forwarded to Ireland investigation |
 | GET | `/api/ireland-case/{id}` | Full case detail |
+| GET | `/api/catalog/suppliers` | Supplier catalogue |
+| GET | `/api/catalog/countries` | Country list |
+
+### Simulation control
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
 | GET | `/api/simulation/status` | Simulation state + progress |
-| GET | `/api/simulation/pipeline` | Per-topic event counts and queue sizes |
+| GET | `/api/simulation/pipeline` | Per-topic event counts, queue sizes, `pending_investigations`, `pending_investigations_running` |
+| GET | `/api/simulation/stream` | SSE stream pushing consolidated `{status, pipeline}` snapshots at ~5 Hz |
 | POST | `/api/simulation/start` | Start simulation |
 | POST | `/api/simulation/pause` | Pause |
 | POST | `/api/simulation/resume` | Resume |
-| POST | `/api/simulation/speed` | Set speed `{"speed": <float>}` |
+| POST | `/api/simulation/speed` | Set speed `{"speed": <float>}` (sim-sec per real-sec) |
 | POST | `/api/simulation/reset` | Reset to start (preserves historical data) |
-| GET | `/api/catalog/suppliers` | Supplier catalogue |
-| GET | `/api/catalog/countries` | Country list |
+
+### Manual investigation API (consumed by Revenue Guardian)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/investigations/pending` | Snapshot of every investigation parked in the manual-review holding dict, newest first |
+| GET | `/api/investigations/stream` | SSE stream pushing the full pending list whenever it changes (new item, agent run, decision) |
+| POST | `/api/investigations/{id}/run-agent` | Trigger the VAT fraud detection agent on a pending entry. Returns 202 immediately; the verdict lands via the SSE stream when ready. Idempotent (409 if already running or decided). |
+| POST | `/api/investigations/{id}/decide` | Body `{action: "release"\|"retain"}`. Publishes `AGENT_RELEASE_EVENT` (release path: feeds the Post-Inv Release factory) or `AGENT_RETAIN_EVENT` (retain path: terminal + writes to the Ireland queue). Removes the entry from pending and broadcasts an SSE update. |
 
 ---
 

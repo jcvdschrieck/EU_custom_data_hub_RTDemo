@@ -113,6 +113,33 @@ def event_count(topic: str | None = None) -> int:
     return sum(1 for _ in EVENTS_DIR.rglob("*.json")) if EVENTS_DIR.exists() else 0
 
 
+def get_events_for_order(order_identifier: str) -> list[dict]:
+    """
+    Return every persisted event whose filename starts with *order_identifier*,
+    across every topic directory under data/events/. Each event is the parsed
+    file content (envelope with _event_meta + clean payload), and the result
+    is sorted chronologically by _event_meta.published_at.
+
+    Used by GET /api/transactions/{tx_id}/timeline so the manual investigation
+    UI can display the full processing history of a single transaction.
+    """
+    if not EVENTS_DIR.exists() or not order_identifier:
+        return []
+    out: list[dict] = []
+    # Each topic dir contains <orderIdentifier>_<topic>.json files. Glob the
+    # specific prefix instead of reading every file.
+    for topic_dir in EVENTS_DIR.iterdir():
+        if not topic_dir.is_dir():
+            continue
+        for f in topic_dir.glob(f"{order_identifier}_*.json"):
+            try:
+                out.append(json.loads(f.read_text()))
+            except Exception:
+                pass
+    out.sort(key=lambda e: ((e.get("_event_meta") or {}).get("published_at") or ""))
+    return out
+
+
 def count_field_value(topic: str, field: str, value) -> int:
     """
     Count persisted events for *topic* where *field* equals *value*.

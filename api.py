@@ -131,6 +131,19 @@ from lib.database import (
 from lib.simulator import state, simulation_loop
 from lib.catalog import SUPPLIERS, COUNTRY_NAMES
 
+# ── Feature flags ─────────────────────────────────────────────────────────────
+
+# When True, _investigator_factory + _investigation_agent_worker run as
+# before — INVESTIGATE_EVENT items are auto-routed to the LM Studio agent and
+# their verdict published as AGENT_RELEASE_EVENT / AGENT_RETAIN_EVENT.
+#
+# When False (current state), those two tasks are NOT started, and the new
+# _investigation_holding_worker takes their place: every INVESTIGATE_EVENT
+# lands in _pending_investigations and waits for a human operator (the
+# revenue-guardian UI on :8080) to manually trigger the agent + decide.
+# The original code is kept in place so this can be flipped back trivially.
+AUTO_INVESTIGATION_AGENT: bool = False
+
 # ── In-memory state ───────────────────────────────────────────────────────────
 
 _live_queue:          deque[dict]        = deque(maxlen=QUEUE_SIZE)
@@ -139,7 +152,23 @@ _agent_processing:    dict[str, dict]    = {}   # tx_id → snapshot while analy
 _sse_queues:          set[asyncio.Queue] = set()   # live-transaction stream subscribers
 _sim_state_sse:       set[asyncio.Queue] = set()   # pipeline + status stream subscribers
 _agent_queue:         asyncio.Queue | None = None  # manual POST /api/agent/analyse
-_investigation_queue: asyncio.Queue | None = None  # automatic investigation pipeline
+_investigation_queue: asyncio.Queue | None = None  # legacy auto investigation pipeline
+
+# Pending investigations awaiting manual agent run + decision (managed from
+# the revenue-guardian UI). Keyed by transaction_id. Lost on server restart —
+# intentional, single-operator demo. Each entry:
+#   {
+#     "tx":              <full sales-order tx dict>,
+#     "alarm":           <alarm metadata or {}>,
+#     "status":          "pending" | "agent_running" | "agent_done" | "decided",
+#     "agent_verdict":   None | {"verdict", "reasoning", "legislation_refs"},
+#     "decision":        None | "release" | "retain",
+#     "created_at":      ISO8601,
+#     "updated_at":      ISO8601,
+#   }
+_pending_investigations: dict[str, dict] = {}
+_pending_sse:            set[asyncio.Queue] = set()   # subscribers to pending-list updates
+_manual_agent_executor   = None   # lazy-initialised ThreadPoolExecutor for manual agent runs
 
 
 # ── Simulation: publish to Sales-order Event Broker ──────────────────────────
@@ -627,6 +656,106 @@ async def _investigation_agent_worker() -> None:
             _investigation_queue.task_done()
 
 
+# ── Manual investigation flow (revenue-guardian UI on :8080) ─────────────────
+#
+# When AUTO_INVESTIGATION_AGENT is False, the holding worker below runs in
+# place of _investigator_factory + _investigation_agent_worker. It subscribes
+# to INVESTIGATE_EVENT and parks every item in _pending_investigations,
+# waiting for the operator to manually trigger the agent and decide.
+
+def _pending_entry_view(entry: dict) -> dict:
+    """Flatten one _pending_investigations entry into the JSON shape the UI
+    consumes. Strips heavy nested fields and exposes the flat tx columns the
+    revenue-guardian dashboard already knows how to render."""
+    tx = entry.get("tx", {}) or {}
+    return {
+        "transaction_id":   tx.get("transaction_id"),
+        "transaction_date": tx.get("transaction_date"),
+        "seller_id":        tx.get("seller_id"),
+        "seller_name":      tx.get("seller_name"),
+        "seller_country":   tx.get("seller_country"),
+        "buyer_country":    tx.get("buyer_country"),
+        "item_category":    tx.get("item_category"),
+        "item_description": tx.get("item_description"),
+        "value":            tx.get("value"),
+        "vat_rate":         tx.get("vat_rate"),
+        "vat_amount":       tx.get("vat_amount"),
+        "correct_vat_rate": tx.get("correct_vat_rate"),
+        "has_error":        tx.get("has_error"),
+        "risk_score":       entry.get("risk_score"),
+        "alarm":            entry.get("alarm") or {},
+        "status":           entry.get("status"),
+        "agent_verdict":    entry.get("agent_verdict"),
+        "decision":         entry.get("decision"),
+        "created_at":       entry.get("created_at"),
+        "updated_at":       entry.get("updated_at"),
+    }
+
+
+def _pending_snapshot() -> list[dict]:
+    """Return the full pending list as a JSON-serialisable list, newest first."""
+    items = [_pending_entry_view(e) for e in _pending_investigations.values()]
+    items.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+    return items
+
+
+def _broadcast_pending_update() -> None:
+    """Push the current snapshot to every connected SSE subscriber.
+    Synchronous fan-out via put_nowait so callers don't need to await."""
+    if not _pending_sse:
+        return
+    try:
+        payload = _json.dumps(_pending_snapshot())
+    except Exception:
+        return
+    dead = set()
+    for q in _pending_sse:
+        try:
+            q.put_nowait(payload)
+        except asyncio.QueueFull:
+            # Subscriber is lagging — drop this frame, the next change will
+            # produce another snapshot.
+            pass
+        except Exception:
+            dead.add(q)
+    _pending_sse.difference_update(dead)
+
+
+async def _investigation_holding_worker() -> None:
+    """
+    Manual-mode replacement for _investigator_factory + _investigation_agent_worker.
+
+    Subscribes to INVESTIGATE_EVENT and parks every incoming item in
+    _pending_investigations with status="pending". The operator (revenue-
+    guardian UI) is expected to GET /api/investigations/pending (or subscribe
+    to /api/investigations/stream), trigger the agent via POST run-agent, and
+    finally publish a release/retain decision via POST decide.
+    """
+    q = broker.subscribe(INVESTIGATE_EVENT)
+    while True:
+        msg   = await q.get()
+        tx    = msg.get("tx") or {}
+        tx_id = tx.get("transaction_id")
+        if not tx_id:
+            continue
+        # Idempotent: if the same investigation is re-published, keep the
+        # earliest entry so we don't reset operator state.
+        if tx_id in _pending_investigations:
+            continue
+        now_iso = datetime.now(timezone.utc).isoformat()
+        _pending_investigations[tx_id] = {
+            "tx":            tx,
+            "alarm":         msg.get("alarm") or {},
+            "risk_score":    msg.get("risk_score"),
+            "status":        "pending",
+            "agent_verdict": None,
+            "decision":      None,
+            "created_at":    now_iso,
+            "updated_at":    now_iso,
+        }
+        _broadcast_pending_update()
+
+
 # ── Release After Investigation Factory ──────────────────────────────────────
 
 async def _release_after_investigation_factory() -> None:
@@ -864,8 +993,15 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_release_factory())
     asyncio.create_task(_retain_factory())
     asyncio.create_task(_investigate_dispatch_factory())
-    asyncio.create_task(_investigator_factory())
-    asyncio.create_task(_investigation_agent_worker())
+    if AUTO_INVESTIGATION_AGENT:
+        # Legacy auto-pipeline: dispatcher + agent worker drive investigations
+        # without human input. Disabled — see AUTO_INVESTIGATION_AGENT comment.
+        asyncio.create_task(_investigator_factory())
+        asyncio.create_task(_investigation_agent_worker())
+    else:
+        # Manual mode: investigations land in _pending_investigations and wait
+        # for the revenue-guardian UI operator to trigger the agent + decide.
+        asyncio.create_task(_investigation_holding_worker())
     asyncio.create_task(_release_after_investigation_factory())
     asyncio.create_task(_db_store_worker())
     asyncio.create_task(_agent_worker())
@@ -965,6 +1101,16 @@ def _compute_sim_state_snapshot() -> dict:
         "queues":             {t: _broker.qsize(t) for t in topics},
         "stored_count":       get_transaction_count(),
         "investigation_queue": _investigation_queue.qsize() if _investigation_queue else 0,
+        # Live depth of the manual-review holding dict — drives the
+        # "Pending Investigations" node on the simulation diagram.
+        "pending_investigations": len(_pending_investigations),
+        # Number of pending entries currently being analysed by the agent
+        # (status == "agent_running"). Drives the "under analysis" count on
+        # the VAT Fraud Detection Agent block.
+        "pending_investigations_running": sum(
+            1 for v in _pending_investigations.values()
+            if v.get("status") == "agent_running"
+        ),
         "risk_flags": {
             "rt_risk_1_flagged": count_field_value(RT_RISK_1_OUTCOME, "outcome.flagged", True),
             "rt_risk_2_flagged": count_field_value(RT_RISK_2_OUTCOME, "outcome.flagged", True),
@@ -1151,6 +1297,237 @@ def api_ireland_case(transaction_id: str):
     return case
 
 
+# ── Manual investigations API (revenue-guardian UI on :8080) ──────────────────
+
+@app.get("/api/investigations/pending")
+def api_investigations_pending():
+    """
+    Snapshot of every investigation currently parked in the holding queue,
+    awaiting manual agent run + release/retain decision. Newest first.
+    Powered by _pending_investigations, populated by _investigation_holding_worker
+    when AUTO_INVESTIGATION_AGENT is False.
+    """
+    return _pending_snapshot()
+
+
+class InvestigationDecisionPayload(BaseModel):
+    action: str   # "release" | "retain"
+
+
+@app.post("/api/investigations/{transaction_id}/decide")
+async def api_investigations_decide(transaction_id: str, payload: InvestigationDecisionPayload):
+    """
+    Operator-driven release / retain decision for a pending investigation.
+
+      release → publish AGENT_RELEASE_EVENT (the existing
+                _release_after_investigation_factory correlates with
+                validation + arrival and emits the terminal
+                RELEASE_AFTER_INVESTIGATION_EVENT for storage)
+      retain  → publish AGENT_RETAIN_EVENT directly (terminal)
+
+    The entry is removed from _pending_investigations and an SSE update is
+    broadcast so any listening UI can drop the row from its list.
+    """
+    action = (payload.action or "").lower().strip()
+    if action not in ("release", "retain"):
+        return JSONResponse(status_code=400, content={"detail": "action must be 'release' or 'retain'"})
+
+    entry = _pending_investigations.get(transaction_id)
+    if not entry:
+        return JSONResponse(status_code=404, content={"detail": "investigation not found in pending queue"})
+    if entry["status"] == "decided":
+        return JSONResponse(status_code=409, content={"detail": "investigation already decided"})
+
+    tx       = entry["tx"]
+    alarm    = entry.get("alarm") or {}
+    verdict  = entry.get("agent_verdict") or {}
+
+    if action == "release":
+        await broker.publish(AGENT_RELEASE_EVENT, {
+            "tx":               tx,
+            "verdict":          verdict.get("verdict") or "human_release",
+            "reasoning":        verdict.get("reasoning") or "Released by operator",
+            "legislation_refs": verdict.get("legislation_refs") or [],
+            "decided_by":       "human",
+        })
+    else:   # retain
+        # Mirror the auto-pipeline side effects so the suspicious flag and
+        # the Ireland queue stay consistent with what the legacy worker did.
+        update_suspicion_level(transaction_id, "high")
+        insert_ireland_queue({
+            "transaction_id":   transaction_id,
+            "seller_name":      tx.get("seller_name", ""),
+            "seller_country":   tx.get("seller_country", ""),
+            "item_description": tx.get("item_description", ""),
+            "item_category":    tx.get("item_category", ""),
+            "value":            tx.get("value"),
+            "vat_rate":         tx.get("vat_rate"),
+            "correct_vat_rate": tx.get("correct_vat_rate"),
+            "vat_amount":       tx.get("vat_amount"),
+            "transaction_date": tx.get("transaction_date", ""),
+            "alarm_key":        alarm.get("alarm_key", ""),
+            "deviation_pct":    alarm.get("deviation_pct"),
+            "ratio_current":    alarm.get("ratio_current"),
+            "ratio_historical": alarm.get("ratio_historical"),
+            "agent_verdict":    verdict.get("verdict") or "human_retain",
+            "agent_reasoning":  verdict.get("reasoning") or "Retained by operator",
+            "queued_at":        datetime.now(timezone.utc).isoformat(),
+        })
+        await broker.publish(AGENT_RETAIN_EVENT, {
+            "tx":         tx,
+            "verdict":    verdict.get("verdict") or "human_retain",
+            "reasoning":  verdict.get("reasoning") or "Retained by operator",
+            "risk_score": "retained",
+            "alarm_id":   alarm.get("id"),
+            "alarm":      alarm,
+            "decided_by": "human",
+        })
+
+    # Remove from pending and broadcast a final snapshot so listeners drop it.
+    _pending_investigations.pop(transaction_id, None)
+    _broadcast_pending_update()
+    return {"ok": True, "action": action, "transaction_id": transaction_id}
+
+
+@app.post("/api/investigations/{transaction_id}/run-agent")
+async def api_investigations_run_agent(transaction_id: str):
+    """
+    Trigger the VAT fraud detection agent on a pending investigation.
+
+    The endpoint returns immediately (202) after marking the entry
+    "agent_running"; the actual analysis runs in a background task and the
+    UI receives the verdict via /api/investigations/stream when it is ready.
+
+    Idempotency:
+      404 — unknown transaction_id
+      409 — entry is already agent_running or already decided
+    """
+    global _manual_agent_executor
+
+    entry = _pending_investigations.get(transaction_id)
+    if not entry:
+        return JSONResponse(status_code=404, content={"detail": "investigation not found in pending queue"})
+    if entry["status"] == "agent_running":
+        return JSONResponse(status_code=409, content={"detail": "agent already running for this investigation"})
+    if entry["status"] == "decided":
+        return JSONResponse(status_code=409, content={"detail": "investigation already decided"})
+
+    # Lazily build a small thread pool the first time we need it. Reused
+    # across calls so we don't spawn a new pool on every request.
+    if _manual_agent_executor is None:
+        import concurrent.futures
+        _manual_agent_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    entry["status"]     = "agent_running"
+    entry["updated_at"] = now_iso
+    _broadcast_pending_update()
+
+    async def _run() -> None:
+        from lib.agent_bridge import analyse_transaction_sync
+        tx = entry["tx"]
+        try:
+            result = await asyncio.get_event_loop().run_in_executor(
+                _manual_agent_executor, analyse_transaction_sync, tx,
+            )
+            verdict = {
+                "verdict":          result.get("verdict", "uncertain"),
+                "reasoning":        result.get("reasoning", ""),
+                "legislation_refs": result.get("legislation_refs", []),
+                "completed_at":     datetime.now(timezone.utc).isoformat(),
+            }
+            # Persist a row to agent_log so the audit trail matches the
+            # auto-pipeline behaviour.
+            insert_agent_log({
+                "transaction_id":   tx.get("transaction_id"),
+                "seller_name":      tx.get("seller_name", ""),
+                "buyer_country":    tx.get("buyer_country", ""),
+                "item_description": tx.get("item_description", ""),
+                "item_category":    tx.get("item_category", ""),
+                "value":            tx.get("value"),
+                "vat_rate":         tx.get("vat_rate"),
+                "correct_vat_rate": tx.get("correct_vat_rate"),
+                "verdict":          verdict["verdict"],
+                "reasoning":        verdict["reasoning"],
+                "legislation_refs": _json.dumps(verdict["legislation_refs"]),
+                "sent_to_ireland":  0,   # the human decision drives any forwarding
+                "processed_at":     verdict["completed_at"],
+            })
+        except Exception as exc:
+            import traceback
+            print(f"[manual_agent] error: {exc}\n{traceback.format_exc()}")
+            verdict = {
+                "verdict":          "uncertain",
+                "reasoning":        f"Agent error: {exc}",
+                "legislation_refs": [],
+                "completed_at":     datetime.now(timezone.utc).isoformat(),
+                "error":            True,
+            }
+        # Re-fetch the entry in case it was decided/removed mid-run.
+        live = _pending_investigations.get(transaction_id)
+        if live is None:
+            return
+        live["agent_verdict"] = verdict
+        live["status"]        = "agent_done"
+        live["updated_at"]    = datetime.now(timezone.utc).isoformat()
+        _broadcast_pending_update()
+
+    asyncio.create_task(_run())
+    return JSONResponse(status_code=202, content=_pending_entry_view(entry))
+
+
+@app.get("/api/transactions/{transaction_id}/timeline")
+def api_transaction_timeline(transaction_id: str):
+    """
+    Full chronological event history for a single transaction. Walks the
+    persisted event store (data/events/<topic>/<order_id>_<topic>.json) and
+    returns every event sharing this transaction_id, sorted oldest-first.
+
+    Used by the revenue-guardian case-detail page so the operator can see the
+    full lifecycle of an investigation (sales order → risk scores → validation
+    → arrival → routing → investigate event → eventual decision).
+    """
+    from lib.event_store import get_events_for_order
+    return get_events_for_order(transaction_id)
+
+
+@app.get("/api/investigations/stream")
+async def api_investigations_stream(request: Request):
+    """
+    SSE stream carrying the full pending-investigations list. Pushed every
+    time an item is added (new INVESTIGATE_EVENT), an agent run starts/finishes,
+    or a decision removes an item. Initial snapshot delivered on connect.
+    """
+    q: asyncio.Queue = asyncio.Queue(maxsize=20)
+    _pending_sse.add(q)
+
+    try:
+        initial = _json.dumps(_pending_snapshot())
+    except Exception:
+        initial = None
+
+    async def event_generator():
+        try:
+            if initial is not None:
+                yield f"data: {initial}\n\n"
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    payload = await asyncio.wait_for(q.get(), timeout=15.0)
+                    yield f"data: {payload}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": heartbeat\n\n"
+        finally:
+            _pending_sse.discard(q)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 # ── Simulation control ────────────────────────────────────────────────────────
 
 @app.get("/api/simulation/pipeline")
@@ -1169,6 +1546,16 @@ def sim_pipeline():
         "queues":             {t: _broker.qsize(t) for t in topics},
         "stored_count":       get_transaction_count(),
         "investigation_queue": _investigation_queue.qsize() if _investigation_queue else 0,
+        # Live depth of the manual-review holding dict — drives the
+        # "Pending Investigations" node on the simulation diagram.
+        "pending_investigations": len(_pending_investigations),
+        # Number of pending entries currently being analysed by the agent
+        # (status == "agent_running"). Drives the "under analysis" count on
+        # the VAT Fraud Detection Agent block.
+        "pending_investigations_running": sum(
+            1 for v in _pending_investigations.values()
+            if v.get("status") == "agent_running"
+        ),
         "risk_flags": {
             "rt_risk_1_flagged": count_field_value(RT_RISK_1_OUTCOME, "outcome.flagged", True),
             "rt_risk_2_flagged": count_field_value(RT_RISK_2_OUTCOME, "outcome.flagged", True),

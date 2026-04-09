@@ -182,14 +182,17 @@ function BrokerNode({ label, topicKey, count, children, accent, sm, tooltip, wid
   )
 }
 
-function FactoryNode({ label, description, icon, accent, sm, tooltip, width }) {
+function FactoryNode({ label, description, icon, accent, sm, tooltip, width, count, countLabel }) {
   const defaultMinW = sm ? 86 : 120
+  // accent is the inner-content + border color; falls back to the neutral
+  // factory grey when not provided.
+  const accentColor = accent || 'var(--border)'
   return (
     <div
       title={tooltip}
       style={{
         background: accent ? accent + '12' : '#f8f9fa',
-        border: `1px solid ${accent || 'var(--border)'}`,
+        border: `1px solid ${accentColor}`,
         borderRadius: 8, padding: sm ? '4px 7px' : '6px 10px',
         width: width || undefined,
         minWidth: width || defaultMinW,
@@ -200,6 +203,22 @@ function FactoryNode({ label, description, icon, accent, sm, tooltip, width }) {
       <div style={{ fontSize: sm ? 13 : 15, marginBottom: 2 }}>{icon}</div>
       <div style={{ fontSize: sm ? 9 : 10, fontWeight: 700, color: 'var(--text-primary)', lineHeight: 1.3 }}>{label}</div>
       {description && <div style={{ fontSize: 8, color: 'var(--text-muted)', marginTop: 1 }}>{description}</div>}
+      {count != null && (
+        <div style={{ marginTop: 4 }}>
+          <div style={{
+            fontSize: sm ? 16 : 18, fontWeight: 700,
+            color: accent ? accent : 'var(--text-primary)',
+            lineHeight: 1,
+          }}>
+            {fmt(count)}
+          </div>
+          {countLabel && (
+            <div style={{ fontSize: 7, color: 'var(--text-muted)', marginTop: 1, lineHeight: 1 }}>
+              {countLabel}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }
@@ -390,24 +409,35 @@ function FanOutSVG({ height, targetYs, color = '#adb5bd', width = 48, dashed = f
   )
 }
 
-// Fan-out with per-target color + dash (used for entry broker → mixed lanes)
+// Fan-out with per-target dashed style (all arrows now share the neutral grey
+// stroke). The vertical spine is split into per-pair segments so the carrier
+// of any dashed branch is itself dashed — this means the vertical leg from
+// the Sales-order Event broker down to Transport (dashed branch) appears
+// dashed end-to-end, matching the horizontal Transport extension.
 function FanOutMixedSVG({ height, targets, width = 56 }) {
   if (!targets?.length) return null
   const spineX = 8
-  const ys = targets.map(t => t.y)
-  const y0 = Math.min(...ys), y1 = Math.max(...ys)
+  const grey   = '#adb5bd'
+  // Sort targets top→bottom so we can iterate adjacent pairs to split the spine.
+  const sorted = [...targets].sort((a, b) => a.y - b.y)
   return (
     <svg width={width} height={height} style={{ flex: `0 0 ${width}px`, overflow: 'visible' }}>
-      <line x1={spineX} y1={y0} x2={spineX} y2={y1} stroke="#adb5bd" strokeWidth={2} />
+      {sorted.slice(0, -1).map((t, i) => {
+        const next = sorted[i + 1]
+        const dash = (t.dashed || next.dashed) ? '4,3' : undefined
+        return (
+          <line key={`spine-${i}`} x1={spineX} y1={t.y} x2={spineX} y2={next.y}
+            stroke={grey} strokeWidth={2} strokeDasharray={dash} />
+        )
+      })}
       {targets.map((t, i) => {
         const dash = t.dashed ? '4,3' : undefined
-        const col  = t.color || '#adb5bd'
         return (
           <g key={i}>
-            <circle cx={spineX} cy={t.y} r={3} fill={col} />
+            <circle cx={spineX} cy={t.y} r={3} fill={grey} />
             <line x1={spineX} y1={t.y} x2={width - 6} y2={t.y}
-              stroke={col} strokeWidth={2} strokeDasharray={dash} />
-            <polygon points={`${width-6},${t.y-4} ${width},${t.y} ${width-6},${t.y+4}`} fill={col} />
+              stroke={grey} strokeWidth={2} strokeDasharray={dash} />
+            <polygon points={`${width-6},${t.y-4} ${width},${t.y} ${width-6},${t.y+4}`} fill={grey} />
           </g>
         )
       })}
@@ -469,7 +499,7 @@ function FanInSVG({ height, inputYs, outputY, color = '#adb5bd', width = 48 }) {
 //   VAT Agent        → Retained-after-Inv (red, "incorrect" branch)
 // Vertical legs are routed OUTSIDE the after-Inv broker x range so the lines
 // don't pass through the box interiors.
-function MiddleSection({ ev, rf, inv, stored, newStored, H, yRel, yRet, yInv }) {
+function MiddleSection({ ev, rf, inv, pending, pendingRunning, stored, newStored, H, yRel, yRet, yInv }) {
   const Y_REL = yRel
   const Y_RET = yRet
   const Y_INV = yInv
@@ -495,17 +525,26 @@ function MiddleSection({ ev, rf, inv, stored, newStored, H, yRel, yRet, yInv }) 
   const RAFT_TOP   = Y_REL - AFT_H / 2
   const RETAFT_TOP = Y_RET - AFT_H / 2
 
-  // ── Investigation pipeline at Y_INV (bottom band) ────────────────────────
-  const INV_ROW_CY   = Y_INV                   // vertical center of investigation elements
+  // ── Investigation pipeline at Y_INV (bottom band, MANUAL REVIEW MODE) ────
+  // Layout reflects the human-in-the-loop flow: Holding Worker drains every
+  // INVESTIGATE_EVENT into an in-memory dict (Pending Investigations), the
+  // Revenue Guardian operator console reviews them, manually triggers the
+  // VAT Fraud Detection Agent (which now sits BELOW the operator console
+  // with a bidirectional consult arrow), and publishes a release/retain
+  // decision directly to Investigation Clearance / Retain Post Inv.
+  const INV_ROW_CY   = Y_INV                   // vertical center of the main bottom-row elements
   const INVFACT_W    = 130
   const INVFACT_LEFT = IN_ARROW_W
-  const QUEUE_W      = 134
+  const QUEUE_W      = 144                     // wider so "Pending Investigations" fits
   const QUEUE_LEFT   = INVFACT_LEFT + INVFACT_W + 22
-  const AGENT_W      = 140
-  const AGENT_LEFT   = QUEUE_LEFT + QUEUE_W + 22
-  const AGENT_RIGHT  = AGENT_LEFT + AGENT_W
+  const OPER_W       = 170                     // Revenue Guardian operator console
+  const OPER_LEFT    = QUEUE_LEFT + QUEUE_W + 22
+  const OPER_RIGHT   = OPER_LEFT + OPER_W
+  // Linear horizontal flow now goes Operator → Investigation Clearance →
+  // Post-Inv Release. The Agent is consulted vertically below the operator
+  // (see AGENT_TOP / AGENT_LEFT below), not inline.
   const CLRREL_W     = 126
-  const CLRREL_LEFT  = AGENT_RIGHT + 28
+  const CLRREL_LEFT  = OPER_RIGHT + 28
   const POSTINV_W    = 158
   const POSTINV_LEFT = CLRREL_LEFT + CLRREL_W + 24
   const POSTINV_RIGHT = POSTINV_LEFT + POSTINV_W
@@ -517,25 +556,70 @@ function MiddleSection({ ev, rf, inv, stored, newStored, H, yRel, yRet, yInv }) 
   const INV_FACT_H = 56
   const INV_ROW_TOP = INV_ROW_CY - INV_FACT_H / 2
 
+  // ── VAT Fraud Detection Agent: stacked below the Operator Console ────────
+  // The Agent is a side consultation tool driven by the operator. It sits in
+  // its own row below the linear horizontal flow, connected by a bidirectional
+  // arrow (trigger ↓ / verdict ↑). It also displays the live "under analysis"
+  // count, so its rendered height is taller than a plain factory.
+  const AGENT_W       = OPER_W                          // matches operator width for visual symmetry
+  const AGENT_LEFT    = OPER_LEFT
+  const AGENT_BLOCK_H = 86                              // taller than INV_FACT_H to fit the count line
+  const AGENT_GAP_Y   = 36                              // vertical gap between operator bottom and agent top
+  const AGENT_TOP     = INV_ROW_TOP + INV_FACT_H + AGENT_GAP_Y
+  const AGENT_CY      = AGENT_TOP + AGENT_BLOCK_H / 2
+  const AGENT_BOTTOM  = AGENT_TOP + AGENT_BLOCK_H
+  const AGENT_CX      = AGENT_LEFT + AGENT_W / 2
+
+  // ── Arrival → Post-Inv Release supplementary arrow ───────────────────────
+  // The Post-Inv Release factory correlates Investigation Clearance + Order
+  // Validation + Arrival Notification. The OV/Clearance branches are already
+  // visible; this draws the missing Arrival branch as a U-shape that exits
+  // the upper-band Arrival broker area, descends below the Investigation
+  // Pipeline dashed zone, runs horizontally, and rises back up into the
+  // Post-Inv Release block from below.
+  //
+  // ARRIVAL_START_X is the negative offset (in MiddleSection-local
+  // coordinates) of the FanIn spine corner where the existing Arrival arrow
+  // turns upward to feed Release Factory. It is derived statically from the
+  // fixed upper-band widths between MiddleSection's left edge and the FanIn:
+  //   AUTOMATED brokers column (OUT_BROKER_W = 170)
+  // + FanOut SVG (48)
+  // + Release Factory wrapper (≈ 135 — sm factory + padding)
+  // + FanIn SVG (60), spine at width-8 = 52 from its right edge
+  // Start point ≈ -(170 + 48 + 135 + 60 - 52) ≈ -361.
+  const ARRIVAL_START_X = -361
+  const ARRIVAL_BELOW_Y = AGENT_BOTTOM + 28
+  // Effective canvas height — extends below H to accommodate the Agent row
+  // AND the new horizontal leg below the dashed zone.
+  const Heff = Math.max(H, ARRIVAL_BELOW_Y + 16)
+  // Bottom edge of the Post-Inv Release factory (where the new arrow lands).
+  const POST_INV_BOTTOM = INV_ROW_TOP + INV_FACT_H
+
   // ── Loop-back routing ────────────────────────────────────────────────────
   // Vertical legs MUST lie outside the after-Inv broker x range [AFT_LEFT, AFT_RIGHT]
   // so they don't cross the broker interiors.
   //
   // Post-Inv Release → Release-after-Inv: vertical at POSTINV_CX (>> AFT_RIGHT)
   const POSTINV_CX = POSTINV_LEFT + POSTINV_W / 2
-  // Agent → Retained-after-Inv (incorrect): vertical at AFT_RIGHT + margin, which
-  // is inside the Agent's x range so the exit point is on the Agent's top edge.
-  const RETAIN_UP_X = AFT_RIGHT + 20          // 496, inside Agent x range (AGENT_LEFT..AGENT_RIGHT)
+  // Operator Console "retain" decision → Retained-after-Inv. The vertical leg
+  // sits at the right portion of the Operator Console's top edge so it lands
+  // on the operator (where the human decision is taken) AND clears the
+  // after-Inv broker x range. AFT_RIGHT + 20 = 496 happens to fall inside
+  // OPER_LEFT..OPER_RIGHT in the current geometry.
+  const RETAIN_UP_X = AFT_RIGHT + 20          // 496 — inside OPER x range (OPER_LEFT..OPER_RIGHT)
 
   const stroke = 2
+  // All connector lines + arrowheads use this single neutral grey. Semantic
+  // colour is reserved for the text labels next to each arrow (release / retain
+  // / trigger / verdict) so the eye still parses meaning at a glance.
   const grey   = '#adb5bd'
+  // Label colours (text only — line strokes stay grey)
   const green  = '#1f7a3c'
   const red    = '#c0392b'
-  const orange = '#e6820a'
-  const purple = '#9c27b0'
+  const indigo = '#6366f1'
 
   // Small helper for arrowheads at a point, given direction
-  const Arrowhead = ({ x, y, dir, color }) => {
+  const Arrowhead = ({ x, y, dir, color = grey }) => {
     const s = 6
     let pts
     if      (dir === 'right') pts = `${x-s},${y-s} ${x},${y} ${x-s},${y+s}`
@@ -545,63 +629,100 @@ function MiddleSection({ ev, rf, inv, stored, newStored, H, yRel, yRet, yInv }) 
     return <polygon points={pts} fill={color} />
   }
 
+  // Bidirectional consult arrow between Operator Console and the VAT Agent
+  // sitting beneath it. Two parallel vertical legs offset from the central
+  // axis: left leg = trigger (down), right leg = verdict (up).
+  const CONSULT_DX  = 14
+  const CONSULT_TOP = INV_ROW_TOP + INV_FACT_H + 1     // 1 px below operator bottom edge
+  const CONSULT_BOT = AGENT_TOP - 1                    // 1 px above agent top edge
+  const OPER_CX     = OPER_LEFT + OPER_W / 2
+
   return (
-    <div style={{ position: 'relative', width: W, height: H, flexShrink: 0 }}>
+    <div style={{ position: 'relative', width: W, height: Heff, flexShrink: 0 }}>
       {/* Arrow/connector overlay */}
-      <svg style={{ position: 'absolute', top: 0, left: 0, width: W, height: H, pointerEvents: 'none', overflow: 'visible' }}>
+      <svg style={{ position: 'absolute', top: 0, left: 0, width: W, height: Heff, pointerEvents: 'none', overflow: 'visible' }}>
         {/* Release Event → Zone left border (horizontal at Y_REL) */}
-        <line x1={0} y1={Y_REL} x2={ZONE_LEFT} y2={Y_REL} stroke={green} strokeWidth={stroke} />
-        <Arrowhead x={ZONE_LEFT} y={Y_REL} dir="right" color={green} />
+        <line x1={0} y1={Y_REL} x2={ZONE_LEFT} y2={Y_REL} stroke={grey} strokeWidth={stroke} />
+        <Arrowhead x={ZONE_LEFT} y={Y_REL} dir="right" />
 
         {/* Retain Event → Zone left border (horizontal at Y_RET) */}
-        <line x1={0} y1={Y_RET} x2={ZONE_LEFT} y2={Y_RET} stroke={red} strokeWidth={stroke} />
-        <Arrowhead x={ZONE_LEFT} y={Y_RET} dir="right" color={red} />
+        <line x1={0} y1={Y_RET} x2={ZONE_LEFT} y2={Y_RET} stroke={grey} strokeWidth={stroke} />
+        <Arrowhead x={ZONE_LEFT} y={Y_RET} dir="right" />
 
         {/* Release-after-Inv → Zone right border (horizontal at Y_REL, going left) */}
-        <line x1={AFT_LEFT} y1={Y_REL} x2={ZONE_RIGHT} y2={Y_REL} stroke={green} strokeWidth={stroke} />
-        <Arrowhead x={ZONE_RIGHT} y={Y_REL} dir="left" color={green} />
+        <line x1={AFT_LEFT} y1={Y_REL} x2={ZONE_RIGHT} y2={Y_REL} stroke={grey} strokeWidth={stroke} />
+        <Arrowhead x={ZONE_RIGHT} y={Y_REL} dir="left" />
 
         {/* Retained-after-Inv → Zone right border (horizontal at Y_RET, going left) */}
-        <line x1={AFT_LEFT} y1={Y_RET} x2={ZONE_RIGHT} y2={Y_RET} stroke={red} strokeWidth={stroke} />
-        <Arrowhead x={ZONE_RIGHT} y={Y_RET} dir="left" color={red} />
+        <line x1={AFT_LEFT} y1={Y_RET} x2={ZONE_RIGHT} y2={Y_RET} stroke={grey} strokeWidth={stroke} />
+        <Arrowhead x={ZONE_RIGHT} y={Y_RET} dir="left" />
 
-        {/* Investigate Event → Investigator Factory (horizontal at Y_INV) */}
-        <line x1={0} y1={Y_INV} x2={INVFACT_LEFT} y2={Y_INV} stroke={orange} strokeWidth={stroke} />
-        <Arrowhead x={INVFACT_LEFT} y={Y_INV} dir="right" color={orange} />
+        {/* Investigation Notification → Holding Worker (horizontal at Y_INV) */}
+        <line x1={0} y1={Y_INV} x2={INVFACT_LEFT} y2={Y_INV} stroke={grey} strokeWidth={stroke} />
+        <Arrowhead x={INVFACT_LEFT} y={Y_INV} dir="right" />
 
-        {/* Investigator → Queue */}
-        <line x1={INVFACT_LEFT + INVFACT_W} y1={Y_INV} x2={QUEUE_LEFT} y2={Y_INV} stroke={purple} strokeWidth={stroke} />
-        <Arrowhead x={QUEUE_LEFT} y={Y_INV} dir="right" color={purple} />
+        {/* Holding Worker → Pending Investigations dict */}
+        <line x1={INVFACT_LEFT + INVFACT_W} y1={Y_INV} x2={QUEUE_LEFT} y2={Y_INV} stroke={grey} strokeWidth={stroke} />
+        <Arrowhead x={QUEUE_LEFT} y={Y_INV} dir="right" />
 
-        {/* Queue → Agent */}
-        <line x1={QUEUE_LEFT + QUEUE_W} y1={Y_INV} x2={AGENT_LEFT} y2={Y_INV} stroke={purple} strokeWidth={stroke} />
-        <Arrowhead x={AGENT_LEFT} y={Y_INV} dir="right" color={purple} />
+        {/* Pending Investigations → Operator Console (Revenue Guardian UI) */}
+        <line x1={QUEUE_LEFT + QUEUE_W} y1={Y_INV} x2={OPER_LEFT} y2={Y_INV} stroke={grey} strokeWidth={stroke} />
+        <Arrowhead x={OPER_LEFT} y={Y_INV} dir="right" />
 
-        {/* Agent → Cleared for Release (correct/uncertain) */}
-        <line x1={AGENT_RIGHT} y1={Y_INV} x2={CLRREL_LEFT} y2={Y_INV} stroke={green} strokeWidth={stroke} />
-        <Arrowhead x={CLRREL_LEFT} y={Y_INV} dir="right" color={green} />
-        <text x={(AGENT_RIGHT + CLRREL_LEFT) / 2} y={Y_INV - 6}
-              fontSize={9} fill={green} textAnchor="middle" fontWeight={700}>correct</text>
+        {/* Operator Console → Investigation Clearance — the operator's
+            "release" decision flows directly from the operator (the Agent
+            sits below as a side consultation, not in the linear path). */}
+        <line x1={OPER_RIGHT} y1={Y_INV} x2={CLRREL_LEFT} y2={Y_INV} stroke={grey} strokeWidth={stroke} />
+        <Arrowhead x={CLRREL_LEFT} y={Y_INV} dir="right" />
+        <text x={(OPER_RIGHT + CLRREL_LEFT) / 2} y={Y_INV - 6}
+              fontSize={9} fill={green} textAnchor="middle" fontWeight={700}>release</text>
 
         {/* Cleared → Post-Inv Release */}
-        <line x1={CLRREL_LEFT + CLRREL_W} y1={Y_INV} x2={POSTINV_LEFT} y2={Y_INV} stroke={green} strokeWidth={stroke} />
-        <Arrowhead x={POSTINV_LEFT} y={Y_INV} dir="right" color={green} />
+        <line x1={CLRREL_LEFT + CLRREL_W} y1={Y_INV} x2={POSTINV_LEFT} y2={Y_INV} stroke={grey} strokeWidth={stroke} />
+        <Arrowhead x={POSTINV_LEFT} y={Y_INV} dir="right" />
 
         {/* Post-Inv Release → Release-after-Inv (loop-back: up, then left) */}
         <polyline
           points={`${POSTINV_CX},${INV_ROW_TOP} ${POSTINV_CX},${Y_REL} ${AFT_RIGHT},${Y_REL}`}
-          stroke={green} strokeWidth={stroke} fill="none" />
-        <Arrowhead x={AFT_RIGHT} y={Y_REL} dir="left" color={green} />
+          stroke={grey} strokeWidth={stroke} fill="none" />
+        <Arrowhead x={AFT_RIGHT} y={Y_REL} dir="left" />
 
-        {/* Agent → Retained-after-Inv (incorrect: up, then left).
-            Vertical leg at RETAIN_UP_X is outside the broker x range, so it
-            doesn't pass through the box interior. */}
+        {/* Operator "retain" decision → Retained-after-Inv (loop-back: up, then left).
+            The vertical leg originates on the Operator Console's top edge —
+            this is where the human chooses to retain rather than release. */}
         <polyline
           points={`${RETAIN_UP_X},${INV_ROW_TOP} ${RETAIN_UP_X},${Y_RET} ${AFT_RIGHT},${Y_RET}`}
-          stroke={red} strokeWidth={stroke} fill="none" />
-        <Arrowhead x={AFT_RIGHT} y={Y_RET} dir="left" color={red} />
+          stroke={grey} strokeWidth={stroke} fill="none" />
+        <Arrowhead x={AFT_RIGHT} y={Y_RET} dir="left" />
         <text x={RETAIN_UP_X + 4} y={INV_ROW_TOP - 4}
-              fontSize={9} fill={red} textAnchor="start" fontWeight={700}>incorrect</text>
+              fontSize={9} fill={red} textAnchor="start" fontWeight={700}>retain</text>
+
+        {/* Operator Console ⇄ VAT Fraud Detection Agent — bidirectional
+            vertical consult arrow. Two parallel legs: left = trigger (down),
+            right = verdict (up). */}
+        <line x1={OPER_CX - CONSULT_DX} y1={CONSULT_TOP} x2={OPER_CX - CONSULT_DX} y2={CONSULT_BOT}
+          stroke={grey} strokeWidth={stroke} />
+        <Arrowhead x={OPER_CX - CONSULT_DX} y={CONSULT_BOT} dir="down" />
+        <line x1={OPER_CX + CONSULT_DX} y1={CONSULT_BOT} x2={OPER_CX + CONSULT_DX} y2={CONSULT_TOP}
+          stroke={grey} strokeWidth={stroke} />
+        <Arrowhead x={OPER_CX + CONSULT_DX} y={CONSULT_TOP} dir="up" />
+        <text x={OPER_CX - CONSULT_DX - 4} y={(CONSULT_TOP + CONSULT_BOT) / 2}
+              fontSize={9} fill={indigo} textAnchor="end" fontWeight={700} dominantBaseline="middle">trigger</text>
+        <text x={OPER_CX + CONSULT_DX + 4} y={(CONSULT_TOP + CONSULT_BOT) / 2}
+              fontSize={9} fill={indigo} textAnchor="start" fontWeight={700} dominantBaseline="middle">verdict</text>
+
+        {/* Arrival Notification → Post-Inv Release supplementary input.
+            U-shape: starts at the FanIn corner where the existing Arrival
+            arrow turns up to Release Factory, descends below the dashed
+            Investigation Pipeline zone, runs right under it, then rises into
+            the bottom edge of the Post-Inv Release block.
+            Drawn at negative x — relies on the SVG's overflow:visible.  */}
+        <polyline
+          points={`${ARRIVAL_START_X},${Y_INV} ${ARRIVAL_START_X},${ARRIVAL_BELOW_Y} ${POSTINV_CX},${ARRIVAL_BELOW_Y} ${POSTINV_CX},${POST_INV_BOTTOM}`}
+          stroke={grey} strokeWidth={stroke} fill="none" />
+        <Arrowhead x={POSTINV_CX} y={POST_INV_BOTTOM} dir="up" />
+        <text x={ARRIVAL_START_X + 4} y={Y_INV - 6}
+              fontSize={9} fill="var(--text-muted)" textAnchor="start" fontWeight={700}>arrival</text>
       </svg>
 
       {/* ── DB Store · Hub dashed zone (mirrors Order Validation / RT Risk / Transport on the left) ── */}
@@ -645,16 +766,20 @@ function MiddleSection({ ev, rf, inv, stored, newStored, H, yRel, yRet, yInv }) 
           tooltip="Retain Post Inv. — transactions the agent classified as non-compliant. Stored to the DB with the suspicious flag set." />
       </div>
 
-      {/* ── Investigation Pipeline zone (dashed overlay around Investigator · Queue · Agent) ──
-          Rendered BEFORE the three elements below so they draw on top of the border.
+      {/* ── Investigation Pipeline zone (dashed overlay) ──
+          Rendered BEFORE the elements below so they draw on top of the border.
           Interior is transparent so SVG loop-back arrows remain visible through the zone.
-          Label uses width: fit-content so its white background doesn't hide arrows that pass through. */}
+          Label uses width: fit-content so its white background doesn't hide arrows that pass through.
+          Width stops at the Operator Console's right edge so the Investigation
+          Clearance broker (and Post-Inv Release factory) sit OUTSIDE the zone,
+          consistent with the convention that brokers live outside processing zones.
+          Height extends down to encompass the VAT Agent stacked below the Operator. */}
       <div style={{
         position: 'absolute',
         left: INVFACT_LEFT - 14,
         top: INV_ROW_TOP - 41,
-        width: (AGENT_RIGHT - INVFACT_LEFT) + 28,
-        height: H - (INV_ROW_TOP - 41) - 2,
+        width: (OPER_RIGHT - INVFACT_LEFT) + 28,
+        height: (AGENT_BOTTOM + 14) - (INV_ROW_TOP - 41),
         border: '1px dashed var(--border-light)', borderRadius: 6,
         padding: '8px 10px', boxSizing: 'border-box',
         pointerEvents: 'none',
@@ -666,32 +791,49 @@ function MiddleSection({ ev, rf, inv, stored, newStored, H, yRel, yRet, yInv }) 
           background: '#fff', padding: '2px 8px',
           width: 'fit-content', margin: '0 auto',
         }}>
-          Investigation Pipeline
+          Investigation Pipeline · Manual Review Mode
         </div>
       </div>
 
-      {/* Investigator Factory */}
+      {/* Holding Worker (was Investigator Factory) — drains every
+          INVESTIGATE_EVENT into the in-memory _pending_investigations dict
+          when AUTO_INVESTIGATION_AGENT is False on the backend. */}
       <div style={{ position: 'absolute', top: INV_ROW_TOP, left: INVFACT_LEFT, width: INVFACT_W }}>
-        <FactoryNode icon="🕵️" label="Investigator Factory" description="IE filter · FIFO queue" sm width={INVFACT_W}
-          tooltip="Investigator Factory — filters Investigation Notifications for Ireland and enqueues them on the Investigation FIFO queue." />
+        <FactoryNode icon="📥" label="Holding Worker" description="parks events for review" sm width={INVFACT_W}
+          tooltip="Holding Worker — subscribes to INVESTIGATE_EVENT and parks every investigation in the in-memory _pending_investigations dict for manual review by the operator." />
       </div>
 
-      {/* Investigation Queue — default gray palette (no accent override), matching
-          the factory family visually. sm variant keeps it the same height as the
-          surrounding factories so its center lands on Y_INV. */}
+      {/* Pending Investigations queue — depth comes from the holding dict
+          length (pending_investigations field on /api/simulation/pipeline). */}
       <div style={{ position: 'absolute', top: INV_ROW_TOP - 2, left: QUEUE_LEFT, width: QUEUE_W }}>
-        <QueueNode label="Investigation Queue" count={inv} sm
-          tooltip="Investigation Queue — delayed backlog of cases awaiting the VAT Agent. Depth > 0 indicates a backlog." />
+        <QueueNode label="Pending Investigations" count={pending} sm
+          tooltip="Pending Investigations — in-memory holding dict awaiting human action via the Revenue Guardian UI on :8080. Depth = number of investigations the operator has not yet decided." />
       </div>
 
-      {/* VAT Agent Worker */}
-      <div style={{ position: 'absolute', top: INV_ROW_TOP, left: AGENT_LEFT, width: AGENT_W }}>
-        <FactoryNode icon="🤖" label="VAT Agent Worker" description="LM Studio · fraud detection" sm width={AGENT_W}
-          tooltip="VAT Agent Worker — runs the local LLM (LM Studio) to produce a compliance verdict: incorrect / correct / uncertain." />
+      {/* Revenue Guardian Operator Console — represents the external UI on
+          http://localhost:8080 where the tax officer triggers the agent and
+          decides release / retain. Indigo accent reserved for the human-
+          interface block, distinct from the sky-blue Custom Data Hub. */}
+      <div style={{ position: 'absolute', top: INV_ROW_TOP, left: OPER_LEFT, width: OPER_W }}>
+        <FactoryNode icon="🧑‍💼" label="Revenue Guardian UI" description="operator @ :8080" sm width={OPER_W}
+          accent={indigo}
+          tooltip="Revenue Guardian Operator Console — http://localhost:8080. The tax officer reviews each pending investigation, manually triggers the VAT Fraud Detection Agent, and publishes the final release / retain decision via POST /api/investigations/{id}/decide." />
       </div>
 
-      {/* Investigation Clearance broker */}
-      <div style={{ position: 'absolute', top: INV_ROW_TOP, left: CLRREL_LEFT, width: CLRREL_W }}>
+      {/* VAT Fraud Detection Agent — sits BELOW the Operator Console as a
+          side consultation tool reached via the bidirectional consult arrow.
+          Manually triggered by the operator clicking "Run Agent" in the UI.
+          Displays the live count of investigations currently being analysed. */}
+      <div style={{ position: 'absolute', top: AGENT_TOP, left: AGENT_LEFT, width: AGENT_W }}>
+        <FactoryNode icon="🤖" label="VAT Fraud Detection Agent" description="LM Studio · manually triggered" sm width={AGENT_W}
+          count={pendingRunning} countLabel="under analysis"
+          tooltip="VAT Fraud Detection Agent — runs the local LLM (LM Studio) on demand when the operator clicks Run Agent in the Revenue Guardian UI. The count shows how many investigations are currently being analysed (status = agent_running)." />
+      </div>
+
+      {/* Investigation Clearance broker — vertically centered on INV_ROW_CY.
+          BrokerNode renders ~14 px taller than the surrounding sm factories,
+          so we offset its top edge upward to center it on the same baseline. */}
+      <div style={{ position: 'absolute', top: INV_ROW_TOP - 7, left: CLRREL_LEFT, width: CLRREL_W }}>
         <BrokerNode label="Investigation Clearance" topicKey="INVESTIGATION_CLEARANCE"
           count={ev.agent_release_event} accent={green} sm width={CLRREL_W}
           tooltip="Investigation Clearance — transactions the agent found compliant. Forwarded to the Post-Investigation Release factory." />
@@ -774,11 +916,13 @@ function KpiStrip({ pipeline }) {
 // ── Pipeline Diagram ──────────────────────────────────────────────────────────
 
 function PipelineDiagram({ pipeline }) {
-  const ev     = pipeline?.events             || {}
-  const q      = pipeline?.queues             || {}
-  const rf     = pipeline?.risk_flags         || {}
-  const inv    = pipeline?.investigation_queue ?? null
-  const stored = pipeline?.stored_count        ?? null
+  const ev             = pipeline?.events             || {}
+  const q              = pipeline?.queues             || {}
+  const rf             = pipeline?.risk_flags         || {}
+  const inv            = pipeline?.investigation_queue ?? null
+  const pending        = pipeline?.pending_investigations ?? null
+  const pendingRunning = pipeline?.pending_investigations_running ?? null
+  const stored         = pipeline?.stored_count        ?? null
 
   // Row 1: three parallel processing zones
   const OV_H = 94, RT_H = 230, AN_H = 94, LGAP = 10
@@ -790,7 +934,12 @@ function PipelineDiagram({ pipeline }) {
   // Shared width for the three top zones so OV and Transport match the RT zone
   const ZONE_W = 440
   // Shared width for OV and Transport factories (so they match each other)
-  const SIDE_FACTORY_W = 220
+  // OV / Transport factories fill their parent zone's content area
+  // (ZONE_W − 2× zone padding 10 = 420). With justifyContent: center the
+  // factory is visually centered AND its right edge lines up with the
+  // RT Consolidation factory on the right side of the RT zone (also
+  // bounded by the same zone padding).
+  const SIDE_FACTORY_W = 420
   // Shared width for the three row-1 output brokers (OV / RT Score / Arrival Notification)
   const OUT_BROKER_W = 170
 
@@ -830,20 +979,29 @@ function PipelineDiagram({ pipeline }) {
       }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16, minWidth: 'max-content' }}>
 
-          {/* ══ MAIN FLOW — single horizontal row: Entry → zones → brokers → Release Factory → event brokers → DB Store ══ */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 0 }}>
+          {/* ══ MAIN FLOW — single horizontal row: Entry → zones → brokers → Release Factory → event brokers → DB Store ══
+              alignItems is "flex-start" so the LEFT columns (all natural height = ROW1_H)
+              stay at the top of the row even when the MiddleSection grows taller to
+              accommodate the VAT Agent stacked under the Operator Console. With center
+              alignment the LEFT side would shift downward by (Heff - ROW1_H) / 2 and
+              break alignment with MiddleSection's absolute children. */}
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 0 }}>
 
-            {/* Entry Broker */}
-            <Zone label="Entry">
-              <BrokerNode label="Sales-order Event" topicKey="SALES_ORDER_EVENT"
-                count={ev.sales_order_event} queueSize={q.sales_order_event} sm />
-            </Zone>
+            {/* Entry Broker — vertically centered on yRT (= ROW1_H/2) so it
+                lines up with the RT_Score output broker on the same horizontal. */}
+            <div style={{ height: ROW1_H, display: 'flex', alignItems: 'center' }}>
+              <Zone label="Entry">
+                <BrokerNode label="Sales-order Event" topicKey="SALES_ORDER"
+                  count={ev.sales_order_event} queueSize={q.sales_order_event} sm />
+              </Zone>
+            </div>
 
-            {/* FanOut: solid → OV + RT  |  dashed orange → Transport */}
+            {/* FanOut: solid grey → OV + RT  |  dashed grey → Transport
+                (the spine segment between RT and Transport is dashed too) */}
             <FanOutMixedSVG height={ROW1_H} width={48} targets={[
-              { y: yOV, color: '#adb5bd', dashed: false },
-              { y: yRT, color: '#adb5bd', dashed: false },
-              { y: yAN, color: '#e67e22', dashed: true  },
+              { y: yOV, dashed: false },
+              { y: yRT, dashed: false },
+              { y: yAN, dashed: true  },
             ]} />
 
             {/* Three parallel zones stacked — all at ZONE_W so Row 1 is visually aligned */}
@@ -851,7 +1009,7 @@ function PipelineDiagram({ pipeline }) {
 
               <div style={{ height: OV_H, display: 'flex', alignItems: 'center' }}>
                 <Zone label="Order Validation" style={{ width: ZONE_W, boxSizing: 'border-box' }}>
-                  <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center' }}>
+                  <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
                     <FactoryNode icon="✅" label="Order Validation"
                       description="3–5 s · unlimited concurrency" sm width={SIDE_FACTORY_W}
                       tooltip="Order Validation Factory — async per-order task with uniform 3–5 s delay. Emits ORDER_VALIDATION events." />
@@ -861,7 +1019,12 @@ function PipelineDiagram({ pipeline }) {
 
               <div style={{ height: RT_H, display: 'flex', alignItems: 'center' }}>
                 <Zone label="RT Risk Monitoring" style={{ width: ZONE_W, height: '100%', boxSizing: 'border-box' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 0, height: '100%', justifyContent: 'flex-end' }}>
+                  {/* The inner content was visually biased toward the bottom of
+                      the zone (large gap above the boxes, small gap below). A
+                      small upward translate balances the gap on either side
+                      without affecting layout — the children stay centered on
+                      their flex row, the whole row just shifts up by 18 px. */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 0, height: '100%', justifyContent: 'flex-end', transform: 'translateY(-18px)' }}>
                     {/* Entry fan-out — mirrors the fan-in on the right */}
                     <FanOutSVG height={RT_STACK_H} targetYs={[rtTopY, rtBotY]} width={24} />
                     {/* Stacked RT1 + RT2 rows */}
@@ -898,7 +1061,7 @@ function PipelineDiagram({ pipeline }) {
 
               <div style={{ height: AN_H, display: 'flex', alignItems: 'center' }}>
                 <Zone label="Transport" style={{ width: ZONE_W, boxSizing: 'border-box' }}>
-                  <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center' }}>
+                  <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
                     <FactoryNode icon="🚢" label="Transport"
                       description="exp. delay ~60 s · unlimited concurrency" sm width={SIDE_FACTORY_W}
                       tooltip="Transport / Arrival Notification — async per-order task with exponential-delay arrival (~60 s mean). Emits ARRIVAL_NOTIFICATION events." />
@@ -971,7 +1134,8 @@ function PipelineDiagram({ pipeline }) {
             {/* Middle section: DB Store Factory + Hub (grouped in a dashed zone) + After-Inv brokers
                 (mirroring event brokers) + inline investigation pipeline along the bottom.
                 Absolute-positioned canvas sized to ROW1_H; Y coordinates locked to yOV/yRT/yAN from the parent. */}
-            <MiddleSection ev={ev} rf={rf} inv={inv} stored={stored} newStored={newStored}
+            <MiddleSection ev={ev} rf={rf} inv={inv} pending={pending} pendingRunning={pendingRunning}
+              stored={stored} newStored={newStored}
               H={ROW1_H} yRel={yOV} yRet={yRT} yInv={yAN} />
 
           </div>
@@ -990,12 +1154,14 @@ function PipelineDiagram({ pipeline }) {
         <LegendItem color="#0284c7" bg="#e0f2fe" label="Custom Data Hub (MongoDB)" />
         <LegendItem color="var(--text-muted)" bg="#ffffff" label="Processing zone" dashed />
 
-        {/* Sub-box / arrow color coding */}
+        {/* Sub-box accent colors carried by the broker inner sub-boxes */}
         <LegendItem color="#1f7a3c" bg="#e8f5e9" label="Release (automated + post inv.)" />
         <LegendItem color="#c0392b" bg="#fde8e8" label="Retain (automated + post inv.)" />
         <LegendItem color="#e6820a" bg="#fff3e0" label="Investigation notification" />
-        <LegendItem color="#9c27b0" bg="#fdf6ff" label="Investigation flow" />
-        <LegendItem color="#e67e22" bg="#fff8f0" label="Transport / Arrival" dashed />
+        <LegendItem color="#6366f1" bg="#eef2ff" label="Revenue Guardian UI (operator)" />
+        {/* Connector / arrow coding — all line strokes are neutral grey;
+            only the dashed style remains as a semantic differentiator. */}
+        <LegendItem color="#adb5bd" bg="#f8f9fa" label="Transport / Arrival (dashed)" dashed />
 
         <div style={{ marginLeft: 8, fontSize: 11, color: 'var(--text-muted)' }}>
           Brokers all share the blue outer border — the inner sub-box carries the differentiating color.
