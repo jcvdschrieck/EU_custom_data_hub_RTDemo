@@ -4,16 +4,17 @@ import {
   simStart, simPause, simResume, simReset, simSetSpeed,
 } from '../api'
 
-// User-facing speed multipliers. ×1 is defined as "full March (44 640 sim-min)
-// plays in ~15 real minutes" — the intended default horizon. The `value` sent
-// to the backend is sim-minutes per real-second.
-//   ×1   → 50    sim-min/real-sec → March in ~15 real minutes  (default)
-//   ×10  → 500   sim-min/real-sec → March in  ~1.5 real minutes
-//   ×100 → 5000  sim-min/real-sec → March in   ~9 real seconds
+// User-facing speed multipliers. The simulation DB is rescaled at seed time
+// so all transactions fall within a 15-sim-minute window (March 1st 00:00 →
+// 00:15). The `value` sent to the backend is sim-seconds per real-second, so
+// ×1 = real-time playback (15 sim-min in 15 real-min).
+//   ×1   →   1 sim-sec/real-sec → 15 sim-min in 15 real-min  (default)
+//   ×10  →  10 sim-sec/real-sec → 15 sim-min in  1.5 real-min
+//   ×100 → 100 sim-sec/real-sec → 15 sim-min in   ~9 real-sec
 const SPEEDS = [
-  { label: '×1',   value: 50   },
-  { label: '×10',  value: 500  },
-  { label: '×100', value: 5000 },
+  { label: '×1',   value: 1   },
+  { label: '×10',  value: 10  },
+  { label: '×100', value: 100 },
 ]
 
 function fmt(n) {

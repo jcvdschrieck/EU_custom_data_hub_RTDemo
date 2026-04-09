@@ -15,7 +15,10 @@ import uuid
 from datetime import date, datetime, timedelta, timezone
 
 from lib.catalog import COUNTRIES, SUPPLIERS, VAT_RATES
-from lib.config import EUROPEAN_CUSTOM_DB, SIMULATION_DB
+from lib.config import (
+    EUROPEAN_CUSTOM_DB, SIMULATION_DB,
+    SIM_START_DT, SIM_END_DT,
+)
 from lib.database import (
     bulk_insert,
     init_european_custom_db,
@@ -168,6 +171,35 @@ def _scenario_transactions(d: date) -> list[dict]:
     return rows
 
 
+def _rescale_to_sim_window(rows: list[dict]) -> None:
+    """
+    Linearly remap each row's `transaction_date` (and `created_at`) from the
+    original generation range [first_date, last_date] into the configured
+    simulation window [SIM_START_DT, SIM_END_DT] — preserving relative ordering
+    and proportional spacing. Re-generates `xml_message` so the embedded
+    timestamp matches the rescaled stored value.
+
+    Mutates `rows` in place. Assumes `rows` is already sorted by
+    transaction_date.
+    """
+    if not rows:
+        return
+    src_first = datetime.fromisoformat(rows[0]["transaction_date"])
+    src_last  = datetime.fromisoformat(rows[-1]["transaction_date"])
+    src_span_sec = max(1.0, (src_last - src_first).total_seconds())
+    dst_span_sec = (SIM_END_DT - SIM_START_DT).total_seconds()
+
+    for r in rows:
+        src_dt = datetime.fromisoformat(r["transaction_date"])
+        frac   = (src_dt - src_first).total_seconds() / src_span_sec
+        new_dt = SIM_START_DT + timedelta(seconds=frac * dst_span_sec)
+        new_iso = new_dt.isoformat()
+        r["transaction_date"] = new_iso
+        r["created_at"]       = new_iso
+        # XML embeds the transaction_date — regenerate so it matches.
+        r["xml_message"]      = transaction_to_xml(r)
+
+
 def seed_simulation_db() -> int:
     init_simulation_db()
     start = date(2026, 3, 1)
@@ -181,6 +213,8 @@ def seed_simulation_db() -> int:
         if d in scenario_days:
             rows.extend(_scenario_transactions(d))
     rows.sort(key=lambda r: r["transaction_date"])
+    # Compress the month-long generation range into the 15-minute sim window.
+    _rescale_to_sim_window(rows)
     # Add fired=0 for simulation DB
     for r in rows:
         r["fired"] = 0

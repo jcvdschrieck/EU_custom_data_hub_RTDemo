@@ -280,7 +280,9 @@ async def _order_validation_factory() -> None:
     """
     Subscriber of Sales-order Event Broker.
     Validates the incoming sales order (required fields, numeric sanity,
-    known country code) after a uniformly-distributed real-time delay of 3–5 s.
+    known country code) after a uniformly-distributed delay of 3–5 sim-seconds
+    (the wall-clock wait scales with state.speed so the offset stays constant
+    in sim-time across ×1 / ×10 / ×100 playback).
 
     Each order is handled by an independent asyncio task — unlimited concurrency,
     no order waits behind another in this factory.
@@ -288,9 +290,11 @@ async def _order_validation_factory() -> None:
     """
     import random
     from lib.catalog import COUNTRIES
+    from lib.simulator import state as _state
 
     async def _validate(tx: dict) -> None:
-        await asyncio.sleep(random.uniform(3.0, 5.0))
+        sim_delay = random.uniform(3.0, 5.0)
+        await asyncio.sleep(sim_delay / max(0.01, _state.speed))
         errors: list[str] = []
         for field in ("transaction_id", "seller_id", "seller_name",
                       "buyer_country", "value", "vat_rate", "vat_amount"):
@@ -320,8 +324,11 @@ async def _arrival_notification_factory() -> None:
     """
     Subscribes to Sales-order Event Broker.
     For each sales order, spawns an independent asyncio task that waits an
-    exponentially-distributed real-time delay (mean 60 s) then publishes
-    to ARRIVAL_NOTIFICATION.
+    exponentially-distributed delay (mean 30 sim-seconds, converted to
+    wall-clock by dividing by state.speed) then publishes to
+    ARRIVAL_NOTIFICATION. Defining the delay in sim-seconds keeps arrivals
+    tightly coupled to their orders at all playback speeds — 30 sim-sec mean
+    offset whether running at ×1, ×10 or ×100.
 
     Unlimited concurrency — each order is scheduled independently; no order
     ever blocks behind another in this factory.
@@ -330,11 +337,12 @@ async def _arrival_notification_factory() -> None:
     from lib.message_factory import build_arrival_notification
     from lib.simulator import state as _state
 
-    MEAN_REAL_SECONDS = 60.0
+    MEAN_SIM_SECONDS = 30.0
 
     async def _schedule(tx: dict) -> None:
-        delay = random.expovariate(1.0 / MEAN_REAL_SECONDS)
-        await asyncio.sleep(delay)
+        sim_delay  = random.expovariate(1.0 / MEAN_SIM_SECONDS)
+        real_delay = sim_delay / max(0.01, _state.speed)
+        await asyncio.sleep(real_delay)
         payload = build_arrival_notification(tx, _state.sim_time)
         await broker.publish(ARRIVAL_NOTIFICATION, payload)
 

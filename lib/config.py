@@ -12,20 +12,25 @@ API_PORT     = 8505
 API_BASE_URL = f"http://localhost:{API_PORT}"
 
 # Simulation time window
+#
+# All March-2026 source transactions are rescaled at seed time so their
+# timestamps fall inside this 15-minute window starting at March 1st 00:00.
+# That way ×1 playback runs in real time (1 sim-second per real-second) and
+# the SIM TIME chip ticks visibly second-by-second through the 15-minute
+# window instead of jumping across days.
 SIM_START_STR = "2026-03-01T00:00:00"
-SIM_END_STR   = "2026-03-31T23:59:59"
+SIM_END_STR   = "2026-03-01T00:15:00"
 SIM_START_DT  = datetime.fromisoformat(SIM_START_STR).replace(tzinfo=timezone.utc)
 SIM_END_DT    = datetime.fromisoformat(SIM_END_STR).replace(tzinfo=timezone.utc)
+SIM_WINDOW_SECONDS = int((SIM_END_DT - SIM_START_DT).total_seconds())   # 900
 
-# Speed: simulated minutes that advance per real second.
-# The UI exposes three user-facing multipliers that map onto this unit so that
-# ×1 plays the full active replay (March 2026, 44 640 sim-min) in ~15 real
-# minutes — the intended default horizon:
-#   ×1   → 50   sim-min/real-sec → full March in ~15 real minutes  (default)
-#   ×10  → 500  sim-min/real-sec → full March in  ~1.5 real minutes
-#   ×100 → 5000 sim-min/real-sec → full March in   ~9 real seconds
-DEFAULT_SPEED = 50.0
-MIN_SPEED     = 1.0
-MAX_SPEED     = 5000.0
+# Speed: simulated seconds that advance per real second.
+# ×1 plays the 15-sim-minute window in 15 real minutes (real-time playback).
+#   ×1   →   1 sim-sec/real-sec → 15 sim-min in 15 real-min  (default)
+#   ×10  →  10 sim-sec/real-sec → 15 sim-min in 1.5 real-min
+#   ×100 → 100 sim-sec/real-sec → 15 sim-min in   9 real-sec
+DEFAULT_SPEED = 1.0
+MIN_SPEED     = 0.1
+MAX_SPEED     = 100.0
 
 QUEUE_SIZE = 30   # transactions shown in live queue

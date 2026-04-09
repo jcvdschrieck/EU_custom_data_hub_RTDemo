@@ -1,11 +1,12 @@
 """
 Simulation engine state (shared between FastAPI and the background task).
 
-The simulation replays March-2026 transactions in chronological order.
-Speed is expressed as simulated minutes per real second:
-  - 50   → full March in ~15 real minutes (default)
-  - 150  → full March in  ~5 real minutes
-  - 900  → full March in ~50 real seconds
+The simulation replays the (rescaled) March-2026 transactions in chronological
+order. All source timestamps are compressed at seed time into a 15-sim-minute
+window, so speed is expressed as simulated **seconds** per real second:
+  - 1    → 15 sim-min in 15 real-min   (real-time, default)
+  - 10   → 15 sim-min in  1.5 real-min
+  - 100  → 15 sim-min in  ~9 real-sec
 """
 from __future__ import annotations
 
@@ -64,64 +65,73 @@ state = SimState()
 
 async def simulation_loop(fire_callback) -> None:
     """
-    Event-driven simulation loop — fires exactly one transaction at a time.
+    Continuous-clock simulation loop.
 
-    For each event:
-      1. Load the next unfired transaction.
-      2. Compute the real-time delay proportional to the simulated time gap
-         between the current clock and that event's timestamp.
-      3. Sleep (in 50 ms slices so pause/speed changes take effect promptly).
-      4. Advance the simulated clock to the event timestamp and fire it.
+    On every tick (~50 ms):
+      1. Advance state.sim_time by `(real elapsed since last tick) × state.speed`,
+         so the simulated clock keeps moving forward smoothly even between
+         events — the SIM TIME chip never freezes during quiet periods.
+      2. Fire every pending event whose timestamp the clock has now reached
+         (zero, one, or many per tick — at high speeds we can cross several
+         events in a single 50 ms slice).
+      3. Once all events are fired, keep advancing until SIM_END_DT and stop.
 
-    Speed semantics: sim-minutes per real-second.
-      120  → 2 sim-hours/real-sec  (~6 min for full March)
-      1440 → 1 sim-day/real-sec    (~31 sec for full March)
+    On pause (`state.running == False`) the wall-clock anchor is dropped, so
+    paused real-time does not count toward sim-time advance after resume.
+    Speed changes take effect on the very next tick (max ~50 ms latency).
+
+    Speed semantics: sim-seconds per real-second.
+      1   → real-time playback (15 sim-min in 15 real-min)
+      10  → 10× faster than real-time
+      100 → 100× faster than real-time
     """
     from lib.database import get_next_sim_transaction, mark_fired, get_sim_counts
 
     state.total_count = get_sim_counts()["total"]
 
-    _next_tx: dict | None = None      # pre-loaded next event
-    _wait_start: float | None = None  # real monotonic time when we started waiting
+    _next_tx: dict | None    = None   # pre-loaded next event
+    _last_real: float | None = None   # monotonic real time of the previous tick
 
     while True:
         await asyncio.sleep(0.05)
 
         if not state.running:
-            # On pause: keep _next_tx so we resume on the same event,
-            # but reset _wait_start so the inter-event delay restarts.
-            _wait_start = None
+            # On pause: drop the wall-clock anchor so paused time isn't credited
+            # to sim-time advance after resume. Keep _next_tx so we resume on
+            # the same event.
+            _last_real = None
             continue
 
-        # ── Load next event if needed ──────────────────────────────────────────
-        if _next_tx is None:
-            _next_tx = get_next_sim_transaction()
-            if _next_tx is None:
+        # ── Continuously advance sim_time ──────────────────────────────────────
+        now = time.monotonic()
+        if _last_real is None:
+            _last_real = now
+        real_dt    = now - _last_real
+        _last_real = now
+        if real_dt > 0:
+            state.sim_time = state.sim_time + timedelta(seconds=real_dt * state.speed)
+            if state.sim_time > SIM_END_DT:
                 state.sim_time = SIM_END_DT
-                state.running  = False
-                continue
-            _wait_start = time.monotonic()
 
-        elif _wait_start is None:
-            # Resumed after a pause
-            _wait_start = time.monotonic()
+        # ── Fire every event whose timestamp has been reached ─────────────────
+        while True:
+            if _next_tx is None:
+                _next_tx = get_next_sim_transaction()
+                if _next_tx is None:
+                    # No more events. Stop once the clock has reached the end.
+                    if state.sim_time >= SIM_END_DT:
+                        state.running = False
+                    break
 
-        # ── Compute real-time delay for this event ─────────────────────────────
-        next_time = datetime.fromisoformat(_next_tx["transaction_date"])
-        if next_time.tzinfo is None:
-            next_time = next_time.replace(tzinfo=timezone.utc)
+            next_time = datetime.fromisoformat(_next_tx["transaction_date"])
+            if next_time.tzinfo is None:
+                next_time = next_time.replace(tzinfo=timezone.utc)
 
-        sim_gap_sec   = max(0.0, (next_time - state.sim_time).total_seconds())
-        real_delay_sec = max(0.05, sim_gap_sec / (state.speed * 60))
+            if state.sim_time < next_time:
+                break   # not yet — wait for the clock to catch up
 
-        if time.monotonic() - _wait_start < real_delay_sec:
-            continue   # not yet — keep waiting
-
-        # ── Fire ──────────────────────────────────────────────────────────────
-        state.sim_time = next_time
-        mark_fired([_next_tx["transaction_id"]])
-        await fire_callback([_next_tx])
-        state.fired_count += 1
-        state.add_recent(_next_tx)
-        _next_tx    = None
-        _wait_start = None
+            mark_fired([_next_tx["transaction_id"]])
+            await fire_callback([_next_tx])
+            state.fired_count += 1
+            state.add_recent(_next_tx)
+            _next_tx = None

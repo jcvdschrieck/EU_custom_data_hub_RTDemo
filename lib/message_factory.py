@@ -172,6 +172,10 @@ def build_sales_order_event(row: dict) -> dict:
         "has_error":        has_error,
         "item_category":    category,
         "item_description": description,
+        # Required by insert_transaction() in _db_store_worker — propagate the
+        # original DB row's xml_message + created_at so terminal storage works.
+        "xml_message":      row.get("xml_message"),
+        "created_at":       row.get("created_at", tx_date),
     }
     return msg
 

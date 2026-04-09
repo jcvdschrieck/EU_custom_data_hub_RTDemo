@@ -95,9 +95,13 @@ def flush_events() -> None:
     """
     Delete all persisted event files.
     Called at simulation start and reset to ensure a clean slate.
+
+    Uses ignore_errors=True because background workers may still be writing
+    events to disk while reset is in progress (esp. after a fast ×100 run);
+    any orphan files left behind will be overwritten on the next start.
     """
     if EVENTS_DIR.exists():
-        shutil.rmtree(EVENTS_DIR)
+        shutil.rmtree(EVENTS_DIR, ignore_errors=True)
     EVENTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
