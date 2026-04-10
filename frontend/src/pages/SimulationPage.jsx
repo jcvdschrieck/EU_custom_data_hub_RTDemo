@@ -537,8 +537,14 @@ function MiddleSection({ ev, rf, customs, tax, taxRunning, stored, newStored, H,
   //
   // Y positions are chosen so the two rows DO NOT overlap with the upper
   // band's After-Inv brokers (which sit at Y_REL and Y_RET).
-  const Y_CUSTOMS = 340           // Customs row vertical center
-  const Y_TAX     = 510           // Tax row vertical center
+  // The Customs Office dashed zone wraps the row blocks with a 24 px label
+  // padding above CUSTOMS_ROW_TOP, so the zone top sits at Y_CUSTOMS - 52.
+  // Y_CUSTOMS = 360 puts the Customs zone top at y=308, leaving an 8 px gap
+  // below the Data Store zone bottom (ZONE_BOTTOM = 300). The Tax row sits
+  // 170 px below to preserve the original inter-row gap and inter-zone
+  // arrow geometry.
+  const Y_CUSTOMS = 360           // Customs row vertical center
+  const Y_TAX     = 530           // Tax row vertical center
 
   // Block widths for the bottom band — uniform across both rows so the
   // listeners, queues and officers are vertically aligned.
@@ -588,8 +594,11 @@ function MiddleSection({ ev, rf, customs, tax, taxRunning, stored, newStored, H,
   // The Post-Inv Release factory correlates Investigation Clearance + Order
   // Validation + Arrival Notification. The OV/Clearance branches arrive via
   // the Customs Officer release path; this draws the missing Arrival branch
-  // as an L-shape that runs at Y_INV (between the Customs and Tax rows) and
-  // rises into the bottom edge of the Post-Inv Release block.
+  // as a U-shape that exits the upper-band Arrival broker area, descends
+  // BELOW everything (Tax Office zone + VAT Agent + inter-zone arrows),
+  // runs horizontally under them, and rises back up into the Post-Inv
+  // Release block from below. Routing the arrow under the schema avoids
+  // crossing the Customs/Tax zones and the escalate / recommend arrows.
   //
   // ARRIVAL_START_X is the negative offset (in MiddleSection-local
   // coordinates) of the FanIn spine corner where the existing Arrival arrow
@@ -601,10 +610,12 @@ function MiddleSection({ ev, rf, customs, tax, taxRunning, stored, newStored, H,
   // + FanIn SVG (60), spine at width-8 = 52 from its right edge
   // Start point ≈ -(170 + 48 + 135 + 60 - 52) ≈ -361.
   const ARRIVAL_START_X = -361
+  const ARRIVAL_BELOW_Y = AGENT_BOTTOM + 24    // 16 px below the VAT Agent
 
-  // Effective canvas height — extends below H to accommodate the Tax row +
-  // VAT Agent stacked below it.
-  const Heff = Math.max(H, AGENT_BOTTOM + 16)
+  // Effective canvas height — extends below H to accommodate the Tax row,
+  // the VAT Agent stacked below it, AND the arrival U-shape's horizontal
+  // leg that runs under everything.
+  const Heff = Math.max(H, ARRIVAL_BELOW_Y + 16)
 
   // ── Loop-back routing ────────────────────────────────────────────────────
   // Vertical legs MUST lie outside the after-Inv broker x range
@@ -771,13 +782,15 @@ function MiddleSection({ ev, rf, customs, tax, taxRunning, stored, newStored, H,
               fontSize={9} fill={indigo} textAnchor="start" fontWeight={700} dominantBaseline="middle">verdict</text>
 
         {/* Arrival Notification → Post-Inv Release supplementary input.
-            L-shape: starts at the FanIn corner where the existing Arrival
-            arrow turns up to Release Factory, runs horizontally at Y_INV
-            (which falls in the gap between Customs and Tax rows), then rises
-            into the bottom edge of the Post-Inv Release block.
+            U-shape: starts at the FanIn corner where the existing Arrival
+            arrow turns up to Release Factory, descends BELOW the entire
+            bottom band (Customs zone + Tax zone + VAT Agent + inter-zone
+            arrows), runs right under them, then rises into the bottom edge
+            of the Post-Inv Release block. Routing under the schema keeps
+            the line clear of the escalate / recommend / consult arrows.
             Drawn at negative x — relies on the SVG's overflow:visible. */}
         <polyline
-          points={`${ARRIVAL_START_X},${Y_INV} ${POSTINV_CX},${Y_INV} ${POSTINV_CX},${CUSTOMS_ROW_BOT}`}
+          points={`${ARRIVAL_START_X},${Y_INV} ${ARRIVAL_START_X},${ARRIVAL_BELOW_Y} ${POSTINV_CX},${ARRIVAL_BELOW_Y} ${POSTINV_CX},${CUSTOMS_ROW_BOT}`}
           stroke={grey} strokeWidth={stroke} fill="none" />
         <Arrowhead x={POSTINV_CX} y={CUSTOMS_ROW_BOT} dir="up" />
         <text x={ARRIVAL_START_X + 4} y={Y_INV - 6}
