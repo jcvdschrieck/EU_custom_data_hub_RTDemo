@@ -730,6 +730,13 @@ def _pending_entry_view(entry: dict) -> dict:
         "status":           entry.get("status"),
         "agent_verdict":    entry.get("agent_verdict"),
         "decision":         entry.get("decision"),
+        # Customs ↔ Tax workflow state machine. Initialised by the holding
+        # worker as "customs_pending"; transitions are driven by the
+        # /submit-to-tax and /recommend endpoints. Customs is master.
+        "workflow_status":     entry.get("workflow_status") or "customs_pending",
+        "tax_recommendation":  entry.get("tax_recommendation"),
+        "tax_recommended_at":  entry.get("tax_recommended_at"),
+        "submitted_to_tax_at": entry.get("submitted_to_tax_at"),
         "created_at":       entry.get("created_at"),
         "updated_at":       entry.get("updated_at"),
     }
@@ -787,14 +794,20 @@ async def _investigation_holding_worker() -> None:
             continue
         now_iso = datetime.now(timezone.utc).isoformat()
         _pending_investigations[tx_id] = {
-            "tx":            tx,
-            "alarm":         msg.get("alarm") or {},
-            "risk_score":    msg.get("risk_score"),
-            "status":        "pending",
-            "agent_verdict": None,
-            "decision":      None,
-            "created_at":    now_iso,
-            "updated_at":    now_iso,
+            "tx":              tx,
+            "alarm":           msg.get("alarm") or {},
+            "risk_score":      msg.get("risk_score"),
+            "status":          "pending",
+            "agent_verdict":   None,
+            "decision":        None,
+            # Customs ↔ Tax workflow always starts at customs_pending —
+            # the Customs operator is the first to triage.
+            "workflow_status":     "customs_pending",
+            "tax_recommendation":  None,
+            "tax_recommended_at":  None,
+            "submitted_to_tax_at": None,
+            "created_at":      now_iso,
+            "updated_at":      now_iso,
         }
         _broadcast_pending_update()
 
@@ -1362,6 +1375,71 @@ class InvestigationDecisionPayload(BaseModel):
     action: str   # "release" | "retain"
 
 
+class InvestigationRecommendationPayload(BaseModel):
+    recommendation: str   # "release" | "retain"
+
+
+@app.post("/api/investigations/{transaction_id}/submit-to-tax")
+async def api_investigations_submit_to_tax(transaction_id: str):
+    """
+    Customs operator escalates an investigation to the Tax Authority queue.
+
+    Workflow transition: customs_pending → at_tax. The entry stays in the
+    holding dict but disappears from the Customs Authority view (filtered to
+    customs_pending + recommended_*) and starts appearing on the Tax
+    Authority page (filtered to at_tax). Tax then runs the agent if needed
+    and publishes a recommendation via /recommend, which moves the entry to
+    recommended_release / recommended_retain — back at the Customs page for
+    final decision.
+
+    Idempotency: 404 if missing, 409 if already past customs_pending.
+    """
+    entry = _pending_investigations.get(transaction_id)
+    if not entry:
+        return JSONResponse(status_code=404, content={"detail": "investigation not found in pending queue"})
+    if entry.get("workflow_status") != "customs_pending":
+        return JSONResponse(status_code=409, content={"detail": f"investigation is in workflow state '{entry.get('workflow_status')}', expected 'customs_pending'"})
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    entry["workflow_status"]     = "at_tax"
+    entry["submitted_to_tax_at"] = now_iso
+    entry["updated_at"]          = now_iso
+    _broadcast_pending_update()
+    return _pending_entry_view(entry)
+
+
+@app.post("/api/investigations/{transaction_id}/recommend")
+async def api_investigations_recommend(transaction_id: str, payload: InvestigationRecommendationPayload):
+    """
+    Tax Authority operator publishes a non-binding recommendation on a
+    transaction Customs has submitted for review.
+
+    Workflow transition: at_tax → recommended_release / recommended_retain.
+    The entry stays in the holding dict; it disappears from the Tax view
+    and reappears on the Customs page with the recommendation displayed
+    as a colored badge alongside the (now-only) Release / Retain action
+    buttons. The Customs operator's call via /decide is what actually
+    publishes the terminal event.
+    """
+    rec = (payload.recommendation or "").lower().strip()
+    if rec not in ("release", "retain"):
+        return JSONResponse(status_code=400, content={"detail": "recommendation must be 'release' or 'retain'"})
+
+    entry = _pending_investigations.get(transaction_id)
+    if not entry:
+        return JSONResponse(status_code=404, content={"detail": "investigation not found in pending queue"})
+    if entry.get("workflow_status") != "at_tax":
+        return JSONResponse(status_code=409, content={"detail": f"investigation is in workflow state '{entry.get('workflow_status')}', expected 'at_tax'"})
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    entry["workflow_status"]    = f"recommended_{rec}"
+    entry["tax_recommendation"] = rec
+    entry["tax_recommended_at"] = now_iso
+    entry["updated_at"]         = now_iso
+    _broadcast_pending_update()
+    return _pending_entry_view(entry)
+
+
 @app.post("/api/investigations/{transaction_id}/decide")
 async def api_investigations_decide(transaction_id: str, payload: InvestigationDecisionPayload):
     """
@@ -1389,14 +1467,23 @@ async def api_investigations_decide(transaction_id: str, payload: InvestigationD
     tx       = entry["tx"]
     alarm    = entry.get("alarm") or {}
     verdict  = entry.get("agent_verdict") or {}
+    tax_rec  = entry.get("tax_recommendation")
+
+    # Customs is master, but we record an audit flag when the Customs
+    # operator overrides a Tax Authority recommendation. The flag is
+    # included on the published terminal event so any downstream consumer
+    # can flag the divergence.
+    custom_override = bool(tax_rec and tax_rec != action)
 
     if action == "release":
         await broker.publish(AGENT_RELEASE_EVENT, {
-            "tx":               tx,
-            "verdict":          verdict.get("verdict") or "human_release",
-            "reasoning":        verdict.get("reasoning") or "Released by operator",
-            "legislation_refs": verdict.get("legislation_refs") or [],
-            "decided_by":       "human",
+            "tx":                  tx,
+            "verdict":             verdict.get("verdict") or "human_release",
+            "reasoning":           verdict.get("reasoning") or "Released by operator",
+            "legislation_refs":    verdict.get("legislation_refs") or [],
+            "decided_by":          "human",
+            "tax_recommendation":  tax_rec,
+            "custom_override":     custom_override,
         })
     else:   # retain
         # Mirror the auto-pipeline side effects so the suspicious flag and
@@ -1422,19 +1509,27 @@ async def api_investigations_decide(transaction_id: str, payload: InvestigationD
             "queued_at":        datetime.now(timezone.utc).isoformat(),
         })
         await broker.publish(AGENT_RETAIN_EVENT, {
-            "tx":         tx,
-            "verdict":    verdict.get("verdict") or "human_retain",
-            "reasoning":  verdict.get("reasoning") or "Retained by operator",
-            "risk_score": "retained",
-            "alarm_id":   alarm.get("id"),
-            "alarm":      alarm,
-            "decided_by": "human",
+            "tx":                  tx,
+            "verdict":             verdict.get("verdict") or "human_retain",
+            "reasoning":           verdict.get("reasoning") or "Retained by operator",
+            "risk_score":          "retained",
+            "alarm_id":            alarm.get("id"),
+            "alarm":               alarm,
+            "decided_by":          "human",
+            "tax_recommendation":  tax_rec,
+            "custom_override":     custom_override,
         })
 
     # Remove from pending and broadcast a final snapshot so listeners drop it.
     _pending_investigations.pop(transaction_id, None)
     _broadcast_pending_update()
-    return {"ok": True, "action": action, "transaction_id": transaction_id}
+    return {
+        "ok": True,
+        "action": action,
+        "transaction_id": transaction_id,
+        "tax_recommendation": tax_rec,
+        "custom_override": custom_override,
+    }
 
 
 @app.post("/api/investigations/{transaction_id}/run-agent")
