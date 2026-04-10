@@ -170,6 +170,23 @@ _pending_investigations: dict[str, dict] = {}
 _pending_sse:            set[asyncio.Queue] = set()   # subscribers to pending-list updates
 _manual_agent_executor   = None   # lazy-initialised ThreadPoolExecutor for manual agent runs
 
+# Registry of in-flight delayed factory tasks (Order Validation + Arrival
+# Notification + manual agent runs). Each factory adds its newly-created task
+# here and removes it on completion. /api/simulation/reset cancels every task
+# still in the set so no residual events fire after a reset has emptied the
+# pipeline.
+_inflight_factory_tasks: set[asyncio.Task] = set()
+
+
+def _track_factory_task(coro) -> asyncio.Task:
+    """Schedule *coro* as a background task and register it for cancellation
+    on simulation reset. The task auto-removes itself from the registry when
+    it finishes (so the set doesn't grow unbounded)."""
+    task = asyncio.create_task(coro)
+    _inflight_factory_tasks.add(task)
+    task.add_done_callback(_inflight_factory_tasks.discard)
+    return task
+
 
 # ── Simulation: publish to Sales-order Event Broker ──────────────────────────
 
@@ -344,7 +361,7 @@ async def _order_validation_factory() -> None:
     q = broker.subscribe(SALES_ORDER_EVENT)
     while True:
         tx = await q.get()
-        asyncio.create_task(_validate(tx))
+        _track_factory_task(_validate(tx))
 
 
 # ── Arrival Notification Factory ─────────────────────────────────────────────
@@ -378,7 +395,7 @@ async def _arrival_notification_factory() -> None:
     q = broker.subscribe(SALES_ORDER_EVENT)
     while True:
         tx = await q.get()
-        asyncio.create_task(_schedule(tx))
+        _track_factory_task(_schedule(tx))
 
 
 # ── Release Factory (GREEN path) ─────────────────────────────────────────────
@@ -1472,7 +1489,7 @@ async def api_investigations_run_agent(transaction_id: str):
         live["updated_at"]    = datetime.now(timezone.utc).isoformat()
         _broadcast_pending_update()
 
-    asyncio.create_task(_run())
+    _track_factory_task(_run())
     return JSONResponse(status_code=202, content=_pending_entry_view(entry))
 
 
@@ -1636,6 +1653,15 @@ def sim_reset():
         while not _investigation_queue.empty():
             try: _investigation_queue.get_nowait()
             except Exception: break
+    # Cancel every in-flight delayed factory task (Order Validation, Arrival
+    # Notification, manual agent runs) so no residual events fire after the
+    # reset has emptied the pipeline. Tasks already in the middle of an
+    # `await broker.publish(...)` will still complete that single publish,
+    # but anything still inside `asyncio.sleep(...)` cancels cleanly.
+    for t in list(_inflight_factory_tasks):
+        if not t.done():
+            t.cancel()
+    _inflight_factory_tasks.clear()
     # Clear the manual-mode holding dict and push a fresh (empty) snapshot
     # to every SSE subscriber so the Revenue Guardian Tax Authority page
     # drops all the stale rows immediately instead of keeping them around
