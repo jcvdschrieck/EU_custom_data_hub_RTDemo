@@ -30,10 +30,6 @@ export const getMetrics = (params) =>
 export const getTransactions = (params) =>
   http.get('/api/transactions', { params: clean(params) }).then(r => r.data)
 
-// ── Agent ─────────────────────────────────────────────────────────────────────
-export const triggerAgentAnalysis = (txId) =>
-  http.post(`/api/agent/analyse/${txId}`).then(r => r.data)
-
 // ── Catalog ───────────────────────────────────────────────────────────────────
 export const getSuppliers  = () => http.get('/api/catalog/suppliers').then(r => r.data)
 export const getCountries  = () => http.get('/api/catalog/countries').then(r => r.data)

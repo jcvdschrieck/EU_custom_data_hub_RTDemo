@@ -149,7 +149,6 @@ from lib.database import (
     get_ireland_queue,
     get_ireland_case,
     update_suspicion_level,
-    clear_suspicious_flag,
     upsert_sales_order_line_item,
     upsert_line_item_risk,
     upsert_line_item_ai_analysis,
@@ -158,30 +157,12 @@ from lib.regions import country_region
 from lib.simulator import state, simulation_loop
 from lib.catalog import SUPPLIERS, COUNTRY_NAMES
 
-# ── Feature flags ─────────────────────────────────────────────────────────────
-
-# When True, _investigator_factory + _investigation_agent_worker run as
-# before — INVESTIGATE_EVENT items are auto-routed to the LM Studio agent and
-# their verdict published as AGENT_RELEASE_EVENT / AGENT_RETAIN_EVENT.
-#
-# When False (current state), those two tasks are NOT started. Instead the
-# two-entity manual workflow is active: a _customs_listener_factory drains
-# RETAIN_EVENT into _customs_queue, and a _tax_listener_factory drains
-# INVESTIGATE_EVENT into _tax_queue. The Revenue Guardian UI on :8080
-# drives the queues via /api/customs/* and /api/tax/* endpoints. The
-# legacy auto-pipeline code is kept in place so this can be flipped back
-# trivially.
-AUTO_INVESTIGATION_AGENT: bool = False
-
 # ── In-memory state ───────────────────────────────────────────────────────────
 
 _live_queue:          deque[dict]        = deque(maxlen=QUEUE_SIZE)
 _live_alarms:         list[dict]         = []
-_agent_processing:    dict[str, dict]    = {}   # tx_id → snapshot while analysing
 _sse_queues:          set[asyncio.Queue] = set()   # live-transaction stream subscribers
 _sim_state_sse:       set[asyncio.Queue] = set()   # pipeline + status stream subscribers
-_agent_queue:         asyncio.Queue | None = None  # manual POST /api/agent/analyse
-_investigation_queue: asyncio.Queue | None = None  # legacy auto investigation pipeline
 
 # ── Two-entity workflow queues ───────────────────────────────────────────────
 #
@@ -623,151 +604,13 @@ async def _investigate_dispatch_factory() -> None:
     await asyncio.gather(_drain_validation(), _drain_score())
 
 
-# ── Investigator Factory ──────────────────────────────────────────────────────
-
-async def _investigator_factory() -> None:
-    """
-    Subscribes to INVESTIGATE_EVENT.
-    IE-bound orders → pushed to _investigation_queue for VAT agent processing.
-    Non-IE orders   → auto-released via AGENT_RELEASE_EVENT (uncertain verdict).
-    """
-    q = broker.subscribe(INVESTIGATE_EVENT)
-    while True:
-        msg = await q.get()
-        tx = msg["tx"]
-        buyer_country = tx.get("buyer_country") or (
-            (tx.get("CountryOfDestination") or {}).get("country", "")
-        )
-        item = {"tx": tx, "alarm": msg.get("alarm", {})}
-        if buyer_country == "IE" and _investigation_queue is not None:
-            await _investigation_queue.put(item)
-        else:
-            # Non-IE amber orders: auto-release without deep investigation
-            await broker.publish(AGENT_RELEASE_EVENT, {
-                "tx":               tx,
-                "verdict":          "uncertain",
-                "reasoning":        "Non-IE order: auto-released without deep investigation.",
-                "legislation_refs": [],
-            })
-
-
-# ── Investigation Agent Worker ────────────────────────────────────────────────
-
-async def _investigation_agent_worker() -> None:
-    """
-    Processes _investigation_queue (FIFO) with the VAT fraud detection agent.
-      incorrect        → AGENT_RETAIN_EVENT + ireland_queue + agent_log
-      correct/uncertain → AGENT_RELEASE_EVENT + agent_log
-    """
-    import concurrent.futures
-    from lib.agent_bridge import analyse_transaction_sync
-
-    loop     = asyncio.get_event_loop()
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
-
-    while True:
-        item  = await _investigation_queue.get()
-        tx    = item["tx"]
-        alarm = item.get("alarm", {})
-        tx_id = tx["transaction_id"]
-
-        if tx_id in _agent_processing:
-            _investigation_queue.task_done()
-            continue
-
-        _agent_processing[tx_id] = {
-            "transaction_id":   tx_id,
-            "seller_name":      tx.get("seller_name", ""),
-            "item_description": tx.get("item_description", ""),
-            "value":            tx.get("value"),
-            "vat_rate":         tx.get("vat_rate"),
-            "started_at":       datetime.now(timezone.utc).isoformat(),
-            "source":           "investigation_pipeline",
-        }
-
-        try:
-            result           = await loop.run_in_executor(executor, analyse_transaction_sync, tx)
-            verdict          = result.get("verdict", "uncertain")
-            reasoning        = result.get("reasoning", "")
-            legislation_refs = result.get("legislation_refs", [])
-            now_str          = datetime.now(timezone.utc).isoformat()
-
-            insert_agent_log({
-                "transaction_id":   tx_id,
-                "seller_name":      tx.get("seller_name", ""),
-                "buyer_country":    tx.get("buyer_country", ""),
-                "item_description": tx.get("item_description", ""),
-                "item_category":    tx.get("item_category", ""),
-                "value":            tx.get("value"),
-                "vat_rate":         tx.get("vat_rate"),
-                "correct_vat_rate": tx.get("correct_vat_rate"),
-                "verdict":          verdict,
-                "reasoning":        reasoning,
-                "legislation_refs": _json.dumps(legislation_refs),
-                "sent_to_ireland":  1 if verdict == "incorrect" else 0,
-                "processed_at":     now_str,
-            })
-
-            if verdict == "incorrect":
-                update_suspicion_level(tx_id, "high")
-                insert_ireland_queue({
-                    "transaction_id":   tx_id,
-                    "seller_name":      tx.get("seller_name", ""),
-                    "seller_country":   tx.get("seller_country", ""),
-                    "item_description": tx.get("item_description", ""),
-                    "item_category":    tx.get("item_category", ""),
-                    "value":            tx.get("value"),
-                    "vat_rate":         tx.get("vat_rate"),
-                    "correct_vat_rate": tx.get("correct_vat_rate"),
-                    "vat_amount":       tx.get("vat_amount"),
-                    "transaction_date": tx.get("transaction_date", ""),
-                    "alarm_key":        alarm.get("alarm_key", ""),
-                    "deviation_pct":    alarm.get("deviation_pct"),
-                    "ratio_current":    alarm.get("ratio_current"),
-                    "ratio_historical": alarm.get("ratio_historical"),
-                    "agent_verdict":    verdict,
-                    "agent_reasoning":  reasoning,
-                    "queued_at":        now_str,
-                })
-                await broker.publish(AGENT_RETAIN_EVENT, {
-                    "tx":         tx,
-                    "verdict":    verdict,
-                    "reasoning":  reasoning,
-                    "risk_score": "retained",
-                    "alarm_id":   alarm.get("id"),
-                    "alarm":      alarm,
-                })
-            else:
-                clear_suspicious_flag(tx_id)
-                await broker.publish(AGENT_RELEASE_EVENT, {
-                    "tx":               tx,
-                    "verdict":          verdict,
-                    "reasoning":        reasoning,
-                    "legislation_refs": legislation_refs,
-                })
-
-        except Exception as exc:
-            import traceback
-            print(f"[investigation_agent_worker] error: {exc}\n{traceback.format_exc()}")
-            await broker.publish(AGENT_RELEASE_EVENT, {
-                "tx":               tx,
-                "verdict":          "uncertain",
-                "reasoning":        f"Agent error: {exc}",
-                "legislation_refs": [],
-            })
-        finally:
-            _agent_processing.pop(tx_id, None)
-            _investigation_queue.task_done()
-
-
 # ── Two-entity manual workflow (Customs Office + Tax Office) ─────────────────
 #
-# When AUTO_INVESTIGATION_AGENT is False, the legacy holding worker is
-# replaced by two independent listeners — one per entity. Each listener
-# subscribes to its own broker topic and populates its own in-memory queue.
-# Inter-entity transfers (Customs escalates → Tax, Tax recommends → Customs)
-# physically move the entry between dicts and broadcast updates on BOTH SSE
-# streams so both UIs refresh simultaneously.
+# Two independent listeners — one per entity. Each listener subscribes to its
+# own broker topic and populates its own in-memory queue. Inter-entity
+# transfers (Customs escalates → Tax, Tax recommends → Customs) physically
+# move the entry between dicts and broadcast updates on BOTH SSE streams so
+# both UIs refresh simultaneously.
 
 def _flat_tx_view(tx: dict) -> dict:
     """Common transaction-shaped fields surfaced on every queue entry view.
@@ -1338,103 +1181,13 @@ async def _data_hub_writer() -> None:
     await asyncio.gather(_drain_so(), _drain_risk(), _drain_ai(), _tick())
 
 
-# ── Agent Worker (triggered manually from dashboard) ─────────────────────────
-
-async def _agent_worker() -> None:
-    """
-    Reads from _agent_queue, which is populated by POST /api/agent/analyse.
-    Runs the Claude-powered VAT compliance analysis in a thread pool.
-    verdict 'incorrect' → escalate to high + insert ireland_queue
-    verdict 'correct'/'uncertain' → clear suspicious flag
-    """
-    import concurrent.futures
-    from lib.agent_bridge import analyse_transaction_sync
-
-    loop = asyncio.get_event_loop()
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
-
-    while True:
-        item  = await _agent_queue.get()
-        tx    = item["tx"]
-        alarm = item.get("alarm", {})
-        tx_id = tx["transaction_id"]
-
-        _agent_processing[tx_id] = {
-            "transaction_id":   tx_id,
-            "seller_name":      tx["seller_name"],
-            "item_description": tx["item_description"],
-            "value":            tx["value"],
-            "vat_rate":         tx["vat_rate"],
-            "started_at":       datetime.now(timezone.utc).isoformat(),
-        }
-
-        try:
-            result = await loop.run_in_executor(executor, analyse_transaction_sync, tx)
-
-            verdict          = result.get("verdict", "uncertain")
-            reasoning        = result.get("reasoning", "")
-            legislation_refs = result.get("legislation_refs", [])
-            now_str          = datetime.now(timezone.utc).isoformat()
-
-            insert_agent_log({
-                "transaction_id":   tx_id,
-                "seller_name":      tx["seller_name"],
-                "buyer_country":    tx["buyer_country"],
-                "item_description": tx["item_description"],
-                "item_category":    tx["item_category"],
-                "value":            tx["value"],
-                "vat_rate":         tx["vat_rate"],
-                "correct_vat_rate": tx["correct_vat_rate"],
-                "verdict":          verdict,
-                "reasoning":        reasoning,
-                "legislation_refs": _json.dumps(legislation_refs),
-                "sent_to_ireland":  1 if verdict == "incorrect" else 0,
-                "processed_at":     now_str,
-            })
-
-            if verdict == "incorrect":
-                update_suspicion_level(tx_id, "high")
-                insert_ireland_queue({
-                    "transaction_id":   tx_id,
-                    "seller_name":      tx["seller_name"],
-                    "seller_country":   tx["seller_country"],
-                    "item_description": tx["item_description"],
-                    "item_category":    tx["item_category"],
-                    "value":            tx["value"],
-                    "vat_rate":         tx["vat_rate"],
-                    "correct_vat_rate": tx["correct_vat_rate"],
-                    "vat_amount":       tx["vat_amount"],
-                    "transaction_date": tx["transaction_date"],
-                    "alarm_key":        alarm.get("alarm_key", ""),
-                    "deviation_pct":    alarm.get("deviation_pct"),
-                    "ratio_current":    alarm.get("ratio_current"),
-                    "ratio_historical": alarm.get("ratio_historical"),
-                    "agent_verdict":    verdict,
-                    "agent_reasoning":  reasoning,
-                    "queued_at":        now_str,
-                })
-            else:
-                clear_suspicious_flag(tx_id)
-
-        except Exception as exc:
-            import traceback
-            print(f"[agent_worker] error: {exc}\n{traceback.format_exc()}")
-        finally:
-            _agent_processing.pop(tx_id, None)
-            _agent_queue.task_done()
-
-
 # ── Lifespan ──────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _agent_queue, _investigation_queue
     from lib.database import init_european_custom_db, init_simulation_db
     init_european_custom_db()
     init_simulation_db()
-
-    _agent_queue         = asyncio.Queue()
-    _investigation_queue = asyncio.Queue()
 
     asyncio.create_task(simulation_loop(_fire_transactions))
     asyncio.create_task(_RT_risk_monitoring_1_factory())
@@ -1445,21 +1198,14 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_release_factory())
     asyncio.create_task(_retain_factory())
     asyncio.create_task(_investigate_dispatch_factory())
-    if AUTO_INVESTIGATION_AGENT:
-        # Legacy auto-pipeline: dispatcher + agent worker drive investigations
-        # without human input. Disabled — see AUTO_INVESTIGATION_AGENT comment.
-        asyncio.create_task(_investigator_factory())
-        asyncio.create_task(_investigation_agent_worker())
-    else:
-        # Manual mode (two-entity model): two independent listeners.
-        #   RED  → RETAIN_EVENT      → _customs_listener → _customs_queue
-        #   AMBER → INVESTIGATE_EVENT → _tax_listener     → _tax_queue
-        asyncio.create_task(_customs_listener_factory())
-        asyncio.create_task(_tax_listener_factory())
+    # Two-entity model: each office has its own listener.
+    #   RED   → RETAIN_EVENT      → _customs_listener → _customs_queue
+    #   AMBER → INVESTIGATE_EVENT → _tax_listener     → _tax_queue
+    asyncio.create_task(_customs_listener_factory())
+    asyncio.create_task(_tax_listener_factory())
     asyncio.create_task(_release_after_investigation_factory())
     asyncio.create_task(_db_store_worker())
     asyncio.create_task(_data_hub_writer())
-    asyncio.create_task(_agent_worker())
     asyncio.create_task(_sim_state_broadcaster())
 
     yield
@@ -1539,10 +1285,7 @@ def _compute_sim_state_snapshot() -> dict:
     counts = get_sim_counts()
     s = state.to_dict()
     s.update(counts)
-    s["active_alarms"]           = len(get_alarms(active_only=True))
-    s["agent_queue_len"]         = _agent_queue.qsize() if _agent_queue else 0
-    s["investigation_queue_len"] = _investigation_queue.qsize() if _investigation_queue else 0
-    s["agent_processing"]        = len(_agent_processing)
+    s["active_alarms"] = len(get_alarms(active_only=True))
 
     # ── Pipeline block (same shape as GET /api/simulation/pipeline) ──
     topics = [
@@ -1555,7 +1298,6 @@ def _compute_sim_state_snapshot() -> dict:
         "events":             {t: event_count(t) for t in topics},
         "queues":             {t: _broker.qsize(t) for t in topics},
         "stored_count":       get_transaction_count(),
-        "investigation_queue": _investigation_queue.qsize() if _investigation_queue else 0,
         # Two-entity model: separate counters for the Customs and Tax queues
         # plus how many tax items are currently being analysed by the agent.
         "customs_queue":          len(_customs_queue),
@@ -1699,44 +1441,16 @@ def api_get_suspicious(limit: int = Query(50, ge=1, le=200)):
     return get_suspicious_transactions(limit=limit)
 
 
-# ── Agent log, processing & dashboard trigger ─────────────────────────────────
+# ── Agent log (historical) ────────────────────────────────────────────────────
+#
+# Read-only audit log of every VAT Fraud Detection Agent run, populated by
+# api_tax_run_agent on the new two-entity flow. The agent itself is now
+# triggered exclusively from the Tax officer's Revenue Guardian page via
+# POST /api/tax/{transaction_id}/run-agent.
 
 @app.get("/api/agent-log")
 def api_agent_log(limit: int = Query(100, ge=1, le=500)):
     return get_agent_log(limit=limit)
-
-
-@app.get("/api/agent-processing")
-def api_agent_processing():
-    return list(_agent_processing.values())
-
-
-@app.post("/api/agent/analyse/{transaction_id}")
-def api_trigger_agent(transaction_id: str):
-    """
-    Dashboard endpoint — queues a transaction for AI agent analysis.
-    Fetches the transaction and its alarm context from the DB, then
-    pushes to _agent_queue for processing by _agent_worker.
-    """
-    if _agent_queue is None:
-        return JSONResponse(status_code=503, content={"detail": "Agent not ready"})
-
-    tx = get_transaction_by_id(transaction_id)
-    if not tx:
-        return JSONResponse(status_code=404, content={"detail": "Transaction not found"})
-
-    if any(p["transaction_id"] == transaction_id for p in _agent_processing.values()):
-        return {"ok": False, "reason": "already processing"}
-
-    # Find alarm context from in-memory alarms or DB
-    alarm_key = f"{tx['seller_id']}|{tx['buyer_country']}"
-    alarm_ctx = next(
-        (a for a in _live_alarms if a.get("alarm_key") == alarm_key),
-        {},
-    )
-
-    _agent_queue.put_nowait({"tx": tx, "alarm": alarm_ctx})
-    return {"ok": True, "queued": transaction_id}
 
 
 # ── Ireland queue & case detail ───────────────────────────────────────────────
@@ -2123,7 +1837,6 @@ def sim_pipeline():
         "events":             {t: event_count(t) for t in topics},
         "queues":             {t: _broker.qsize(t) for t in topics},
         "stored_count":       get_transaction_count(),
-        "investigation_queue": _investigation_queue.qsize() if _investigation_queue else 0,
         # Two-entity model: separate counters for Customs and Tax queues.
         "customs_queue":          len(_customs_queue),
         "tax_queue":              len(_tax_queue),
@@ -2145,10 +1858,7 @@ def sim_status():
     counts = get_sim_counts()
     s = state.to_dict()
     s.update(counts)
-    s["active_alarms"]           = len(get_alarms(active_only=True))
-    s["agent_queue_len"]         = _agent_queue.qsize() if _agent_queue else 0
-    s["investigation_queue_len"] = _investigation_queue.qsize() if _investigation_queue else 0
-    s["agent_processing"]        = len(_agent_processing)
+    s["active_alarms"] = len(get_alarms(active_only=True))
     return s
 
 
@@ -2205,11 +1915,6 @@ def sim_reset():
     bootstrap_scenario_alarm()   # pre-seed SUP001→IE alarm from day 1
     _live_queue.clear()
     _live_alarms.clear()
-    _agent_processing.clear()
-    if _investigation_queue:
-        while not _investigation_queue.empty():
-            try: _investigation_queue.get_nowait()
-            except Exception: break
     # Cancel every in-flight delayed factory task (Order Validation, Arrival
     # Notification, manual agent runs) so no residual events fire after the
     # reset has emptied the pipeline. Tasks already in the middle of an

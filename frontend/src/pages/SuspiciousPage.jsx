@@ -1,6 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
 import axios from 'axios'
-import { triggerAgentAnalysis } from '../api'
 
 const COUNTRY = { FR:'France', DE:'Germany', ES:'Spain', IT:'Italy', NL:'Netherlands', PL:'Poland', IE:'Ireland' }
 

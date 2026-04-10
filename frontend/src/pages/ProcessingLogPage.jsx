@@ -220,7 +220,6 @@ function LogLine({ entry, onDetails }) {
 
 export default function ProcessingLogPage() {
   const [log,        setLog]        = useState([])
-  const [processing, setProcessing] = useState([])
   const [detail,     setDetail]     = useState(null)
   const [stats,      setStats]      = useState(null)
   const [autoScroll, setAutoScroll] = useState(true)
@@ -228,17 +227,17 @@ export default function ProcessingLogPage() {
 
   const refresh = useCallback(async () => {
     try {
-      const [logRes, procRes] = await Promise.all([
-        axios.get('/api/agent-log?limit=500'),
-        axios.get('/api/agent-processing'),
-      ])
-      const logData  = logRes.data
-      const procData = procRes.data.map(p => ({ ...p, type: 'processing' }))
+      // Historical log of every VAT Fraud Detection Agent run, populated by
+      // POST /api/tax/{id}/run-agent on the new two-entity flow. Live in-flight
+      // tracking now lives on the Tax Authority page in the Revenue Guardian
+      // UI (agent_status field on the Tax queue), so this view is purely
+      // historical.
+      const logRes  = await axios.get('/api/agent-log?limit=500')
+      const logData = logRes.data
 
       // Log is newest-first from API; reverse to oldest-first for console display
       const chronological = [...logData].reverse()
       setLog(chronological)
-      setProcessing(procData)
 
       const total     = logData.length
       const incorrect = logData.filter(r => r.verdict === 'incorrect').length
@@ -259,10 +258,10 @@ export default function ProcessingLogPage() {
     if (autoScroll && bottomRef.current) {
       bottomRef.current.scrollIntoView({ behavior: 'smooth' })
     }
-  }, [log, processing, autoScroll])
+  }, [log, autoScroll])
 
-  // All entries in display order: completed log + currently processing at bottom
-  const allEntries = [...log, ...processing]
+  // All entries in chronological display order
+  const allEntries = log
 
   return (
     <div className="page-container">
