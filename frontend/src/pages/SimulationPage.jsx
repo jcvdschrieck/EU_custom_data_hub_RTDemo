@@ -499,7 +499,7 @@ function FanInSVG({ height, inputYs, outputY, color = '#adb5bd', width = 48 }) {
 //   VAT Agent        → Retained-after-Inv (red, "incorrect" branch)
 // Vertical legs are routed OUTSIDE the after-Inv broker x range so the lines
 // don't pass through the box interiors.
-function MiddleSection({ ev, rf, inv, pending, pendingRunning, stored, newStored, H, yRel, yRet, yInv }) {
+function MiddleSection({ ev, rf, customs, tax, taxRunning, stored, newStored, H, yRel, yRet, yInv }) {
   const Y_REL = yRel
   const Y_RET = yRet
   const Y_INV = yInv
@@ -508,14 +508,16 @@ function MiddleSection({ ev, rf, inv, pending, pendingRunning, stored, newStored
   const IN_ARROW_W = 60
 
   // ── DB Store · Hub group (dashed zone) ───────────────────────────────────
-  // The zone must contain Y_REL and Y_RET so horizontal arrows can terminate
-  // at its left/right borders at those Y values.
+  // The zone extends from y=10 down to y=300 — wide enough to encompass both
+  // Y_REL (Release Post Inv at yOV ≈ 47) and Y_RET (Retain Post Inv at yRT
+  // ≈ 219) so the After-Inv broker terminal arrows land cleanly on its right
+  // border. The bottom edge sits 12 px above the Customs row top (312).
   const ZONE_LEFT   = IN_ARROW_W
   const ZONE_W      = 210
-  const ZONE_TOP    = 10                       // above Y_REL so border sits above it
-  const ZONE_H      = Y_RET + 90 - ZONE_TOP    // extends well below Y_RET
+  const ZONE_TOP    = 10
+  const ZONE_H      = 290
   const ZONE_RIGHT  = ZONE_LEFT + ZONE_W       // 270
-  const ZONE_BOTTOM = ZONE_TOP + ZONE_H
+  const ZONE_BOTTOM = ZONE_TOP + ZONE_H        // 300
 
   // ── After-Inv brokers (mirror Release / Retain event brokers) ────────────
   const AFT_W = 150
@@ -525,26 +527,52 @@ function MiddleSection({ ev, rf, inv, pending, pendingRunning, stored, newStored
   const RAFT_TOP   = Y_REL - AFT_H / 2
   const RETAFT_TOP = Y_RET - AFT_H / 2
 
-  // ── Investigation pipeline at Y_INV (bottom band, MANUAL REVIEW MODE) ────
-  // Layout reflects the human-in-the-loop flow: Holding Worker drains every
-  // INVESTIGATE_EVENT into an in-memory dict (Pending Investigations), the
-  // Revenue Guardian operator console reviews them, manually triggers the
-  // VAT Fraud Detection Agent (which now sits BELOW the operator console
-  // with a bidirectional consult arrow), and publishes a release/retain
-  // decision directly to Investigation Clearance / Retain Post Inv.
-  const INV_ROW_CY   = Y_INV                   // vertical center of the main bottom-row elements
-  const INVFACT_W    = 130
-  const INVFACT_LEFT = IN_ARROW_W
-  const QUEUE_W      = 144                     // wider so "Pending Investigations" fits
-  const QUEUE_LEFT   = INVFACT_LEFT + INVFACT_W + 22
-  const OPER_W       = 170                     // Revenue Guardian operator console
-  const OPER_LEFT    = QUEUE_LEFT + QUEUE_W + 22
-  const OPER_RIGHT   = OPER_LEFT + OPER_W
-  // Linear horizontal flow now goes Operator → Investigation Clearance →
-  // Post-Inv Release. The Agent is consulted vertically below the operator
-  // (see AGENT_TOP / AGENT_LEFT below), not inline.
+  // ── Two-entity bottom band: Customs Office above, Tax Office below ───────
+  //
+  // Each office is a horizontal chain Listener → Queue → Officer wrapped in
+  // its own dashed zone. The Tax Office additionally has the VAT Agent
+  // stacked below the Tax Officer (Tax-only tool, manually triggered).
+  // Inter-office L-shape arrows connect Customs Officer → Tax Queue
+  // (escalate) and Tax Officer → Customs Queue (recommendation back).
+  //
+  // Y positions are chosen so the two rows DO NOT overlap with the upper
+  // band's After-Inv brokers (which sit at Y_REL and Y_RET).
+  const Y_CUSTOMS = 340           // Customs row vertical center
+  const Y_TAX     = 510           // Tax row vertical center
+
+  // Block widths for the bottom band — uniform across both rows so the
+  // listeners, queues and officers are vertically aligned.
+  const LSTN_W   = 140
+  const QUEUE_W  = 150
+  const OFCR_W   = 180
+
+  const LSTN_LEFT  = IN_ARROW_W
+  const QUEUE_LEFT = LSTN_LEFT  + LSTN_W  + 22
+  const OFCR_LEFT  = QUEUE_LEFT + QUEUE_W + 22
+  const OFCR_RIGHT = OFCR_LEFT  + OFCR_W
+
+  // Block heights — uniform sm-style factory/queue boxes.
+  const ROW_BLOCK_H = 56
+  const CUSTOMS_ROW_TOP = Y_CUSTOMS - ROW_BLOCK_H / 2
+  const CUSTOMS_ROW_BOT = Y_CUSTOMS + ROW_BLOCK_H / 2
+  const TAX_ROW_TOP     = Y_TAX     - ROW_BLOCK_H / 2
+  const TAX_ROW_BOT     = Y_TAX     + ROW_BLOCK_H / 2
+
+  // VAT Fraud Detection Agent stacked below the Tax Officer.
+  const AGENT_W       = OFCR_W
+  const AGENT_LEFT    = OFCR_LEFT
+  const AGENT_BLOCK_H = 86                              // taller to fit the "under analysis" count line
+  const AGENT_GAP_Y   = 30                              // gap between Tax Officer bottom and Agent top
+  const AGENT_TOP     = TAX_ROW_BOT + AGENT_GAP_Y
+  const AGENT_BOTTOM  = AGENT_TOP + AGENT_BLOCK_H
+  const AGENT_CX      = AGENT_LEFT + AGENT_W / 2
+
+  // Investigation Clearance broker + Post-Inv Release factory live OUTSIDE
+  // the Customs Office zone, to the right of the Customs Officer block, at
+  // the same y so the Customs Officer's "release" decision can flow into
+  // them on a clean horizontal line.
   const CLRREL_W     = 126
-  const CLRREL_LEFT  = OPER_RIGHT + 28
+  const CLRREL_LEFT  = OFCR_RIGHT + 28
   const POSTINV_W    = 158
   const POSTINV_LEFT = CLRREL_LEFT + CLRREL_W + 24
   const POSTINV_RIGHT = POSTINV_LEFT + POSTINV_W
@@ -552,71 +580,67 @@ function MiddleSection({ ev, rf, inv, pending, pendingRunning, stored, newStored
   // Total canvas width — leaves room on the right for the Post-Inv loop-back column
   const W = POSTINV_RIGHT + 48
 
-  // Approximate factory/broker heights for Y alignment on the bottom band
-  const INV_FACT_H = 56
-  const INV_ROW_TOP = INV_ROW_CY - INV_FACT_H / 2
-
-  // ── VAT Fraud Detection Agent: stacked below the Operator Console ────────
-  // The Agent is a side consultation tool driven by the operator. It sits in
-  // its own row below the linear horizontal flow, connected by a bidirectional
-  // arrow (trigger ↓ / verdict ↑). It also displays the live "under analysis"
-  // count, so its rendered height is taller than a plain factory.
-  const AGENT_W       = OPER_W                          // matches operator width for visual symmetry
-  const AGENT_LEFT    = OPER_LEFT
-  const AGENT_BLOCK_H = 86                              // taller than INV_FACT_H to fit the count line
-  const AGENT_GAP_Y   = 36                              // vertical gap between operator bottom and agent top
-  const AGENT_TOP     = INV_ROW_TOP + INV_FACT_H + AGENT_GAP_Y
-  const AGENT_CY      = AGENT_TOP + AGENT_BLOCK_H / 2
-  const AGENT_BOTTOM  = AGENT_TOP + AGENT_BLOCK_H
-  const AGENT_CX      = AGENT_LEFT + AGENT_W / 2
+  // Centering helpers
+  const QUEUE_CX  = QUEUE_LEFT  + QUEUE_W  / 2
+  const OFCR_CX   = OFCR_LEFT   + OFCR_W   / 2
 
   // ── Arrival → Post-Inv Release supplementary arrow ───────────────────────
   // The Post-Inv Release factory correlates Investigation Clearance + Order
-  // Validation + Arrival Notification. The OV/Clearance branches are already
-  // visible; this draws the missing Arrival branch as a U-shape that exits
-  // the upper-band Arrival broker area, descends below the Investigation
-  // Pipeline dashed zone, runs horizontally, and rises back up into the
-  // Post-Inv Release block from below.
+  // Validation + Arrival Notification. The OV/Clearance branches arrive via
+  // the Customs Officer release path; this draws the missing Arrival branch
+  // as an L-shape that runs at Y_INV (between the Customs and Tax rows) and
+  // rises into the bottom edge of the Post-Inv Release block.
   //
   // ARRIVAL_START_X is the negative offset (in MiddleSection-local
   // coordinates) of the FanIn spine corner where the existing Arrival arrow
-  // turns upward to feed Release Factory. It is derived statically from the
-  // fixed upper-band widths between MiddleSection's left edge and the FanIn:
+  // turns upward to feed Release Factory. Derived statically from the fixed
+  // upper-band widths between MiddleSection's left edge and the FanIn:
   //   AUTOMATED brokers column (OUT_BROKER_W = 170)
   // + FanOut SVG (48)
   // + Release Factory wrapper (≈ 135 — sm factory + padding)
   // + FanIn SVG (60), spine at width-8 = 52 from its right edge
   // Start point ≈ -(170 + 48 + 135 + 60 - 52) ≈ -361.
   const ARRIVAL_START_X = -361
-  const ARRIVAL_BELOW_Y = AGENT_BOTTOM + 28
-  // Effective canvas height — extends below H to accommodate the Agent row
-  // AND the new horizontal leg below the dashed zone.
-  const Heff = Math.max(H, ARRIVAL_BELOW_Y + 16)
-  // Bottom edge of the Post-Inv Release factory (where the new arrow lands).
-  const POST_INV_BOTTOM = INV_ROW_TOP + INV_FACT_H
+
+  // Effective canvas height — extends below H to accommodate the Tax row +
+  // VAT Agent stacked below it.
+  const Heff = Math.max(H, AGENT_BOTTOM + 16)
 
   // ── Loop-back routing ────────────────────────────────────────────────────
-  // Vertical legs MUST lie outside the after-Inv broker x range [AFT_LEFT, AFT_RIGHT]
-  // so they don't cross the broker interiors.
+  // Vertical legs MUST lie outside the after-Inv broker x range
+  // [AFT_LEFT, AFT_RIGHT] so they don't cross the broker interiors.
   //
   // Post-Inv Release → Release-after-Inv: vertical at POSTINV_CX (>> AFT_RIGHT)
   const POSTINV_CX = POSTINV_LEFT + POSTINV_W / 2
-  // Operator Console "retain" decision → Retained-after-Inv. The vertical leg
-  // sits at the right portion of the Operator Console's top edge so it lands
-  // on the operator (where the human decision is taken) AND clears the
-  // after-Inv broker x range. AFT_RIGHT + 20 = 496 happens to fall inside
-  // OPER_LEFT..OPER_RIGHT in the current geometry.
-  const RETAIN_UP_X = AFT_RIGHT + 20          // 496 — inside OPER x range (OPER_LEFT..OPER_RIGHT)
+  // Customs Officer "retain" → Retained-after-Inv. The vertical leg sits on
+  // the right portion of the Customs Officer top edge so it lands on the
+  // officer (where the human decision is taken) AND clears the after-Inv
+  // broker x range. AFT_RIGHT + 24 = 500 falls inside OFCR_LEFT..OFCR_RIGHT.
+  const RETAIN_UP_X = AFT_RIGHT + 24          // 500 — inside OFCR x range
+
+  // ── Inter-zone L-shape arrows (escalate / recommend) ─────────────────────
+  // Each arrow runs Officer → midpoint horizontal → vertical → other Queue.
+  // Vertical legs are offset on opposite sides of the Queue/Officer centres
+  // so the two arrows don't share the same x and visually merge.
+  const MID_Y          = (CUSTOMS_ROW_BOT + TAX_ROW_TOP) / 2   // 425
+  const ESC_MID_Y      = MID_Y - 10                             // 415
+  const REC_MID_Y      = MID_Y + 10                             // 435
+  const ESC_OFCR_X     = OFCR_CX - 24                           // 460
+  const REC_OFCR_X     = OFCR_CX + 24                           // 508
+  const ESC_QUEUE_X    = QUEUE_CX - 30                          // 267
+  const REC_QUEUE_X    = QUEUE_CX + 30                          // 327
 
   const stroke = 2
   // All connector lines + arrowheads use this single neutral grey. Semantic
   // colour is reserved for the text labels next to each arrow (release / retain
-  // / trigger / verdict) so the eye still parses meaning at a glance.
+  // / escalate / recommend / trigger / verdict) so the eye still parses
+  // meaning at a glance.
   const grey   = '#adb5bd'
   // Label colours (text only — line strokes stay grey)
   const green  = '#1f7a3c'
   const red    = '#c0392b'
   const indigo = '#6366f1'
+  const orange = '#e6820a'
 
   // Small helper for arrowheads at a point, given direction
   const Arrowhead = ({ x, y, dir, color = grey }) => {
@@ -629,25 +653,40 @@ function MiddleSection({ ev, rf, inv, pending, pendingRunning, stored, newStored
     return <polygon points={pts} fill={color} />
   }
 
-  // Bidirectional consult arrow between Operator Console and the VAT Agent
-  // sitting beneath it. Two parallel vertical legs offset from the central
-  // axis: left leg = trigger (down), right leg = verdict (up).
+  // Bidirectional consult arrow between Tax Officer and the VAT Agent below.
+  // Two parallel vertical legs offset from the central axis: left leg =
+  // trigger (down), right leg = verdict (up).
   const CONSULT_DX  = 14
-  const CONSULT_TOP = INV_ROW_TOP + INV_FACT_H + 1     // 1 px below operator bottom edge
-  const CONSULT_BOT = AGENT_TOP - 1                    // 1 px above agent top edge
-  const OPER_CX     = OPER_LEFT + OPER_W / 2
+  const CONSULT_TOP = TAX_ROW_BOT + 1                // 1 px below Tax Officer bottom
+  const CONSULT_BOT = AGENT_TOP - 1                  // 1 px above agent top edge
 
   return (
     <div style={{ position: 'relative', width: W, height: Heff, flexShrink: 0 }}>
       {/* Arrow/connector overlay */}
       <svg style={{ position: 'absolute', top: 0, left: 0, width: W, height: Heff, pointerEvents: 'none', overflow: 'visible' }}>
-        {/* Release Event → Zone left border (horizontal at Y_REL) */}
+        {/* Release Event → DB Store zone left border (horizontal at Y_REL).
+            GREEN automated releases still flow directly into terminal storage. */}
         <line x1={0} y1={Y_REL} x2={ZONE_LEFT} y2={Y_REL} stroke={grey} strokeWidth={stroke} />
         <Arrowhead x={ZONE_LEFT} y={Y_REL} dir="right" />
 
-        {/* Retain Event → Zone left border (horizontal at Y_RET) */}
-        <line x1={0} y1={Y_RET} x2={ZONE_LEFT} y2={Y_RET} stroke={grey} strokeWidth={stroke} />
-        <Arrowhead x={ZONE_LEFT} y={Y_RET} dir="right" />
+        {/* Retain Event → Customs Listener (corner: right then down then right).
+            RED automated retains are NO LONGER stored directly — they enter the
+            Customs queue for an officer decision. */}
+        <polyline
+          points={`0,${Y_RET} ${LSTN_LEFT - 30},${Y_RET} ${LSTN_LEFT - 30},${Y_CUSTOMS} ${LSTN_LEFT},${Y_CUSTOMS}`}
+          stroke={grey} strokeWidth={stroke} fill="none" />
+        <Arrowhead x={LSTN_LEFT} y={Y_CUSTOMS} dir="right" />
+        <text x={LSTN_LEFT - 26} y={Y_RET - 6}
+              fontSize={9} fill={red} textAnchor="start" fontWeight={700}>retain → customs</text>
+
+        {/* Investigation Notification → Tax Listener (corner: right then down
+            then right). AMBER routed transactions enter the Tax queue. */}
+        <polyline
+          points={`0,${Y_INV} ${LSTN_LEFT - 30},${Y_INV} ${LSTN_LEFT - 30},${Y_TAX} ${LSTN_LEFT},${Y_TAX}`}
+          stroke={grey} strokeWidth={stroke} fill="none" />
+        <Arrowhead x={LSTN_LEFT} y={Y_TAX} dir="right" />
+        <text x={LSTN_LEFT - 26} y={Y_INV - 6}
+              fontSize={9} fill={orange} textAnchor="start" fontWeight={700}>investigate → tax</text>
 
         {/* Release-after-Inv → Zone right border (horizontal at Y_REL, going left) */}
         <line x1={AFT_LEFT} y1={Y_REL} x2={ZONE_RIGHT} y2={Y_REL} stroke={grey} strokeWidth={stroke} />
@@ -657,70 +696,90 @@ function MiddleSection({ ev, rf, inv, pending, pendingRunning, stored, newStored
         <line x1={AFT_LEFT} y1={Y_RET} x2={ZONE_RIGHT} y2={Y_RET} stroke={grey} strokeWidth={stroke} />
         <Arrowhead x={ZONE_RIGHT} y={Y_RET} dir="left" />
 
-        {/* Investigation Notification → Holding Worker (horizontal at Y_INV) */}
-        <line x1={0} y1={Y_INV} x2={INVFACT_LEFT} y2={Y_INV} stroke={grey} strokeWidth={stroke} />
-        <Arrowhead x={INVFACT_LEFT} y={Y_INV} dir="right" />
+        {/* ── Customs row internal chain ── */}
+        {/* Customs Listener → Customs Queue */}
+        <line x1={LSTN_LEFT + LSTN_W} y1={Y_CUSTOMS} x2={QUEUE_LEFT} y2={Y_CUSTOMS} stroke={grey} strokeWidth={stroke} />
+        <Arrowhead x={QUEUE_LEFT} y={Y_CUSTOMS} dir="right" />
+        {/* Customs Queue → Customs Officer */}
+        <line x1={QUEUE_LEFT + QUEUE_W} y1={Y_CUSTOMS} x2={OFCR_LEFT} y2={Y_CUSTOMS} stroke={grey} strokeWidth={stroke} />
+        <Arrowhead x={OFCR_LEFT} y={Y_CUSTOMS} dir="right" />
 
-        {/* Holding Worker → Pending Investigations dict */}
-        <line x1={INVFACT_LEFT + INVFACT_W} y1={Y_INV} x2={QUEUE_LEFT} y2={Y_INV} stroke={grey} strokeWidth={stroke} />
-        <Arrowhead x={QUEUE_LEFT} y={Y_INV} dir="right" />
+        {/* ── Tax row internal chain ── */}
+        {/* Tax Listener → Tax Queue */}
+        <line x1={LSTN_LEFT + LSTN_W} y1={Y_TAX} x2={QUEUE_LEFT} y2={Y_TAX} stroke={grey} strokeWidth={stroke} />
+        <Arrowhead x={QUEUE_LEFT} y={Y_TAX} dir="right" />
+        {/* Tax Queue → Tax Officer */}
+        <line x1={QUEUE_LEFT + QUEUE_W} y1={Y_TAX} x2={OFCR_LEFT} y2={Y_TAX} stroke={grey} strokeWidth={stroke} />
+        <Arrowhead x={OFCR_LEFT} y={Y_TAX} dir="right" />
 
-        {/* Pending Investigations → Operator Console (Revenue Guardian UI) */}
-        <line x1={QUEUE_LEFT + QUEUE_W} y1={Y_INV} x2={OPER_LEFT} y2={Y_INV} stroke={grey} strokeWidth={stroke} />
-        <Arrowhead x={OPER_LEFT} y={Y_INV} dir="right" />
+        {/* ── Inter-zone arrows ── */}
+        {/* Customs Officer → Tax Queue (escalate). L-shape: down, left, down. */}
+        <polyline
+          points={`${ESC_OFCR_X},${CUSTOMS_ROW_BOT} ${ESC_OFCR_X},${ESC_MID_Y} ${ESC_QUEUE_X},${ESC_MID_Y} ${ESC_QUEUE_X},${TAX_ROW_TOP}`}
+          stroke={grey} strokeWidth={stroke} fill="none" />
+        <Arrowhead x={ESC_QUEUE_X} y={TAX_ROW_TOP} dir="down" />
+        <text x={(ESC_OFCR_X + ESC_QUEUE_X) / 2} y={ESC_MID_Y - 4}
+              fontSize={9} fill={orange} textAnchor="middle" fontWeight={700}>escalate</text>
 
-        {/* Operator Console → Investigation Clearance — the operator's
-            "release" decision flows directly from the operator (the Agent
-            sits below as a side consultation, not in the linear path). */}
-        <line x1={OPER_RIGHT} y1={Y_INV} x2={CLRREL_LEFT} y2={Y_INV} stroke={grey} strokeWidth={stroke} />
-        <Arrowhead x={CLRREL_LEFT} y={Y_INV} dir="right" />
-        <text x={(OPER_RIGHT + CLRREL_LEFT) / 2} y={Y_INV - 6}
+        {/* Tax Officer → Customs Queue (recommend). L-shape: up, left, up. */}
+        <polyline
+          points={`${REC_OFCR_X},${TAX_ROW_TOP} ${REC_OFCR_X},${REC_MID_Y} ${REC_QUEUE_X},${REC_MID_Y} ${REC_QUEUE_X},${CUSTOMS_ROW_BOT}`}
+          stroke={grey} strokeWidth={stroke} fill="none" />
+        <Arrowhead x={REC_QUEUE_X} y={CUSTOMS_ROW_BOT} dir="up" />
+        <text x={(REC_OFCR_X + REC_QUEUE_X) / 2} y={REC_MID_Y + 12}
+              fontSize={9} fill={indigo} textAnchor="middle" fontWeight={700}>recommend</text>
+
+        {/* ── Customs Officer terminal decisions ── */}
+        {/* Customs Officer → Investigation Clearance (release at Y_CUSTOMS) */}
+        <line x1={OFCR_RIGHT} y1={Y_CUSTOMS} x2={CLRREL_LEFT} y2={Y_CUSTOMS} stroke={grey} strokeWidth={stroke} />
+        <Arrowhead x={CLRREL_LEFT} y={Y_CUSTOMS} dir="right" />
+        <text x={(OFCR_RIGHT + CLRREL_LEFT) / 2} y={Y_CUSTOMS - 6}
               fontSize={9} fill={green} textAnchor="middle" fontWeight={700}>release</text>
 
         {/* Cleared → Post-Inv Release */}
-        <line x1={CLRREL_LEFT + CLRREL_W} y1={Y_INV} x2={POSTINV_LEFT} y2={Y_INV} stroke={grey} strokeWidth={stroke} />
-        <Arrowhead x={POSTINV_LEFT} y={Y_INV} dir="right" />
+        <line x1={CLRREL_LEFT + CLRREL_W} y1={Y_CUSTOMS} x2={POSTINV_LEFT} y2={Y_CUSTOMS} stroke={grey} strokeWidth={stroke} />
+        <Arrowhead x={POSTINV_LEFT} y={Y_CUSTOMS} dir="right" />
 
         {/* Post-Inv Release → Release-after-Inv (loop-back: up, then left) */}
         <polyline
-          points={`${POSTINV_CX},${INV_ROW_TOP} ${POSTINV_CX},${Y_REL} ${AFT_RIGHT},${Y_REL}`}
+          points={`${POSTINV_CX},${CUSTOMS_ROW_TOP} ${POSTINV_CX},${Y_REL} ${AFT_RIGHT},${Y_REL}`}
           stroke={grey} strokeWidth={stroke} fill="none" />
         <Arrowhead x={AFT_RIGHT} y={Y_REL} dir="left" />
 
-        {/* Operator "retain" decision → Retained-after-Inv (loop-back: up, then left).
-            The vertical leg originates on the Operator Console's top edge —
-            this is where the human chooses to retain rather than release. */}
+        {/* Customs Officer "retain" decision → Retained-after-Inv (loop-back:
+            up, then left). Vertical leg originates on the Customs Officer's
+            top edge — the human chooses to retain rather than release. */}
         <polyline
-          points={`${RETAIN_UP_X},${INV_ROW_TOP} ${RETAIN_UP_X},${Y_RET} ${AFT_RIGHT},${Y_RET}`}
+          points={`${RETAIN_UP_X},${CUSTOMS_ROW_TOP} ${RETAIN_UP_X},${Y_RET} ${AFT_RIGHT},${Y_RET}`}
           stroke={grey} strokeWidth={stroke} fill="none" />
         <Arrowhead x={AFT_RIGHT} y={Y_RET} dir="left" />
-        <text x={RETAIN_UP_X + 4} y={INV_ROW_TOP - 4}
+        <text x={RETAIN_UP_X + 4} y={CUSTOMS_ROW_TOP - 4}
               fontSize={9} fill={red} textAnchor="start" fontWeight={700}>retain</text>
 
-        {/* Operator Console ⇄ VAT Fraud Detection Agent — bidirectional
-            vertical consult arrow. Two parallel legs: left = trigger (down),
-            right = verdict (up). */}
-        <line x1={OPER_CX - CONSULT_DX} y1={CONSULT_TOP} x2={OPER_CX - CONSULT_DX} y2={CONSULT_BOT}
+        {/* Tax Officer ⇄ VAT Fraud Detection Agent — bidirectional vertical
+            consult arrow. Two parallel legs: left = trigger (down), right =
+            verdict (up). */}
+        <line x1={OFCR_CX - CONSULT_DX} y1={CONSULT_TOP} x2={OFCR_CX - CONSULT_DX} y2={CONSULT_BOT}
           stroke={grey} strokeWidth={stroke} />
-        <Arrowhead x={OPER_CX - CONSULT_DX} y={CONSULT_BOT} dir="down" />
-        <line x1={OPER_CX + CONSULT_DX} y1={CONSULT_BOT} x2={OPER_CX + CONSULT_DX} y2={CONSULT_TOP}
+        <Arrowhead x={OFCR_CX - CONSULT_DX} y={CONSULT_BOT} dir="down" />
+        <line x1={OFCR_CX + CONSULT_DX} y1={CONSULT_BOT} x2={OFCR_CX + CONSULT_DX} y2={CONSULT_TOP}
           stroke={grey} strokeWidth={stroke} />
-        <Arrowhead x={OPER_CX + CONSULT_DX} y={CONSULT_TOP} dir="up" />
-        <text x={OPER_CX - CONSULT_DX - 4} y={(CONSULT_TOP + CONSULT_BOT) / 2}
+        <Arrowhead x={OFCR_CX + CONSULT_DX} y={CONSULT_TOP} dir="up" />
+        <text x={OFCR_CX - CONSULT_DX - 4} y={(CONSULT_TOP + CONSULT_BOT) / 2}
               fontSize={9} fill={indigo} textAnchor="end" fontWeight={700} dominantBaseline="middle">trigger</text>
-        <text x={OPER_CX + CONSULT_DX + 4} y={(CONSULT_TOP + CONSULT_BOT) / 2}
+        <text x={OFCR_CX + CONSULT_DX + 4} y={(CONSULT_TOP + CONSULT_BOT) / 2}
               fontSize={9} fill={indigo} textAnchor="start" fontWeight={700} dominantBaseline="middle">verdict</text>
 
         {/* Arrival Notification → Post-Inv Release supplementary input.
-            U-shape: starts at the FanIn corner where the existing Arrival
-            arrow turns up to Release Factory, descends below the dashed
-            Investigation Pipeline zone, runs right under it, then rises into
-            the bottom edge of the Post-Inv Release block.
-            Drawn at negative x — relies on the SVG's overflow:visible.  */}
+            L-shape: starts at the FanIn corner where the existing Arrival
+            arrow turns up to Release Factory, runs horizontally at Y_INV
+            (which falls in the gap between Customs and Tax rows), then rises
+            into the bottom edge of the Post-Inv Release block.
+            Drawn at negative x — relies on the SVG's overflow:visible. */}
         <polyline
-          points={`${ARRIVAL_START_X},${Y_INV} ${ARRIVAL_START_X},${ARRIVAL_BELOW_Y} ${POSTINV_CX},${ARRIVAL_BELOW_Y} ${POSTINV_CX},${POST_INV_BOTTOM}`}
+          points={`${ARRIVAL_START_X},${Y_INV} ${POSTINV_CX},${Y_INV} ${POSTINV_CX},${CUSTOMS_ROW_BOT}`}
           stroke={grey} strokeWidth={stroke} fill="none" />
-        <Arrowhead x={POSTINV_CX} y={POST_INV_BOTTOM} dir="up" />
+        <Arrowhead x={POSTINV_CX} y={CUSTOMS_ROW_BOT} dir="up" />
         <text x={ARRIVAL_START_X + 4} y={Y_INV - 6}
               fontSize={9} fill="var(--text-muted)" textAnchor="start" fontWeight={700}>arrival</text>
       </svg>
@@ -745,7 +804,7 @@ function MiddleSection({ ev, rf, inv, pending, pendingRunning, stored, newStored
           gap: 6, height: 'calc(100% - 32px)', justifyContent: 'center',
         }}>
           <FactoryNode icon="💾" label="DB Store Factory" description="Insert + flag suspicious" sm
-            tooltip="DB Store Factory — subscribes to Automated Release, Automated Retain, Release Post Inv. and Retain Post Inv. Inserts into european_custom.db and pushes to the live queue / SSE stream." />
+            tooltip="DB Store Factory — subscribes to Automated Release, Release Post Inv. and Retain Post Inv. Inserts into european_custom.db and pushes to the live queue / SSE stream." />
           <Arrow down />
           <DBSinkNode count={stored} newCount={newStored}
             tooltip={`Custom Data Hub — ${fmt(stored)} total records (includes historical seed). ${fmt(newStored)} new records stored since the last simulation reset.`} />
@@ -756,32 +815,30 @@ function MiddleSection({ ev, rf, inv, pending, pendingRunning, stored, newStored
       <div style={{ position: 'absolute', top: RAFT_TOP, left: AFT_LEFT, width: AFT_W }}>
         <BrokerNode label="Release Post Inv." topicKey="RELEASE_POST_INV"
           count={ev.release_after_investigation_event} accent={green} sm width={AFT_W}
-          tooltip="Release Post Inv. — terminal event for agent-cleared transactions. Stored to the DB without the suspicious flag." />
+          tooltip="Release Post Inv. — terminal event for officer-cleared transactions. Stored to the DB without the suspicious flag." />
       </div>
 
       {/* Retain Post Investigation broker — mirrors Automated Retain */}
       <div style={{ position: 'absolute', top: RETAFT_TOP, left: AFT_LEFT, width: AFT_W }}>
         <BrokerNode label="Retain Post Inv." topicKey="RETAIN_POST_INV"
           count={ev.agent_retain_event} accent={red} sm width={AFT_W}
-          tooltip="Retain Post Inv. — transactions the agent classified as non-compliant. Stored to the DB with the suspicious flag set." />
+          tooltip="Retain Post Inv. — transactions the Customs officer retained. Stored to the DB with the suspicious flag set." />
       </div>
 
-      {/* ── Investigation Pipeline zone (dashed overlay) ──
-          Rendered BEFORE the elements below so they draw on top of the border.
-          Interior is transparent so SVG loop-back arrows remain visible through the zone.
-          Label uses width: fit-content so its white background doesn't hide arrows that pass through.
-          Width stops at the Operator Console's right edge so the Investigation
-          Clearance broker (and Post-Inv Release factory) sit OUTSIDE the zone,
-          consistent with the convention that brokers live outside processing zones.
-          Height extends down to encompass the VAT Agent stacked below the Operator. */}
+      {/* ── Customs Office dashed zone ──
+          Wraps the Customs Listener / Customs Queue / Customs Officer chain
+          on the Customs row. Rendered BEFORE the inner blocks so they paint
+          on top of the border. Interior is non-interactive so SVG arrows
+          remain visible through the zone. The label uses width: fit-content
+          so its white background doesn't hide arrows passing through. */}
       <div style={{
         position: 'absolute',
-        left: INVFACT_LEFT - 14,
-        top: INV_ROW_TOP - 41,
-        width: (OPER_RIGHT - INVFACT_LEFT) + 28,
-        height: (AGENT_BOTTOM + 14) - (INV_ROW_TOP - 41),
+        left: LSTN_LEFT - 14,
+        top: CUSTOMS_ROW_TOP - 24,
+        width: (OFCR_RIGHT - LSTN_LEFT) + 28,
+        height: ROW_BLOCK_H + 36,
         border: '1px dashed var(--border-light)', borderRadius: 6,
-        padding: '8px 10px', boxSizing: 'border-box',
+        padding: '4px 10px', boxSizing: 'border-box',
         pointerEvents: 'none',
       }}>
         <div style={{
@@ -791,57 +848,97 @@ function MiddleSection({ ev, rf, inv, pending, pendingRunning, stored, newStored
           background: '#fff', padding: '2px 8px',
           width: 'fit-content', margin: '0 auto',
         }}>
-          Investigation Pipeline · Manual Review Mode
+          Customs Office · Final Decision
         </div>
       </div>
 
-      {/* Holding Worker (was Investigator Factory) — drains every
-          INVESTIGATE_EVENT into the in-memory _pending_investigations dict
-          when AUTO_INVESTIGATION_AGENT is False on the backend. */}
-      <div style={{ position: 'absolute', top: INV_ROW_TOP, left: INVFACT_LEFT, width: INVFACT_W }}>
-        <FactoryNode icon="📥" label="Holding Worker" description="parks events for review" sm width={INVFACT_W}
-          tooltip="Holding Worker — subscribes to INVESTIGATE_EVENT and parks every investigation in the in-memory _pending_investigations dict for manual review by the operator." />
+      {/* ── Tax Office dashed zone ──
+          Wraps the Tax Listener / Tax Queue / Tax Officer chain AND the VAT
+          Fraud Detection Agent stacked underneath the Tax Officer. */}
+      <div style={{
+        position: 'absolute',
+        left: LSTN_LEFT - 14,
+        top: TAX_ROW_TOP - 24,
+        width: (OFCR_RIGHT - LSTN_LEFT) + 28,
+        height: (AGENT_BOTTOM + 14) - (TAX_ROW_TOP - 24),
+        border: '1px dashed var(--border-light)', borderRadius: 6,
+        padding: '4px 10px', boxSizing: 'border-box',
+        pointerEvents: 'none',
+      }}>
+        <div style={{
+          fontSize: 9, fontWeight: 700, color: 'var(--text-muted)',
+          textTransform: 'uppercase', letterSpacing: '0.08em',
+          textAlign: 'center',
+          background: '#fff', padding: '2px 8px',
+          width: 'fit-content', margin: '0 auto',
+        }}>
+          Tax Office · Recommendation + Agent
+        </div>
       </div>
 
-      {/* Pending Investigations queue — depth comes from the holding dict
-          length (pending_investigations field on /api/simulation/pipeline). */}
-      <div style={{ position: 'absolute', top: INV_ROW_TOP - 2, left: QUEUE_LEFT, width: QUEUE_W }}>
-        <QueueNode label="Pending Investigations" count={pending} sm
-          tooltip="Pending Investigations — in-memory holding dict awaiting human action via the Revenue Guardian UI on :8080. Depth = number of investigations the operator has not yet decided." />
+      {/* ── Customs row blocks ── */}
+      {/* Customs Listener — subscribes to RETAIN_EVENT and parks each
+          transaction in the in-memory Customs queue for officer review. */}
+      <div style={{ position: 'absolute', top: CUSTOMS_ROW_TOP, left: LSTN_LEFT, width: LSTN_W }}>
+        <FactoryNode icon="📥" label="Customs Listener" description="parks RETAIN events" sm width={LSTN_W}
+          tooltip="Customs Listener — subscribes to RETAIN_EVENT and pushes each RED-routed transaction into the in-memory Customs queue for the officer's final decision." />
       </div>
 
-      {/* Revenue Guardian Operator Console — represents the external UI on
-          http://localhost:8080 where the tax officer triggers the agent and
-          decides release / retain. Indigo accent reserved for the human-
-          interface block, distinct from the sky-blue Custom Data Hub. */}
-      <div style={{ position: 'absolute', top: INV_ROW_TOP, left: OPER_LEFT, width: OPER_W }}>
-        <FactoryNode icon="🧑‍💼" label="Revenue Guardian UI" description="operator @ :8080" sm width={OPER_W}
+      {/* Customs Queue — depth from pipeline.customs_queue */}
+      <div style={{ position: 'absolute', top: CUSTOMS_ROW_TOP - 2, left: QUEUE_LEFT, width: QUEUE_W }}>
+        <QueueNode label="Customs Queue" count={customs} sm
+          tooltip="Customs Queue — in-memory dict of transactions awaiting Customs officer action (release, retain, or escalate to Tax). Depth includes Tax-recommended items returned for the final Customs decision." />
+      </div>
+
+      {/* Customs Officer console — Revenue Guardian Customs page on :8080 */}
+      <div style={{ position: 'absolute', top: CUSTOMS_ROW_TOP, left: OFCR_LEFT, width: OFCR_W }}>
+        <FactoryNode icon="🛃" label="Customs Officer" description="@ revenue-guardian /customs" sm width={OFCR_W}
           accent={indigo}
-          tooltip="Revenue Guardian Operator Console — http://localhost:8080. The tax officer reviews each pending investigation, manually triggers the VAT Fraud Detection Agent, and publishes the final release / retain decision via POST /api/investigations/{id}/decide." />
+          tooltip="Customs Officer Console — Revenue Guardian Customs page on http://localhost:8080. The officer reviews each Customs queue item and either releases, retains, or escalates the case to the Tax authority for advice. Customs is master — its decision is the terminal event." />
       </div>
 
-      {/* VAT Fraud Detection Agent — sits BELOW the Operator Console as a
-          side consultation tool reached via the bidirectional consult arrow.
-          Manually triggered by the operator clicking "Run Agent" in the UI.
-          Displays the live count of investigations currently being analysed. */}
+      {/* ── Tax row blocks ── */}
+      {/* Tax Listener — subscribes to INVESTIGATE_EVENT and parks each
+          AMBER-routed transaction in the in-memory Tax queue. */}
+      <div style={{ position: 'absolute', top: TAX_ROW_TOP, left: LSTN_LEFT, width: LSTN_W }}>
+        <FactoryNode icon="📥" label="Tax Listener" description="parks INVESTIGATE events" sm width={LSTN_W}
+          tooltip="Tax Listener — subscribes to INVESTIGATE_EVENT and pushes each AMBER-routed transaction into the in-memory Tax queue for analysis." />
+      </div>
+
+      {/* Tax Queue — depth from pipeline.tax_queue */}
+      <div style={{ position: 'absolute', top: TAX_ROW_TOP - 2, left: QUEUE_LEFT, width: QUEUE_W }}>
+        <QueueNode label="Tax Queue" count={tax} sm
+          tooltip="Tax Queue — in-memory dict of transactions awaiting Tax officer analysis. Includes both AMBER-routed items and items escalated from the Customs queue." />
+      </div>
+
+      {/* Tax Officer console — Revenue Guardian Tax page on :8080 */}
+      <div style={{ position: 'absolute', top: TAX_ROW_TOP, left: OFCR_LEFT, width: OFCR_W }}>
+        <FactoryNode icon="🧑‍⚖️" label="Tax Officer" description="@ revenue-guardian /tax" sm width={OFCR_W}
+          accent={indigo}
+          tooltip="Tax Officer Console — Revenue Guardian Tax page on http://localhost:8080. The Tax officer triggers the VAT Fraud Detection Agent, then issues a release / retain RECOMMENDATION which is sent back to the Customs queue for the final decision." />
+      </div>
+
+      {/* VAT Fraud Detection Agent — sits BELOW the Tax Officer as a side
+          consultation tool reached via the bidirectional consult arrow.
+          Manually triggered by the Tax officer clicking "Run Agent". */}
       <div style={{ position: 'absolute', top: AGENT_TOP, left: AGENT_LEFT, width: AGENT_W }}>
         <FactoryNode icon="🤖" label="VAT Fraud Detection Agent" description="LM Studio · manually triggered" sm width={AGENT_W}
-          count={pendingRunning} countLabel="under analysis"
-          tooltip="VAT Fraud Detection Agent — runs the local LLM (LM Studio) on demand when the operator clicks Run Agent in the Revenue Guardian UI. The count shows how many investigations are currently being analysed (status = agent_running)." />
+          count={taxRunning} countLabel="under analysis"
+          tooltip="VAT Fraud Detection Agent — runs the local LLM (LM Studio) on demand when the Tax officer clicks Run Agent in the Revenue Guardian UI. The count shows how many Tax queue items are currently being analysed (agent_status = agent_running)." />
       </div>
 
-      {/* Investigation Clearance broker — vertically centered on INV_ROW_CY.
+      {/* Investigation Clearance broker — vertically centered on Y_CUSTOMS.
           BrokerNode renders ~14 px taller than the surrounding sm factories,
           so we offset its top edge upward to center it on the same baseline. */}
-      <div style={{ position: 'absolute', top: INV_ROW_TOP - 7, left: CLRREL_LEFT, width: CLRREL_W }}>
+      <div style={{ position: 'absolute', top: CUSTOMS_ROW_TOP - 7, left: CLRREL_LEFT, width: CLRREL_W }}>
         <BrokerNode label="Investigation Clearance" topicKey="INVESTIGATION_CLEARANCE"
           count={ev.agent_release_event} accent={green} sm width={CLRREL_W}
-          tooltip="Investigation Clearance — transactions the agent found compliant. Forwarded to the Post-Investigation Release factory." />
+          tooltip="Investigation Clearance — transactions the Customs officer cleared for release. Forwarded to the Post-Investigation Release factory." />
       </div>
 
       {/* Post-Investigation Release Factory */}
-      <div style={{ position: 'absolute', top: INV_ROW_TOP, left: POSTINV_LEFT, width: POSTINV_W }}>
-        <FactoryNode icon="🔓" label="Post-Inv. Release" description="agent-release + OV + arrival" sm width={POSTINV_W}
+      <div style={{ position: 'absolute', top: CUSTOMS_ROW_TOP, left: POSTINV_LEFT, width: POSTINV_W }}>
+        <FactoryNode icon="🔓" label="Post-Inv. Release" description="cleared + OV + arrival" sm width={POSTINV_W}
           tooltip="Post-Investigation Release Factory — waits for OV + Arrival on cleared transactions, then emits a Release After Investigation event." />
       </div>
     </div>
@@ -916,13 +1013,16 @@ function KpiStrip({ pipeline }) {
 // ── Pipeline Diagram ──────────────────────────────────────────────────────────
 
 function PipelineDiagram({ pipeline }) {
-  const ev             = pipeline?.events             || {}
-  const q              = pipeline?.queues             || {}
-  const rf             = pipeline?.risk_flags         || {}
-  const inv            = pipeline?.investigation_queue ?? null
-  const pending        = pipeline?.pending_investigations ?? null
-  const pendingRunning = pipeline?.pending_investigations_running ?? null
-  const stored         = pipeline?.stored_count        ?? null
+  const ev         = pipeline?.events             || {}
+  const q          = pipeline?.queues             || {}
+  const rf         = pipeline?.risk_flags         || {}
+  // Two-entity model: separate Customs and Tax queues, each with its own
+  // depth on the pipeline snapshot. taxRunning is the count of Tax-queue
+  // items currently being analysed by the VAT Fraud Detection Agent.
+  const customs    = pipeline?.customs_queue          ?? null
+  const tax        = pipeline?.tax_queue              ?? null
+  const taxRunning = pipeline?.tax_queue_agent_running ?? null
+  const stored     = pipeline?.stored_count           ?? null
 
   // Row 1: three parallel processing zones
   const OV_H = 94, RT_H = 230, AN_H = 94, LGAP = 10
@@ -1131,10 +1231,11 @@ function PipelineDiagram({ pipeline }) {
               </div>
             </div>
 
-            {/* Middle section: DB Store Factory + Hub (grouped in a dashed zone) + After-Inv brokers
-                (mirroring event brokers) + inline investigation pipeline along the bottom.
-                Absolute-positioned canvas sized to ROW1_H; Y coordinates locked to yOV/yRT/yAN from the parent. */}
-            <MiddleSection ev={ev} rf={rf} inv={inv} pending={pending} pendingRunning={pendingRunning}
+            {/* Middle section: DB Store Factory + Hub (grouped in a dashed zone) + After-Inv
+                brokers (mirroring event brokers) + the two-entity bottom band: Customs Office
+                row above, Tax Office row + VAT Fraud Detection Agent below. Absolute-positioned
+                canvas sized so the band extends below ROW1_H to fit both rows. */}
+            <MiddleSection ev={ev} rf={rf} customs={customs} tax={tax} taxRunning={taxRunning}
               stored={stored} newStored={newStored}
               H={ROW1_H} yRel={yOV} yRet={yRT} yInv={yAN} />
 

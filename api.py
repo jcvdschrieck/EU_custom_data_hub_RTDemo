@@ -137,11 +137,13 @@ from lib.catalog import SUPPLIERS, COUNTRY_NAMES
 # before — INVESTIGATE_EVENT items are auto-routed to the LM Studio agent and
 # their verdict published as AGENT_RELEASE_EVENT / AGENT_RETAIN_EVENT.
 #
-# When False (current state), those two tasks are NOT started, and the new
-# _investigation_holding_worker takes their place: every INVESTIGATE_EVENT
-# lands in _pending_investigations and waits for a human operator (the
-# revenue-guardian UI on :8080) to manually trigger the agent + decide.
-# The original code is kept in place so this can be flipped back trivially.
+# When False (current state), those two tasks are NOT started. Instead the
+# two-entity manual workflow is active: a _customs_listener_factory drains
+# RETAIN_EVENT into _customs_queue, and a _tax_listener_factory drains
+# INVESTIGATE_EVENT into _tax_queue. The Revenue Guardian UI on :8080
+# drives the queues via /api/customs/* and /api/tax/* endpoints. The
+# legacy auto-pipeline code is kept in place so this can be flipped back
+# trivially.
 AUTO_INVESTIGATION_AGENT: bool = False
 
 # ── In-memory state ───────────────────────────────────────────────────────────
@@ -154,21 +156,53 @@ _sim_state_sse:       set[asyncio.Queue] = set()   # pipeline + status stream su
 _agent_queue:         asyncio.Queue | None = None  # manual POST /api/agent/analyse
 _investigation_queue: asyncio.Queue | None = None  # legacy auto investigation pipeline
 
-# Pending investigations awaiting manual agent run + decision (managed from
-# the revenue-guardian UI). Keyed by transaction_id. Lost on server restart —
-# intentional, single-operator demo. Each entry:
+# ── Two-entity workflow queues ───────────────────────────────────────────────
+#
+# Customs and Tax are modelled as two completely separate offices with their
+# own listener, queue, SSE subscribers and UI page on the revenue-guardian UI.
+# They communicate via two well-defined inter-entity transfers:
+#
+#   AMBER  → Tax Office  (initial entry)
+#   RED    → Customs Office  (initial entry)
+#
+#   Customs operator can ESCALATE a Customs item to Tax (transfer).
+#   Tax operator publishes a RECOMMENDATION which sends the item back
+#   to Customs (transfer). The recommendation is non-binding.
+#   Only the Customs operator can publish a TERMINAL decide (release/retain).
+#
+# All entries are in-memory dicts keyed by transaction_id. Both queues are
+# wiped on simulation reset.
+#
+# Customs queue entry shape:
 #   {
-#     "tx":              <full sales-order tx dict>,
-#     "alarm":           <alarm metadata or {}>,
-#     "status":          "pending" | "agent_running" | "agent_done" | "decided",
-#     "agent_verdict":   None | {"verdict", "reasoning", "legislation_refs"},
-#     "decision":        None | "release" | "retain",
-#     "created_at":      ISO8601,
-#     "updated_at":      ISO8601,
+#     "tx":                 <full sales-order tx dict>,
+#     "alarm":              <alarm metadata or {}>,
+#     "risk_score":         "red" | "amber",
+#     "route":              "red" | "amber",
+#     "tax_recommendation": None | "release" | "retain",  (set when item came back from Tax)
+#     "tax_recommended_at": None | ISO8601,
+#     "created_at":         ISO8601,
+#     "updated_at":         ISO8601,
 #   }
-_pending_investigations: dict[str, dict] = {}
-_pending_sse:            set[asyncio.Queue] = set()   # subscribers to pending-list updates
-_manual_agent_executor   = None   # lazy-initialised ThreadPoolExecutor for manual agent runs
+#
+# Tax queue entry shape:
+#   {
+#     "tx":                       <full sales-order tx dict>,
+#     "alarm":                    <alarm metadata or {}>,
+#     "risk_score":               "amber" | "red",
+#     "route":                    "amber" | "red",
+#     "escalated_from_customs":   bool,
+#     "agent_status":             "pending" | "agent_running" | "agent_done",
+#     "agent_verdict":            None | {"verdict", "reasoning", "legislation_refs", ...},
+#     "created_at":               ISO8601,
+#     "updated_at":               ISO8601,
+#   }
+_customs_queue: dict[str, dict] = {}
+_tax_queue:     dict[str, dict] = {}
+_customs_sse:   set[asyncio.Queue] = set()
+_tax_sse:       set[asyncio.Queue] = set()
+
+_manual_agent_executor = None   # lazy-initialised ThreadPoolExecutor for manual agent runs
 
 # Registry of in-flight delayed factory tasks (Order Validation + Arrival
 # Notification + manual agent runs). Each factory adds its newly-created task
@@ -699,18 +733,18 @@ async def _investigation_agent_worker() -> None:
             _investigation_queue.task_done()
 
 
-# ── Manual investigation flow (revenue-guardian UI on :8080) ─────────────────
+# ── Two-entity manual workflow (Customs Office + Tax Office) ─────────────────
 #
-# When AUTO_INVESTIGATION_AGENT is False, the holding worker below runs in
-# place of _investigator_factory + _investigation_agent_worker. It subscribes
-# to INVESTIGATE_EVENT and parks every item in _pending_investigations,
-# waiting for the operator to manually trigger the agent and decide.
+# When AUTO_INVESTIGATION_AGENT is False, the legacy holding worker is
+# replaced by two independent listeners — one per entity. Each listener
+# subscribes to its own broker topic and populates its own in-memory queue.
+# Inter-entity transfers (Customs escalates → Tax, Tax recommends → Customs)
+# physically move the entry between dicts and broadcast updates on BOTH SSE
+# streams so both UIs refresh simultaneously.
 
-def _pending_entry_view(entry: dict) -> dict:
-    """Flatten one _pending_investigations entry into the JSON shape the UI
-    consumes. Strips heavy nested fields and exposes the flat tx columns the
-    revenue-guardian dashboard already knows how to render."""
-    tx = entry.get("tx", {}) or {}
+def _flat_tx_view(tx: dict) -> dict:
+    """Common transaction-shaped fields surfaced on every queue entry view.
+    Used by both _customs_entry_view and _tax_entry_view."""
     return {
         "transaction_id":   tx.get("transaction_id"),
         "transaction_date": tx.get("transaction_date"),
@@ -725,61 +759,135 @@ def _pending_entry_view(entry: dict) -> dict:
         "vat_amount":       tx.get("vat_amount"),
         "correct_vat_rate": tx.get("correct_vat_rate"),
         "has_error":        tx.get("has_error"),
-        "risk_score":       entry.get("risk_score"),
-        "alarm":            entry.get("alarm") or {},
-        "status":           entry.get("status"),
-        "agent_verdict":    entry.get("agent_verdict"),
-        "decision":         entry.get("decision"),
-        # Customs ↔ Tax workflow state machine. Initialised by the holding
-        # worker as "customs_pending"; transitions are driven by the
-        # /submit-to-tax and /recommend endpoints. Customs is master.
-        "workflow_status":     entry.get("workflow_status") or "customs_pending",
-        "tax_recommendation":  entry.get("tax_recommendation"),
-        "tax_recommended_at":  entry.get("tax_recommended_at"),
-        "submitted_to_tax_at": entry.get("submitted_to_tax_at"),
-        "created_at":       entry.get("created_at"),
-        "updated_at":       entry.get("updated_at"),
+        "producer_id":      tx.get("producer_id"),
+        "producer_name":    tx.get("producer_name"),
+        "producer_country": tx.get("producer_country"),
+        "producer_city":    tx.get("producer_city"),
     }
 
 
-def _pending_snapshot() -> list[dict]:
-    """Return the full pending list as a JSON-serialisable list, newest first."""
-    items = [_pending_entry_view(e) for e in _pending_investigations.values()]
+def _customs_entry_view(entry: dict) -> dict:
+    return {
+        **_flat_tx_view(entry.get("tx", {}) or {}),
+        "risk_score":          entry.get("risk_score"),
+        "alarm":               entry.get("alarm") or {},
+        "route":               entry.get("route"),
+        "tax_recommendation":  entry.get("tax_recommendation"),
+        "tax_recommended_at":  entry.get("tax_recommended_at"),
+        "created_at":          entry.get("created_at"),
+        "updated_at":          entry.get("updated_at"),
+    }
+
+
+def _tax_entry_view(entry: dict) -> dict:
+    return {
+        **_flat_tx_view(entry.get("tx", {}) or {}),
+        "risk_score":             entry.get("risk_score"),
+        "alarm":                  entry.get("alarm") or {},
+        "route":                  entry.get("route"),
+        "escalated_from_customs": bool(entry.get("escalated_from_customs")),
+        "agent_status":           entry.get("agent_status") or "pending",
+        "agent_verdict":          entry.get("agent_verdict"),
+        "created_at":             entry.get("created_at"),
+        "updated_at":             entry.get("updated_at"),
+    }
+
+
+def _customs_snapshot() -> list[dict]:
+    items = [_customs_entry_view(e) for e in _customs_queue.values()]
     items.sort(key=lambda x: x.get("created_at") or "", reverse=True)
     return items
 
 
-def _broadcast_pending_update() -> None:
-    """Push the current snapshot to every connected SSE subscriber.
-    Synchronous fan-out via put_nowait so callers don't need to await."""
-    if not _pending_sse:
-        return
-    try:
-        payload = _json.dumps(_pending_snapshot())
-    except Exception:
+def _tax_snapshot() -> list[dict]:
+    items = [_tax_entry_view(e) for e in _tax_queue.values()]
+    items.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+    return items
+
+
+def _broadcast_to(sse_set: set[asyncio.Queue], payload_str: str) -> None:
+    """Synchronous fan-out via put_nowait. Drops frames for lagging subscribers."""
+    if not sse_set:
         return
     dead = set()
-    for q in _pending_sse:
+    for q in sse_set:
         try:
-            q.put_nowait(payload)
+            q.put_nowait(payload_str)
         except asyncio.QueueFull:
-            # Subscriber is lagging — drop this frame, the next change will
-            # produce another snapshot.
-            pass
+            pass   # subscriber lagging; next change will produce another snapshot
         except Exception:
             dead.add(q)
-    _pending_sse.difference_update(dead)
+    sse_set.difference_update(dead)
 
 
-async def _investigation_holding_worker() -> None:
+def _broadcast_customs_update() -> None:
+    if not _customs_sse:
+        return
+    try:
+        payload = _json.dumps(_customs_snapshot())
+    except Exception:
+        return
+    _broadcast_to(_customs_sse, payload)
+
+
+def _broadcast_tax_update() -> None:
+    if not _tax_sse:
+        return
+    try:
+        payload = _json.dumps(_tax_snapshot())
+    except Exception:
+        return
+    _broadcast_to(_tax_sse, payload)
+
+
+async def _customs_listener_factory() -> None:
     """
-    Manual-mode replacement for _investigator_factory + _investigation_agent_worker.
+    Customs Office listener.
 
-    Subscribes to INVESTIGATE_EVENT and parks every incoming item in
-    _pending_investigations with status="pending". The operator (revenue-
-    guardian UI) is expected to GET /api/investigations/pending (or subscribe
-    to /api/investigations/stream), trigger the agent via POST run-agent, and
-    finally publish a release/retain decision via POST decide.
+    Subscribes to RETAIN_EVENT (the RED routing path). Every retain event
+    becomes an entry in _customs_queue with route="red", awaiting the
+    Customs operator's review on the Revenue Guardian Customs page.
+
+    The Customs operator can:
+      - Decide release/retain directly (terminal)
+      - Escalate to Tax (transfer entry to _tax_queue)
+    """
+    q = broker.subscribe(RETAIN_EVENT)
+    while True:
+        msg   = await q.get()
+        tx    = msg.get("tx") or {}
+        tx_id = tx.get("transaction_id")
+        if not tx_id:
+            continue
+        if tx_id in _customs_queue or tx_id in _tax_queue:
+            # Idempotent: don't double-route the same transaction.
+            continue
+        now_iso = datetime.now(timezone.utc).isoformat()
+        _customs_queue[tx_id] = {
+            "tx":                  tx,
+            "alarm":               msg.get("alarm") or {},
+            "risk_score":          msg.get("risk_score") or "red",
+            "route":               "red",
+            "tax_recommendation":  None,
+            "tax_recommended_at":  None,
+            "created_at":          now_iso,
+            "updated_at":          now_iso,
+        }
+        _broadcast_customs_update()
+
+
+async def _tax_listener_factory() -> None:
+    """
+    Tax Office listener.
+
+    Subscribes to INVESTIGATE_EVENT (the AMBER routing path). Every
+    investigate event becomes an entry in _tax_queue with route="amber",
+    awaiting the Tax operator's review on the Revenue Guardian Tax page.
+
+    The Tax operator can:
+      - Run the VAT fraud detection agent (Tax-side tool only)
+      - Recommend release/retain (transfer entry back to _customs_queue
+        with tax_recommendation set; Customs takes the final decision)
     """
     q = broker.subscribe(INVESTIGATE_EVENT)
     while True:
@@ -788,28 +896,21 @@ async def _investigation_holding_worker() -> None:
         tx_id = tx.get("transaction_id")
         if not tx_id:
             continue
-        # Idempotent: if the same investigation is re-published, keep the
-        # earliest entry so we don't reset operator state.
-        if tx_id in _pending_investigations:
+        if tx_id in _customs_queue or tx_id in _tax_queue:
             continue
         now_iso = datetime.now(timezone.utc).isoformat()
-        _pending_investigations[tx_id] = {
-            "tx":              tx,
-            "alarm":           msg.get("alarm") or {},
-            "risk_score":      msg.get("risk_score"),
-            "status":          "pending",
-            "agent_verdict":   None,
-            "decision":        None,
-            # Customs ↔ Tax workflow always starts at customs_pending —
-            # the Customs operator is the first to triage.
-            "workflow_status":     "customs_pending",
-            "tax_recommendation":  None,
-            "tax_recommended_at":  None,
-            "submitted_to_tax_at": None,
-            "created_at":      now_iso,
-            "updated_at":      now_iso,
+        _tax_queue[tx_id] = {
+            "tx":                     tx,
+            "alarm":                  msg.get("alarm") or {},
+            "risk_score":             msg.get("risk_score") or "amber",
+            "route":                  "amber",
+            "escalated_from_customs": False,
+            "agent_status":           "pending",
+            "agent_verdict":          None,
+            "created_at":             now_iso,
+            "updated_at":             now_iso,
         }
-        _broadcast_pending_update()
+        _broadcast_tax_update()
 
 
 # ── Release After Investigation Factory ──────────────────────────────────────
@@ -892,11 +993,17 @@ async def _db_store_worker() -> None:
     Terminal worker — persists fully processed transactions to the European
     Custom DB, live queue, and SSE clients.
 
-    Subscribes to all four terminal event topics:
+    Subscribes to the terminal event topics:
       RELEASE_EVENT                     — green path  (no suspicious flag)
-      RETAIN_EVENT                      — red path    (suspicious flag set)
       RELEASE_AFTER_INVESTIGATION_EVENT — cleared     (no suspicious flag)
-      AGENT_RETAIN_EVENT                — retained after investigation (flag set)
+      AGENT_RETAIN_EVENT                — retained after Customs decision  (flag set)
+
+    NOTE: RETAIN_EVENT is no longer terminal in the two-entity model. Items
+    routed to the RED path are now picked up by _customs_listener_factory and
+    parked in the Customs queue for the operator's final decision. They reach
+    DB storage via AGENT_RETAIN_EVENT (Customs retains) or
+    RELEASE_AFTER_INVESTIGATION_EVENT (Customs releases) once the operator
+    has acted.
     """
     async def _push_sse(row: dict) -> None:
         if not _sse_queues:
@@ -936,7 +1043,6 @@ async def _db_store_worker() -> None:
 
     await asyncio.gather(
         _drain(RELEASE_EVENT,                     False),
-        _drain(RETAIN_EVENT,                      True),
         _drain(RELEASE_AFTER_INVESTIGATION_EVENT,  False),
         _drain(AGENT_RETAIN_EVENT,                True),
     )
@@ -1055,9 +1161,11 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(_investigator_factory())
         asyncio.create_task(_investigation_agent_worker())
     else:
-        # Manual mode: investigations land in _pending_investigations and wait
-        # for the revenue-guardian UI operator to trigger the agent + decide.
-        asyncio.create_task(_investigation_holding_worker())
+        # Manual mode (two-entity model): two independent listeners.
+        #   RED  → RETAIN_EVENT      → _customs_listener → _customs_queue
+        #   AMBER → INVESTIGATE_EVENT → _tax_listener     → _tax_queue
+        asyncio.create_task(_customs_listener_factory())
+        asyncio.create_task(_tax_listener_factory())
     asyncio.create_task(_release_after_investigation_factory())
     asyncio.create_task(_db_store_worker())
     asyncio.create_task(_agent_worker())
@@ -1157,15 +1265,12 @@ def _compute_sim_state_snapshot() -> dict:
         "queues":             {t: _broker.qsize(t) for t in topics},
         "stored_count":       get_transaction_count(),
         "investigation_queue": _investigation_queue.qsize() if _investigation_queue else 0,
-        # Live depth of the manual-review holding dict — drives the
-        # "Pending Investigations" node on the simulation diagram.
-        "pending_investigations": len(_pending_investigations),
-        # Number of pending entries currently being analysed by the agent
-        # (status == "agent_running"). Drives the "under analysis" count on
-        # the VAT Fraud Detection Agent block.
-        "pending_investigations_running": sum(
-            1 for v in _pending_investigations.values()
-            if v.get("status") == "agent_running"
+        # Two-entity model: separate counters for the Customs and Tax queues
+        # plus how many tax items are currently being analysed by the agent.
+        "customs_queue":          len(_customs_queue),
+        "tax_queue":              len(_tax_queue),
+        "tax_queue_agent_running": sum(
+            1 for v in _tax_queue.values() if v.get("agent_status") == "agent_running"
         ),
         "risk_flags": {
             "rt_risk_1_flagged": count_field_value(RT_RISK_1_OUTCOME, "outcome.flagged", True),
@@ -1358,92 +1463,77 @@ def api_ireland_case(transaction_id: str):
     return case
 
 
-# ── Manual investigations API (revenue-guardian UI on :8080) ──────────────────
+# ── Two-entity manual workflow API (revenue-guardian UI on :8080) ────────────
+#
+# Customs and Tax are exposed as two completely separate API surfaces, each
+# with its own queue endpoint and SSE stream. The only inter-entity hops are
+# /api/customs/{id}/escalate-to-tax and /api/tax/{id}/recommend, both of
+# which physically transfer the entry between dicts and broadcast on both
+# SSE streams so both UIs refresh together.
 
-@app.get("/api/investigations/pending")
-def api_investigations_pending():
-    """
-    Snapshot of every investigation currently parked in the holding queue,
-    awaiting manual agent run + release/retain decision. Newest first.
-    Powered by _pending_investigations, populated by _investigation_holding_worker
-    when AUTO_INVESTIGATION_AGENT is False.
-    """
-    return _pending_snapshot()
-
-
-class InvestigationDecisionPayload(BaseModel):
+class CustomsDecisionPayload(BaseModel):
     action: str   # "release" | "retain"
 
 
-class InvestigationRecommendationPayload(BaseModel):
+class TaxRecommendationPayload(BaseModel):
     recommendation: str   # "release" | "retain"
 
 
-@app.post("/api/investigations/{transaction_id}/submit-to-tax")
-async def api_investigations_submit_to_tax(transaction_id: str):
-    """
-    Customs operator escalates an investigation to the Tax Authority queue.
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
-    Workflow transition: customs_pending → at_tax. The entry stays in the
-    holding dict but disappears from the Customs Authority view (filtered to
-    customs_pending + recommended_*) and starts appearing on the Tax
-    Authority page (filtered to at_tax). Tax then runs the agent if needed
-    and publishes a recommendation via /recommend, which moves the entry to
-    recommended_release / recommended_retain — back at the Customs page for
-    final decision.
 
-    Idempotency: 404 if missing, 409 if already past customs_pending.
+# ── Customs Office endpoints ─────────────────────────────────────────────────
+
+@app.get("/api/customs/queue")
+def api_customs_queue():
+    """Snapshot of every transaction currently in the Customs queue,
+    newest first. Includes RED items routed directly from RETAIN_EVENT
+    AND items returned from Tax with a recommendation."""
+    return _customs_snapshot()
+
+
+@app.post("/api/customs/{transaction_id}/escalate-to-tax")
+async def api_customs_escalate_to_tax(transaction_id: str):
     """
-    entry = _pending_investigations.get(transaction_id)
+    Customs operator transfers a Customs queue item to the Tax queue
+    requesting a Tax recommendation.
+
+    Idempotency:
+      404 — unknown transaction_id
+      409 — item already in the Tax queue (or returned from Tax already)
+    """
+    entry = _customs_queue.get(transaction_id)
     if not entry:
-        return JSONResponse(status_code=404, content={"detail": "investigation not found in pending queue"})
-    if entry.get("workflow_status") != "customs_pending":
-        return JSONResponse(status_code=409, content={"detail": f"investigation is in workflow state '{entry.get('workflow_status')}', expected 'customs_pending'"})
+        return JSONResponse(status_code=404, content={"detail": "transaction not found in Customs queue"})
+    if entry.get("tax_recommendation"):
+        return JSONResponse(status_code=409, content={"detail": "item already has a Tax recommendation; cannot re-escalate"})
 
-    now_iso = datetime.now(timezone.utc).isoformat()
-    entry["workflow_status"]     = "at_tax"
-    entry["submitted_to_tax_at"] = now_iso
-    entry["updated_at"]          = now_iso
-    _broadcast_pending_update()
-    return _pending_entry_view(entry)
+    now = _now_iso()
+    # Build a fresh Tax queue entry from the Customs entry. Mark the
+    # escalation provenance so the Tax UI can display a small badge.
+    _tax_queue[transaction_id] = {
+        "tx":                     entry["tx"],
+        "alarm":                  entry.get("alarm") or {},
+        "risk_score":             entry.get("risk_score"),
+        "route":                  entry.get("route"),
+        "escalated_from_customs": True,
+        "agent_status":           "pending",
+        "agent_verdict":          None,
+        "created_at":             now,
+        "updated_at":             now,
+    }
+    # Remove from Customs queue.
+    _customs_queue.pop(transaction_id, None)
+    _broadcast_customs_update()
+    _broadcast_tax_update()
+    return _tax_entry_view(_tax_queue[transaction_id])
 
 
-@app.post("/api/investigations/{transaction_id}/recommend")
-async def api_investigations_recommend(transaction_id: str, payload: InvestigationRecommendationPayload):
+@app.post("/api/customs/{transaction_id}/decide")
+async def api_customs_decide(transaction_id: str, payload: CustomsDecisionPayload):
     """
-    Tax Authority operator publishes a non-binding recommendation on a
-    transaction Customs has submitted for review.
-
-    Workflow transition: at_tax → recommended_release / recommended_retain.
-    The entry stays in the holding dict; it disappears from the Tax view
-    and reappears on the Customs page with the recommendation displayed
-    as a colored badge alongside the (now-only) Release / Retain action
-    buttons. The Customs operator's call via /decide is what actually
-    publishes the terminal event.
-    """
-    rec = (payload.recommendation or "").lower().strip()
-    if rec not in ("release", "retain"):
-        return JSONResponse(status_code=400, content={"detail": "recommendation must be 'release' or 'retain'"})
-
-    entry = _pending_investigations.get(transaction_id)
-    if not entry:
-        return JSONResponse(status_code=404, content={"detail": "investigation not found in pending queue"})
-    if entry.get("workflow_status") != "at_tax":
-        return JSONResponse(status_code=409, content={"detail": f"investigation is in workflow state '{entry.get('workflow_status')}', expected 'at_tax'"})
-
-    now_iso = datetime.now(timezone.utc).isoformat()
-    entry["workflow_status"]    = f"recommended_{rec}"
-    entry["tax_recommendation"] = rec
-    entry["tax_recommended_at"] = now_iso
-    entry["updated_at"]         = now_iso
-    _broadcast_pending_update()
-    return _pending_entry_view(entry)
-
-
-@app.post("/api/investigations/{transaction_id}/decide")
-async def api_investigations_decide(transaction_id: str, payload: InvestigationDecisionPayload):
-    """
-    Operator-driven release / retain decision for a pending investigation.
+    Customs operator's terminal release / retain decision.
 
       release → publish AGENT_RELEASE_EVENT (the existing
                 _release_after_investigation_factory correlates with
@@ -1451,43 +1541,34 @@ async def api_investigations_decide(transaction_id: str, payload: InvestigationD
                 RELEASE_AFTER_INVESTIGATION_EVENT for storage)
       retain  → publish AGENT_RETAIN_EVENT directly (terminal)
 
-    The entry is removed from _pending_investigations and an SSE update is
-    broadcast so any listening UI can drop the row from its list.
+    If the entry carries a Tax recommendation that disagrees with the
+    operator's chosen action, custom_override=true is set on the published
+    terminal event for downstream audit.
     """
     action = (payload.action or "").lower().strip()
     if action not in ("release", "retain"):
         return JSONResponse(status_code=400, content={"detail": "action must be 'release' or 'retain'"})
 
-    entry = _pending_investigations.get(transaction_id)
+    entry = _customs_queue.get(transaction_id)
     if not entry:
-        return JSONResponse(status_code=404, content={"detail": "investigation not found in pending queue"})
-    if entry["status"] == "decided":
-        return JSONResponse(status_code=409, content={"detail": "investigation already decided"})
+        return JSONResponse(status_code=404, content={"detail": "transaction not found in Customs queue"})
 
     tx       = entry["tx"]
     alarm    = entry.get("alarm") or {}
-    verdict  = entry.get("agent_verdict") or {}
     tax_rec  = entry.get("tax_recommendation")
-
-    # Customs is master, but we record an audit flag when the Customs
-    # operator overrides a Tax Authority recommendation. The flag is
-    # included on the published terminal event so any downstream consumer
-    # can flag the divergence.
     custom_override = bool(tax_rec and tax_rec != action)
 
     if action == "release":
         await broker.publish(AGENT_RELEASE_EVENT, {
             "tx":                  tx,
-            "verdict":             verdict.get("verdict") or "human_release",
-            "reasoning":           verdict.get("reasoning") or "Released by operator",
-            "legislation_refs":    verdict.get("legislation_refs") or [],
-            "decided_by":          "human",
+            "verdict":             "human_release",
+            "reasoning":           "Released by Customs operator",
+            "legislation_refs":    [],
+            "decided_by":          "customs",
             "tax_recommendation":  tax_rec,
             "custom_override":     custom_override,
         })
-    else:   # retain
-        # Mirror the auto-pipeline side effects so the suspicious flag and
-        # the Ireland queue stay consistent with what the legacy worker did.
+    else:
         update_suspicion_level(transaction_id, "high")
         insert_ireland_queue({
             "transaction_id":   transaction_id,
@@ -1504,25 +1585,24 @@ async def api_investigations_decide(transaction_id: str, payload: InvestigationD
             "deviation_pct":    alarm.get("deviation_pct"),
             "ratio_current":    alarm.get("ratio_current"),
             "ratio_historical": alarm.get("ratio_historical"),
-            "agent_verdict":    verdict.get("verdict") or "human_retain",
-            "agent_reasoning":  verdict.get("reasoning") or "Retained by operator",
-            "queued_at":        datetime.now(timezone.utc).isoformat(),
+            "agent_verdict":    "human_retain",
+            "agent_reasoning":  "Retained by Customs operator",
+            "queued_at":        _now_iso(),
         })
         await broker.publish(AGENT_RETAIN_EVENT, {
             "tx":                  tx,
-            "verdict":             verdict.get("verdict") or "human_retain",
-            "reasoning":           verdict.get("reasoning") or "Retained by operator",
+            "verdict":             "human_retain",
+            "reasoning":           "Retained by Customs operator",
             "risk_score":          "retained",
             "alarm_id":            alarm.get("id"),
             "alarm":               alarm,
-            "decided_by":          "human",
+            "decided_by":          "customs",
             "tax_recommendation":  tax_rec,
             "custom_override":     custom_override,
         })
 
-    # Remove from pending and broadcast a final snapshot so listeners drop it.
-    _pending_investigations.pop(transaction_id, None)
-    _broadcast_pending_update()
+    _customs_queue.pop(transaction_id, None)
+    _broadcast_customs_update()
     return {
         "ok": True,
         "action": action,
@@ -1532,46 +1612,76 @@ async def api_investigations_decide(transaction_id: str, payload: InvestigationD
     }
 
 
-@app.post("/api/investigations/{transaction_id}/run-agent")
-async def api_investigations_run_agent(transaction_id: str):
+# ── Tax Office endpoints ─────────────────────────────────────────────────────
+
+@app.get("/api/tax/queue")
+def api_tax_queue():
+    """Snapshot of every transaction currently in the Tax queue, newest
+    first. Includes AMBER items routed directly from INVESTIGATE_EVENT
+    AND items escalated from Customs."""
+    return _tax_snapshot()
+
+
+@app.post("/api/tax/{transaction_id}/recommend")
+async def api_tax_recommend(transaction_id: str, payload: TaxRecommendationPayload):
     """
-    Trigger the VAT fraud detection agent on a pending investigation.
+    Tax operator publishes a non-binding recommendation. The entry is
+    transferred from the Tax queue back to the Customs queue with the
+    tax_recommendation field set. Customs makes the final call.
+    """
+    rec = (payload.recommendation or "").lower().strip()
+    if rec not in ("release", "retain"):
+        return JSONResponse(status_code=400, content={"detail": "recommendation must be 'release' or 'retain'"})
 
-    The endpoint returns immediately (202) after marking the entry
-    "agent_running"; the actual analysis runs in a background task and the
-    UI receives the verdict via /api/investigations/stream when it is ready.
+    entry = _tax_queue.get(transaction_id)
+    if not entry:
+        return JSONResponse(status_code=404, content={"detail": "transaction not found in Tax queue"})
 
-    Idempotency:
+    now = _now_iso()
+    _customs_queue[transaction_id] = {
+        "tx":                  entry["tx"],
+        "alarm":               entry.get("alarm") or {},
+        "risk_score":          entry.get("risk_score"),
+        "route":               entry.get("route"),
+        "tax_recommendation":  rec,
+        "tax_recommended_at":  now,
+        "created_at":          entry.get("created_at"),
+        "updated_at":          now,
+    }
+    _tax_queue.pop(transaction_id, None)
+    _broadcast_tax_update()
+    _broadcast_customs_update()
+    return _customs_entry_view(_customs_queue[transaction_id])
+
+
+@app.post("/api/tax/{transaction_id}/run-agent")
+async def api_tax_run_agent(transaction_id: str):
+    """
+    Trigger the VAT fraud detection agent on a Tax queue item.
+
+    Returns immediately (202) after flipping agent_status → "agent_running";
+    the verdict lands via the SSE stream when ready.
+
       404 — unknown transaction_id
-      409 — entry is already agent_running or already decided
+      409 — agent already running, or item is no longer in Tax queue
     """
     global _manual_agent_executor
 
-    entry = _pending_investigations.get(transaction_id)
+    entry = _tax_queue.get(transaction_id)
     if not entry:
-        return JSONResponse(status_code=404, content={"detail": "investigation not found in pending queue"})
-    if entry["status"] == "agent_running":
-        return JSONResponse(status_code=409, content={"detail": "agent already running for this investigation"})
-    if entry["status"] == "decided":
-        return JSONResponse(status_code=409, content={"detail": "investigation already decided"})
+        return JSONResponse(status_code=404, content={"detail": "transaction not found in Tax queue"})
+    if entry.get("agent_status") == "agent_running":
+        return JSONResponse(status_code=409, content={"detail": "agent already running"})
 
-    # Lazily build a small thread pool the first time we need it. Reused
-    # across calls so we don't spawn a new pool on every request.
     if _manual_agent_executor is None:
         import concurrent.futures
         _manual_agent_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
-    now_iso = datetime.now(timezone.utc).isoformat()
-    entry["status"]     = "agent_running"
-    entry["updated_at"] = now_iso
-    _broadcast_pending_update()
+    now = _now_iso()
+    entry["agent_status"] = "agent_running"
+    entry["updated_at"]   = now
+    _broadcast_tax_update()
 
-    # NOTE: this background runner is intentionally exempt from sim-time
-    # pausing. The actual analysis is a synchronous LM Studio HTTP call
-    # executed inside a thread pool, and the asyncio task only awaits its
-    # completion — there is no factory delay to gate. If the user pauses or
-    # resets mid-analysis the asyncio task is cancelled (the future's result
-    # is then discarded) but the underlying LLM call finishes on its thread.
     async def _run() -> None:
         from lib.agent_bridge import analyse_transaction_sync
         tx = entry["tx"]
@@ -1583,10 +1693,8 @@ async def api_investigations_run_agent(transaction_id: str):
                 "verdict":          result.get("verdict", "uncertain"),
                 "reasoning":        result.get("reasoning", ""),
                 "legislation_refs": result.get("legislation_refs", []),
-                "completed_at":     datetime.now(timezone.utc).isoformat(),
+                "completed_at":     _now_iso(),
             }
-            # Persist a row to agent_log so the audit trail matches the
-            # auto-pipeline behaviour.
             insert_agent_log({
                 "transaction_id":   tx.get("transaction_id"),
                 "seller_name":      tx.get("seller_name", ""),
@@ -1599,30 +1707,30 @@ async def api_investigations_run_agent(transaction_id: str):
                 "verdict":          verdict["verdict"],
                 "reasoning":        verdict["reasoning"],
                 "legislation_refs": _json.dumps(verdict["legislation_refs"]),
-                "sent_to_ireland":  0,   # the human decision drives any forwarding
+                "sent_to_ireland":  0,
                 "processed_at":     verdict["completed_at"],
             })
         except Exception as exc:
             import traceback
-            print(f"[manual_agent] error: {exc}\n{traceback.format_exc()}")
+            print(f"[tax_agent] error: {exc}\n{traceback.format_exc()}")
             verdict = {
                 "verdict":          "uncertain",
                 "reasoning":        f"Agent error: {exc}",
                 "legislation_refs": [],
-                "completed_at":     datetime.now(timezone.utc).isoformat(),
+                "completed_at":     _now_iso(),
                 "error":            True,
             }
-        # Re-fetch the entry in case it was decided/removed mid-run.
-        live = _pending_investigations.get(transaction_id)
+        # Re-fetch in case the entry was moved/removed mid-run.
+        live = _tax_queue.get(transaction_id)
         if live is None:
             return
         live["agent_verdict"] = verdict
-        live["status"]        = "agent_done"
-        live["updated_at"]    = datetime.now(timezone.utc).isoformat()
-        _broadcast_pending_update()
+        live["agent_status"]  = "agent_done"
+        live["updated_at"]    = _now_iso()
+        _broadcast_tax_update()
 
     _track_factory_task(_run())
-    return JSONResponse(status_code=202, content=_pending_entry_view(entry))
+    return JSONResponse(status_code=202, content=_tax_entry_view(entry))
 
 
 @app.get("/api/transactions/{transaction_id}/timeline")
@@ -1640,41 +1748,56 @@ def api_transaction_timeline(transaction_id: str):
     return get_events_for_order(transaction_id)
 
 
-@app.get("/api/investigations/stream")
-async def api_investigations_stream(request: Request):
-    """
-    SSE stream carrying the full pending-investigations list. Pushed every
-    time an item is added (new INVESTIGATE_EVENT), an agent run starts/finishes,
-    or a decision removes an item. Initial snapshot delivered on connect.
-    """
-    q: asyncio.Queue = asyncio.Queue(maxsize=20)
-    _pending_sse.add(q)
-
-    try:
-        initial = _json.dumps(_pending_snapshot())
-    except Exception:
-        initial = None
-
-    async def event_generator():
+def _make_sse_stream(snapshot_fn, sse_set: set[asyncio.Queue]):
+    """Build an SSE StreamingResponse around a snapshot function and a
+    subscriber set. Used by both the Customs and Tax queue streams."""
+    async def _stream(request: Request):
+        q: asyncio.Queue = asyncio.Queue(maxsize=20)
+        sse_set.add(q)
         try:
-            if initial is not None:
-                yield f"data: {initial}\n\n"
-            while True:
-                if await request.is_disconnected():
-                    break
-                try:
-                    payload = await asyncio.wait_for(q.get(), timeout=15.0)
-                    yield f"data: {payload}\n\n"
-                except asyncio.TimeoutError:
-                    yield ": heartbeat\n\n"
-        finally:
-            _pending_sse.discard(q)
+            initial = _json.dumps(snapshot_fn())
+        except Exception:
+            initial = None
 
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+        async def event_generator():
+            try:
+                if initial is not None:
+                    yield f"data: {initial}\n\n"
+                while True:
+                    if await request.is_disconnected():
+                        break
+                    try:
+                        payload = await asyncio.wait_for(q.get(), timeout=15.0)
+                        yield f"data: {payload}\n\n"
+                    except asyncio.TimeoutError:
+                        yield ": heartbeat\n\n"
+            finally:
+                sse_set.discard(q)
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+    return _stream
+
+
+@app.get("/api/customs/queue/stream")
+async def api_customs_queue_stream(request: Request):
+    """SSE stream of the Customs queue. Initial snapshot on connect, plus
+    a fresh snapshot whenever the queue changes (new RED listener arrival,
+    escalation to Tax removing an entry, recommendation back from Tax,
+    or terminal Customs decision)."""
+    return await _make_sse_stream(_customs_snapshot, _customs_sse)(request)
+
+
+@app.get("/api/tax/queue/stream")
+async def api_tax_queue_stream(request: Request):
+    """SSE stream of the Tax queue. Initial snapshot on connect, plus
+    a fresh snapshot whenever the queue changes (new AMBER listener
+    arrival, escalation from Customs adding an entry, agent run start/
+    finish, or recommendation back to Customs removing an entry)."""
+    return await _make_sse_stream(_tax_snapshot, _tax_sse)(request)
 
 
 # ── Simulation control ────────────────────────────────────────────────────────
@@ -1695,15 +1818,11 @@ def sim_pipeline():
         "queues":             {t: _broker.qsize(t) for t in topics},
         "stored_count":       get_transaction_count(),
         "investigation_queue": _investigation_queue.qsize() if _investigation_queue else 0,
-        # Live depth of the manual-review holding dict — drives the
-        # "Pending Investigations" node on the simulation diagram.
-        "pending_investigations": len(_pending_investigations),
-        # Number of pending entries currently being analysed by the agent
-        # (status == "agent_running"). Drives the "under analysis" count on
-        # the VAT Fraud Detection Agent block.
-        "pending_investigations_running": sum(
-            1 for v in _pending_investigations.values()
-            if v.get("status") == "agent_running"
+        # Two-entity model: separate counters for Customs and Tax queues.
+        "customs_queue":          len(_customs_queue),
+        "tax_queue":              len(_tax_queue),
+        "tax_queue_agent_running": sum(
+            1 for v in _tax_queue.values() if v.get("agent_status") == "agent_running"
         ),
         "risk_flags": {
             "rt_risk_1_flagged": count_field_value(RT_RISK_1_OUTCOME, "outcome.flagged", True),
@@ -1794,12 +1913,13 @@ def sim_reset():
         if not t.done():
             t.cancel()
     _inflight_factory_tasks.clear()
-    # Clear the manual-mode holding dict and push a fresh (empty) snapshot
-    # to every SSE subscriber so the Revenue Guardian Tax Authority page
-    # drops all the stale rows immediately instead of keeping them around
-    # until the next individual decide/run-agent event.
-    _pending_investigations.clear()
-    _broadcast_pending_update()
+    # Clear both entity queues and push fresh empty snapshots on each SSE
+    # stream so the Revenue Guardian Customs and Tax Authority pages drop
+    # all the stale rows immediately.
+    _customs_queue.clear()
+    _tax_queue.clear()
+    _broadcast_customs_update()
+    _broadcast_tax_update()
     for sse_q in list(_sse_queues):
         try:
             sse_q.put_nowait("__reset__")
