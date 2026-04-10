@@ -103,6 +103,7 @@ from lib.broker import (
     RT_SCORE, ORDER_VALIDATION, ARRIVAL_NOTIFICATION,
     RELEASE_EVENT, RETAIN_EVENT, INVESTIGATE_EVENT,
     AGENT_RETAIN_EVENT, AGENT_RELEASE_EVENT, RELEASE_AFTER_INVESTIGATION_EVENT,
+    AI_ANALYSIS_EVENT,
 )
 from lib.config import DEFAULT_SPEED, MIN_SPEED, MAX_SPEED, QUEUE_SIZE
 from lib.database import (
@@ -127,7 +128,11 @@ from lib.database import (
     get_ireland_case,
     update_suspicion_level,
     clear_suspicious_flag,
+    upsert_sales_order_line_item,
+    upsert_line_item_risk,
+    upsert_line_item_ai_analysis,
 )
+from lib.regions import country_region
 from lib.simulator import state, simulation_loop
 from lib.catalog import SUPPLIERS, COUNTRY_NAMES
 
@@ -1048,6 +1053,269 @@ async def _db_store_worker() -> None:
     )
 
 
+# ── Data Hub Writer (3 dark-purple tables, 30-s polling worker) ──────────────
+
+# Tick interval — how often the writer drains its in-memory buffer and upserts
+# into the data hub tables. The user spec says "every 30 sec".
+_DATA_HUB_TICK_S = 30.0
+
+# Per-key buffers populated by the topic listeners between ticks. Each maps
+# sales_order_line_item_SKU → row dict ready to be upserted. The polling tick
+# moves them out of the buffer; if a topic re-fires for the same key before
+# the tick, the buffer entry is replaced (latest wins).
+_data_hub_so_buffer: dict[str, dict] = {}
+_data_hub_risk_buffer: dict[str, dict] = {}
+_data_hub_ai_buffer: dict[str, dict] = {}
+
+
+def _line_sku(tx: dict, line_number: int = 1) -> str:
+    """Compute the deterministic per-line SKU. Today every order has exactly
+    one synthetic line so line_number is always 1; the helper exists to make
+    the multi-line migration trivial later."""
+    so_id = tx.get("orderIdentifier") or tx.get("transaction_id") or "unknown"
+    return f"{so_id}-{line_number:03d}"
+
+
+def _build_sales_order_line_item_row(tx: dict) -> dict | None:
+    """Convert a SALES_ORDER_EVENT message into a sales_order_line_item row.
+    Returns None if essential fields are missing."""
+    so_id = tx.get("orderIdentifier") or tx.get("transaction_id")
+    if not so_id:
+        return None
+    sku = _line_sku(tx, 1)
+
+    # The simplified_order.json schema carries:
+    #   DeemedImporter (order header)         = the EU reseller
+    #   SalesLineItem[i].Seller (line level)  = the non-EU producer
+    # Pull both from the message; fall back to flat compat fields if needed.
+    deemed_importer = tx.get("DeemedImporter") or {}
+    importer_addr   = deemed_importer.get("Address") or {}
+
+    sales_lines = tx.get("SalesLineItem") or []
+    li          = sales_lines[0] if sales_lines else {}
+    li_seller   = li.get("Seller") or {}
+    li_addr     = li_seller.get("Address") or {}
+    li_desc     = ((li.get("DescriptionOfGoods") or {}).get("descriptionOfGoods")
+                   or tx.get("item_description") or "")
+
+    dest_country = (
+        ((tx.get("CountryOfDestination") or {}).get("country"))
+        or tx.get("buyer_country")
+        or ""
+    )
+
+    return {
+        "sales_order_line_item_SKU": sku,
+        "so_id":                     so_id,
+        "line_item_name":            sku,
+        "line_item_SKU":             sku,
+        "line_item_description":     li_desc,
+        "line_item_price":           li.get("itemAmountPrice") or tx.get("value") or 0.0,
+        "product_category":          tx.get("item_category") or "",
+        # Order-header party — DeemedImporter (EU reseller)
+        "deemed_importer_id":        deemed_importer.get("identificationNumber") or tx.get("seller_id") or "",
+        "deemed_importer_name":      deemed_importer.get("name")                 or tx.get("seller_name") or "",
+        "deemed_importer_country":   importer_addr.get("country")                or tx.get("seller_country") or "",
+        # Per-line party — Seller (non-EU producer)
+        "seller_id":                 li_seller.get("identificationNumber") or tx.get("producer_id"),
+        "seller_name":               li_seller.get("name")                 or tx.get("producer_name"),
+        "seller_city":               li_addr.get("cityName")                or tx.get("producer_city"),
+        "origin_country":            li_addr.get("country")                 or tx.get("producer_country"),
+        "destination_country":       dest_country,
+        "dest_country_region":       country_region(dest_country),
+        "VAT_pct":                   tx.get("vat_rate") or 0.0,
+        "VAT_paid":                  tx.get("vat_amount") or 0.0,
+        "date":                      (tx.get("orderCreationDate")
+                                      or tx.get("transaction_date") or ""),
+    }
+
+
+# Mapping from RT_SCORE categorical → numeric / level / suggested action.
+# Locked in with the user: High=100, Medium=50, Low=0.
+_RT_SCORE_TO_RISK = {
+    "red":   {"score": 100, "level": "High",   "action": "retain"},
+    "amber": {"score":  50, "level": "Medium", "action": "investigate"},
+    "green": {"score":   0, "level": "Low",    "action": "release"},
+}
+
+
+def _build_line_item_risk_row(msg: dict) -> dict | None:
+    """Convert an RT_SCORE message into a line_item_risk row. Every transaction
+    that passes through the pipeline produces an RT_SCORE event so this fires
+    for every line — matching the user's rule that risk is always populated."""
+    tx = msg.get("tx") or {}
+    sku = _line_sku(tx, 1)
+    if not tx.get("orderIdentifier") and not tx.get("transaction_id"):
+        return None
+
+    rt_color = (msg.get("risk_score") or "green").lower()
+    mapping  = _RT_SCORE_TO_RISK.get(rt_color, _RT_SCORE_TO_RISK["green"])
+
+    # risk_description = "; "-joined names of failed checks (RT Risk 1 / 2),
+    # empty when nothing flagged. The two flags travel with the RT_SCORE
+    # message published by RT Consolidation.
+    failed: list[str] = []
+    if msg.get("risk_1_flagged"):
+        failed.append("vat_ratio_deviation")
+    if msg.get("risk_2_flagged"):
+        failed.append("watchlist_hit")
+    description = "; ".join(failed)
+
+    return {
+        "sales_order_line_item_SKU": sku,
+        "risk_score_numeric":        mapping["score"],
+        "risk_level":                mapping["level"],
+        "risk_description":          description,
+        "suggested_risk_action":     mapping["action"],
+    }
+
+
+def _build_line_item_ai_row(msg: dict) -> dict | None:
+    """Convert an AI_ANALYSIS_EVENT into a line_item_ai_analysis row. Only
+    fires when the Tax officer manually runs the agent — most transactions
+    will never appear in this table, by design."""
+    tx = msg.get("tx") or {}
+    sku = _line_sku(tx, 1)
+    if not tx.get("orderIdentifier") and not tx.get("transaction_id"):
+        return None
+
+    verdict   = (msg.get("verdict") or "uncertain").lower()
+    reasoning = msg.get("reasoning") or ""
+
+    # Confidence derivation (locked in with user): correct→1.0, uncertain→0.5,
+    # incorrect→0.0. Cheap and consistent until the analyser produces a real
+    # confidence number.
+    confidence = {"correct": 1.0, "uncertain": 0.5, "incorrect": 0.0}.get(verdict, 0.5)
+
+    # source = "; "-joined unique source names from the legislation refs.
+    refs = msg.get("legislation_refs") or []
+    seen: set[str] = set()
+    sources: list[str] = []
+    for r in refs:
+        s = (r.get("source") or "").strip() if isinstance(r, dict) else str(r)
+        if s and s not in seen:
+            seen.add(s)
+            sources.append(s)
+    source_str = "; ".join(sources)
+
+    # Per-line verdicts carry the corrected VAT rate (`expected_rate`) and the
+    # rate that was actually applied. Today there is exactly one synthetic
+    # line per transaction so we use line_verdicts[0]; this generalises
+    # cleanly when multi-line orders arrive (we'd loop and emit one row per
+    # line_item_id).
+    line_verdicts = msg.get("line_verdicts") or []
+    expected_rate = None
+    if line_verdicts:
+        expected_rate = line_verdicts[0].get("expected_rate")
+
+    line_price = tx.get("value") or 0.0
+    vat_paid   = tx.get("vat_amount") or 0.0
+
+    if expected_rate is not None and line_price:
+        # The analyser returns expected_rate as a fraction (0.21 = 21%).
+        correct_vat_value = round(line_price * float(expected_rate), 2)
+        vat_exposure      = round(correct_vat_value - vat_paid, 2)
+        correct_vat_pct   = float(expected_rate)
+    else:
+        correct_vat_value = None
+        vat_exposure      = None
+        correct_vat_pct   = None
+
+    return {
+        "sales_order_line_item_SKU": sku,
+        "analysis_outcome":          verdict,
+        "analysis_description":      reasoning,
+        "confidence_score":          confidence,
+        "source":                    source_str,
+        # No source for category correction today (the agent doesn't return
+        # one and the simulator never seeds wrong-category fraud).
+        "correct_product_category":  None,
+        "correct_vat_pct":           correct_vat_pct,
+        "correct_vat_value":         correct_vat_value,
+        "vat_exposure":              vat_exposure,
+    }
+
+
+async def _data_hub_writer() -> None:
+    """
+    Polling worker that populates the three data hub tables.
+
+    Architecture:
+      1. Subscribe ONCE at startup to SALES_ORDER_EVENT, RT_SCORE, and
+         AI_ANALYSIS_EVENT. Listener coroutines accumulate the latest row per
+         (sales_order_line_item_SKU) into the three module-level buffers.
+      2. Tick every _DATA_HUB_TICK_S seconds: drain each buffer and upsert
+         into its target table inside a single transaction.
+
+    Idempotency: every upsert keys on sales_order_line_item_SKU and uses
+    INSERT ... ON CONFLICT DO UPDATE, so re-receiving the same line is safe.
+
+    Lifecycle: matches the user's rule —
+      • every transaction → 1 row in sales_order_line_item + 1 in line_item_risk
+      • only tax-officer-triggered analyses → 1 row in line_item_ai_analysis
+    """
+    so_q   = broker.subscribe(SALES_ORDER_EVENT)
+    risk_q = broker.subscribe(RT_SCORE)
+    ai_q   = broker.subscribe(AI_ANALYSIS_EVENT)
+
+    async def _drain_so() -> None:
+        while True:
+            msg = await so_q.get()
+            row = _build_sales_order_line_item_row(msg)
+            if row:
+                _data_hub_so_buffer[row["sales_order_line_item_SKU"]] = row
+
+    async def _drain_risk() -> None:
+        while True:
+            msg = await risk_q.get()
+            row = _build_line_item_risk_row(msg)
+            if row:
+                _data_hub_risk_buffer[row["sales_order_line_item_SKU"]] = row
+
+    async def _drain_ai() -> None:
+        while True:
+            msg = await ai_q.get()
+            row = _build_line_item_ai_row(msg)
+            if row:
+                _data_hub_ai_buffer[row["sales_order_line_item_SKU"]] = row
+
+    async def _tick() -> None:
+        while True:
+            await asyncio.sleep(_DATA_HUB_TICK_S)
+            # Snapshot + clear so the listeners can keep accepting messages
+            # while we write. Race window is harmless — anything that arrives
+            # during the writes lands in the next tick.
+            so_snap   = list(_data_hub_so_buffer.values());   _data_hub_so_buffer.clear()
+            risk_snap = list(_data_hub_risk_buffer.values()); _data_hub_risk_buffer.clear()
+            ai_snap   = list(_data_hub_ai_buffer.values());   _data_hub_ai_buffer.clear()
+
+            # Sales Order + Line Item rows MUST land before Risk / AI rows
+            # for that SKU because the latter two FK back to it. Within a
+            # single tick we drain all three so this ordering matters only
+            # if the same SKU appears in both buffers (which is the common
+            # case): the SO row gets inserted first, then the FK rows resolve.
+            for row in so_snap:
+                try:
+                    upsert_sales_order_line_item(row)
+                except Exception as exc:
+                    print(f"[data_hub] SO upsert failed for {row.get('sales_order_line_item_SKU')}: {exc}")
+            for row in risk_snap:
+                try:
+                    upsert_line_item_risk(row)
+                except Exception as exc:
+                    print(f"[data_hub] risk upsert failed for {row.get('sales_order_line_item_SKU')}: {exc}")
+            for row in ai_snap:
+                try:
+                    upsert_line_item_ai_analysis(row)
+                except Exception as exc:
+                    print(f"[data_hub] AI upsert failed for {row.get('sales_order_line_item_SKU')}: {exc}")
+
+            if so_snap or risk_snap or ai_snap:
+                print(f"[data_hub] tick: SO={len(so_snap)} risk={len(risk_snap)} ai={len(ai_snap)}")
+
+    await asyncio.gather(_drain_so(), _drain_risk(), _drain_ai(), _tick())
+
+
 # ── Agent Worker (triggered manually from dashboard) ─────────────────────────
 
 async def _agent_worker() -> None:
@@ -1168,6 +1436,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(_tax_listener_factory())
     asyncio.create_task(_release_after_investigation_factory())
     asyncio.create_task(_db_store_worker())
+    asyncio.create_task(_data_hub_writer())
     asyncio.create_task(_agent_worker())
     asyncio.create_task(_sim_state_broadcaster())
 
@@ -1693,6 +1962,7 @@ async def api_tax_run_agent(transaction_id: str):
                 "verdict":          result.get("verdict", "uncertain"),
                 "reasoning":        result.get("reasoning", ""),
                 "legislation_refs": result.get("legislation_refs", []),
+                "line_verdicts":    result.get("line_verdicts", []),
                 "completed_at":     _now_iso(),
             }
             insert_agent_log({
@@ -1710,6 +1980,19 @@ async def api_tax_run_agent(transaction_id: str):
                 "sent_to_ireland":  0,
                 "processed_at":     verdict["completed_at"],
             })
+            # Publish to AI_ANALYSIS_EVENT so the data hub writer can populate
+            # line_item_ai_analysis. This is the only entry point that produces
+            # an AI verdict — agent runs are tax-officer-triggered, not every
+            # transaction gets one (matching the user's intent that AI analysis
+            # is selectively applied).
+            await broker.publish(AI_ANALYSIS_EVENT, {
+                "tx":               tx,
+                "verdict":          verdict["verdict"],
+                "reasoning":        verdict["reasoning"],
+                "legislation_refs": verdict["legislation_refs"],
+                "line_verdicts":    verdict["line_verdicts"],
+                "completed_at":     verdict["completed_at"],
+            })
         except Exception as exc:
             import traceback
             print(f"[tax_agent] error: {exc}\n{traceback.format_exc()}")
@@ -1717,6 +2000,7 @@ async def api_tax_run_agent(transaction_id: str):
                 "verdict":          "uncertain",
                 "reasoning":        f"Agent error: {exc}",
                 "legislation_refs": [],
+                "line_verdicts":    [],
                 "completed_at":     _now_iso(),
                 "error":            True,
             }

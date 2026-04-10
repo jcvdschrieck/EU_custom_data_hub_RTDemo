@@ -115,6 +115,73 @@ CREATE INDEX IF NOT EXISTS idx_ireland_queue_tx ON ireland_queue(transaction_id)
 """
 
 
+# ── Data hub schema (3 dark-purple tables from the data model diagram) ───────
+#
+# These three tables form the new normalised data hub. They live alongside the
+# legacy `transactions` table (which the alarm checker still reads for the
+# 7-day VAT-ratio baseline) and are populated by the _data_hub_writer polling
+# worker on a 30-s tick. PK / FK is sales_order_line_item_SKU = the per-line
+# unique identifier f"{so_id}-{n:03d}".
+
+_SO_LI_DDL = """
+CREATE TABLE IF NOT EXISTS sales_order_line_item (
+    sales_order_line_item_SKU TEXT PRIMARY KEY,
+    so_id                     TEXT NOT NULL,
+    line_item_name            TEXT NOT NULL,
+    line_item_SKU             TEXT NOT NULL,
+    line_item_description     TEXT,
+    line_item_price           REAL,
+    product_category          TEXT,
+    deemed_importer_id        TEXT,
+    deemed_importer_name      TEXT,
+    deemed_importer_country   TEXT,
+    seller_id                 TEXT,
+    seller_name               TEXT,
+    seller_city               TEXT,
+    origin_country            TEXT,
+    destination_country       TEXT,
+    dest_country_region       TEXT,
+    VAT_pct                   REAL,
+    VAT_paid                  REAL,
+    date                      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_so_li_so_id     ON sales_order_line_item(so_id);
+CREATE INDEX IF NOT EXISTS idx_so_li_date      ON sales_order_line_item(date);
+CREATE INDEX IF NOT EXISTS idx_so_li_region    ON sales_order_line_item(dest_country_region);
+CREATE INDEX IF NOT EXISTS idx_so_li_importer  ON sales_order_line_item(deemed_importer_id);
+"""
+
+_LI_RISK_DDL = """
+CREATE TABLE IF NOT EXISTS line_item_risk (
+    sales_order_line_item_SKU TEXT PRIMARY KEY,
+    risk_score_numeric        INTEGER,
+    risk_level                TEXT,
+    risk_description          TEXT,
+    suggested_risk_action     TEXT,
+    FOREIGN KEY (sales_order_line_item_SKU)
+        REFERENCES sales_order_line_item(sales_order_line_item_SKU)
+);
+CREATE INDEX IF NOT EXISTS idx_li_risk_level ON line_item_risk(risk_level);
+"""
+
+_LI_AI_DDL = """
+CREATE TABLE IF NOT EXISTS line_item_ai_analysis (
+    sales_order_line_item_SKU TEXT PRIMARY KEY,
+    analysis_outcome          TEXT,
+    analysis_description      TEXT,
+    confidence_score          REAL,
+    source                    TEXT,
+    correct_product_category  TEXT,
+    correct_vat_pct           REAL,
+    correct_vat_value         REAL,
+    vat_exposure              REAL,
+    FOREIGN KEY (sales_order_line_item_SKU)
+        REFERENCES sales_order_line_item(sales_order_line_item_SKU)
+);
+CREATE INDEX IF NOT EXISTS idx_li_ai_outcome ON line_item_ai_analysis(analysis_outcome);
+"""
+
+
 def _connect(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -139,7 +206,10 @@ def _migrate_european_custom_db(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE transactions ADD COLUMN {col} {definition}")
         except sqlite3.OperationalError:
             pass   # already exists
-    for ddl in [_ALARM_DDL, _AGENT_LOG_DDL, _IRELAND_QUEUE_DDL]:
+    for ddl in [
+        _ALARM_DDL, _AGENT_LOG_DDL, _IRELAND_QUEUE_DDL,
+        _SO_LI_DDL, _LI_RISK_DDL, _LI_AI_DDL,
+    ]:
         for stmt in ddl.strip().split(";"):
             s = stmt.strip()
             if s:
@@ -165,6 +235,21 @@ def init_european_custom_db() -> None:
                 conn.execute(s)
         _migrate_european_custom_db(conn)
     conn.close()
+    # Backfill the new data hub table from the legacy transactions table.
+    # Idempotent (uses INSERT OR REPLACE keyed on the synthetic SKU), so it's
+    # safe to call on every startup. Skip if the legacy table is empty or the
+    # backfill is already complete.
+    try:
+        conn = _connect(EUROPEAN_CUSTOM_DB)
+        legacy_n = conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
+        new_n    = conn.execute("SELECT COUNT(*) FROM sales_order_line_item").fetchone()[0]
+        conn.close()
+        if legacy_n > 0 and new_n < legacy_n:
+            n = backfill_sales_order_line_item_from_transactions()
+            print(f"[data_hub] backfilled {n} rows into sales_order_line_item "
+                  f"({legacy_n} legacy rows, {new_n} already present)")
+    except Exception as exc:
+        print(f"[data_hub] backfill skipped: {exc}")
 
 
 def init_simulation_db() -> None:
@@ -675,3 +760,194 @@ def get_ireland_case(transaction_id: str) -> dict | None:
     else:
         result["legislation_refs"] = []
     return result
+
+
+# ── Data hub upserts (3 dark-purple tables) ──────────────────────────────────
+
+def upsert_sales_order_line_item(row: dict) -> None:
+    """
+    Insert-or-replace a row in sales_order_line_item.
+
+    Idempotent — re-receiving the same line is a no-op (the keys never change
+    because they're derived deterministically from so_id + line_number).
+    """
+    conn = _connect(EUROPEAN_CUSTOM_DB)
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO sales_order_line_item
+            (sales_order_line_item_SKU, so_id, line_item_name, line_item_SKU,
+             line_item_description, line_item_price, product_category,
+             deemed_importer_id, deemed_importer_name, deemed_importer_country,
+             seller_id, seller_name, seller_city, origin_country,
+             destination_country, dest_country_region,
+             VAT_pct, VAT_paid, date)
+            VALUES
+            (:sales_order_line_item_SKU, :so_id, :line_item_name, :line_item_SKU,
+             :line_item_description, :line_item_price, :product_category,
+             :deemed_importer_id, :deemed_importer_name, :deemed_importer_country,
+             :seller_id, :seller_name, :seller_city, :origin_country,
+             :destination_country, :dest_country_region,
+             :VAT_pct, :VAT_paid, :date)
+            ON CONFLICT(sales_order_line_item_SKU) DO UPDATE SET
+              line_item_description   = excluded.line_item_description,
+              line_item_price         = excluded.line_item_price,
+              product_category        = excluded.product_category,
+              deemed_importer_id      = excluded.deemed_importer_id,
+              deemed_importer_name    = excluded.deemed_importer_name,
+              deemed_importer_country = excluded.deemed_importer_country,
+              seller_id               = excluded.seller_id,
+              seller_name             = excluded.seller_name,
+              seller_city             = excluded.seller_city,
+              origin_country          = excluded.origin_country,
+              destination_country     = excluded.destination_country,
+              dest_country_region     = excluded.dest_country_region,
+              VAT_pct                 = excluded.VAT_pct,
+              VAT_paid                = excluded.VAT_paid,
+              date                    = excluded.date
+            """,
+            row,
+        )
+    conn.close()
+
+
+def bulk_upsert_sales_order_line_item(rows: list[dict]) -> int:
+    """Bulk variant for the historical backfill — single transaction."""
+    if not rows:
+        return 0
+    conn = _connect(EUROPEAN_CUSTOM_DB)
+    with conn:
+        conn.executemany(
+            """
+            INSERT OR REPLACE INTO sales_order_line_item
+            (sales_order_line_item_SKU, so_id, line_item_name, line_item_SKU,
+             line_item_description, line_item_price, product_category,
+             deemed_importer_id, deemed_importer_name, deemed_importer_country,
+             seller_id, seller_name, seller_city, origin_country,
+             destination_country, dest_country_region,
+             VAT_pct, VAT_paid, date)
+            VALUES
+            (:sales_order_line_item_SKU, :so_id, :line_item_name, :line_item_SKU,
+             :line_item_description, :line_item_price, :product_category,
+             :deemed_importer_id, :deemed_importer_name, :deemed_importer_country,
+             :seller_id, :seller_name, :seller_city, :origin_country,
+             :destination_country, :dest_country_region,
+             :VAT_pct, :VAT_paid, :date)
+            """,
+            rows,
+        )
+    conn.close()
+    return len(rows)
+
+
+def upsert_line_item_risk(row: dict) -> None:
+    """Insert-or-replace a row in line_item_risk."""
+    conn = _connect(EUROPEAN_CUSTOM_DB)
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO line_item_risk
+            (sales_order_line_item_SKU, risk_score_numeric, risk_level,
+             risk_description, suggested_risk_action)
+            VALUES
+            (:sales_order_line_item_SKU, :risk_score_numeric, :risk_level,
+             :risk_description, :suggested_risk_action)
+            ON CONFLICT(sales_order_line_item_SKU) DO UPDATE SET
+              risk_score_numeric    = excluded.risk_score_numeric,
+              risk_level            = excluded.risk_level,
+              risk_description      = excluded.risk_description,
+              suggested_risk_action = excluded.suggested_risk_action
+            """,
+            row,
+        )
+    conn.close()
+
+
+def upsert_line_item_ai_analysis(row: dict) -> None:
+    """Insert-or-replace a row in line_item_ai_analysis."""
+    conn = _connect(EUROPEAN_CUSTOM_DB)
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO line_item_ai_analysis
+            (sales_order_line_item_SKU, analysis_outcome, analysis_description,
+             confidence_score, source, correct_product_category,
+             correct_vat_pct, correct_vat_value, vat_exposure)
+            VALUES
+            (:sales_order_line_item_SKU, :analysis_outcome, :analysis_description,
+             :confidence_score, :source, :correct_product_category,
+             :correct_vat_pct, :correct_vat_value, :vat_exposure)
+            ON CONFLICT(sales_order_line_item_SKU) DO UPDATE SET
+              analysis_outcome         = excluded.analysis_outcome,
+              analysis_description     = excluded.analysis_description,
+              confidence_score         = excluded.confidence_score,
+              source                   = excluded.source,
+              correct_product_category = excluded.correct_product_category,
+              correct_vat_pct          = excluded.correct_vat_pct,
+              correct_vat_value        = excluded.correct_vat_value,
+              vat_exposure             = excluded.vat_exposure
+            """,
+            row,
+        )
+    conn.close()
+
+
+# ── Historical backfill ──────────────────────────────────────────────────────
+
+def backfill_sales_order_line_item_from_transactions() -> int:
+    """
+    One-shot migration: read every row in the legacy `transactions` table and
+    insert it into `sales_order_line_item` as a single synthetic line item
+    (line_number = 1, suffix `-001`). No risk / AI rows are created — those
+    only exist for transactions that pass through the live pipeline.
+
+    Idempotent: re-running is a no-op because the SKU is deterministic and we
+    use INSERT OR REPLACE.
+
+    Returns the number of rows backfilled.
+    """
+    from lib.regions import country_region
+
+    conn = _connect(EUROPEAN_CUSTOM_DB)
+    rows = conn.execute(
+        "SELECT transaction_id, transaction_date, "
+        "       seller_id, seller_name, seller_country, "
+        "       producer_id, producer_name, producer_country, producer_city, "
+        "       item_description, item_category, "
+        "       value, vat_rate, vat_amount, buyer_country "
+        "FROM transactions"
+    ).fetchall()
+    conn.close()
+
+    payload: list[dict] = []
+    for r in rows:
+        so_id = r["transaction_id"]
+        sku   = f"{so_id}-001"
+        # Two-tier party model: producer = line-item Seller (non-EU origin),
+        # seller_* on the legacy row = DeemedImporter (EU reseller).
+        # Producer fields may be NULL for rows that predate the two-tier
+        # migration — render those as empty strings to keep the column
+        # populated rather than NULL.
+        payload.append({
+            "sales_order_line_item_SKU": sku,
+            "so_id":                     so_id,
+            "line_item_name":            sku,
+            "line_item_SKU":             sku,
+            "line_item_description":     r["item_description"],
+            "line_item_price":           r["value"],
+            "product_category":          r["item_category"],
+            "deemed_importer_id":        r["seller_id"],
+            "deemed_importer_name":      r["seller_name"],
+            "deemed_importer_country":   r["seller_country"],
+            "seller_id":                 r["producer_id"]      or None,
+            "seller_name":               r["producer_name"]    or None,
+            "seller_city":               r["producer_city"]    or None,
+            "origin_country":            r["producer_country"] or None,
+            "destination_country":       r["buyer_country"],
+            "dest_country_region":       country_region(r["buyer_country"]),
+            "VAT_pct":                   r["vat_rate"],
+            "VAT_paid":                  r["vat_amount"],
+            "date":                      r["transaction_date"],
+        })
+
+    return bulk_upsert_sales_order_line_item(payload)

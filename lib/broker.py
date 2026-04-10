@@ -120,6 +120,7 @@ INVESTIGATE_EVENT    = "investigate_event"    # amber path             → inves
 AGENT_RETAIN_EVENT   = "agent_retain_event"   # agent: incorrect       → DB store worker
 AGENT_RELEASE_EVENT  = "agent_release_event"  # agent: correct/uncertain → release-after-inv factory
 RELEASE_AFTER_INVESTIGATION_EVENT = "release_after_investigation_event"  # cleared → DB store worker
+AI_ANALYSIS_EVENT    = "ai_analysis_event"    # tax officer triggered VAT agent → data hub writer
 
 
 # ── Singleton used across api.py and workers ─────────────────────────────────
