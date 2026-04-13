@@ -543,8 +543,13 @@ function MiddleSection({ ev, rf, customs, tax, taxRunning, stored, newStored, H,
   // below the Data Store zone bottom (ZONE_BOTTOM = 300). The Tax row sits
   // 170 px below to preserve the original inter-row gap and inter-zone
   // arrow geometry.
-  const Y_CUSTOMS = 360           // Customs row vertical center
-  const Y_TAX     = 530           // Tax row vertical center
+  // Tax row aligns with the Investigation Notification broker (yInv)
+  // so the "investigate → tax" arrow runs straight across horizontally.
+  // Minimum Y_TAX ensures it stays below the Customs row.
+  const Y_TAX     = Math.max(Y_INV, ZONE_BOTTOM + 170)
+  // Customs row sits between the Data Store zone and the Tax row,
+  // with 12 px clearance below the zone and enough room for its blocks.
+  const Y_CUSTOMS = ZONE_BOTTOM + 12 + 28       // zone bottom + gap + half block height
 
   // Block widths for the bottom band — uniform across both rows so the
   // listeners, queues and officers are vertically aligned.
@@ -687,8 +692,9 @@ function MiddleSection({ ev, rf, customs, tax, taxRunning, stored, newStored, H,
           points={`0,${Y_RET} ${LSTN_LEFT - 30},${Y_RET} ${LSTN_LEFT - 30},${Y_CUSTOMS} ${LSTN_LEFT},${Y_CUSTOMS}`}
           stroke={grey} strokeWidth={stroke} fill="none" />
         <Arrowhead x={LSTN_LEFT} y={Y_CUSTOMS} dir="right" />
-        <text x={LSTN_LEFT - 26} y={Y_RET - 6}
-              fontSize={9} fill={red} textAnchor="start" fontWeight={700}>retain → customs</text>
+        <text x={LSTN_LEFT - 24} y={(Y_RET + Y_CUSTOMS) / 2}
+              fontSize={9} fill={red} textAnchor="start" fontWeight={700}
+              transform={`rotate(-90, ${LSTN_LEFT - 24}, ${(Y_RET + Y_CUSTOMS) / 2})`}>retain → customs</text>
 
         {/* Sales Order for Investigation → Tax Listener (corner: right then
             down then right). AMBER routed transactions enter the Tax queue. */}
@@ -1038,7 +1044,9 @@ function PipelineDiagram({ pipeline }) {
   const stored     = pipeline?.stored_count           ?? null
 
   // Row 1: three parallel processing zones
-  const OV_H = 94, RT_H = 230, AN_H = 94, LGAP = 10
+  // AN_H is taller so the Investigation Notification broker aligns
+  // horizontally with the Tax Listener in the MiddleSection.
+  const OV_H = 94, RT_H = 230, AN_H = 252, LGAP = 10
   const ROW1_H = OV_H + LGAP + RT_H + LGAP + AN_H
   const yOV = OV_H / 2
   const yRT = OV_H + LGAP + RT_H / 2
