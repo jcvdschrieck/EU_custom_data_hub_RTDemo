@@ -229,11 +229,31 @@ def _migrate_simulation_db(conn: sqlite3.Connection) -> None:
 def init_european_custom_db() -> None:
     conn = _connect(EUROPEAN_CUSTOM_DB)
     with conn:
+        # Run the CREATE TABLE first (without indexes that reference
+        # columns added by migration). Then migrate to add any missing
+        # columns. Finally create the indexes.
         for stmt in _TX_DDL.strip().split(";"):
             s = stmt.strip()
-            if s:
+            if not s:
+                continue
+            # Skip CREATE INDEX statements on first pass — columns
+            # they reference may not exist yet on older DBs.
+            if s.upper().startswith("CREATE INDEX"):
+                continue
+            try:
                 conn.execute(s)
+            except sqlite3.OperationalError:
+                pass  # table already exists
+        # Add any missing columns (producer_*, suspicious, etc.)
         _migrate_european_custom_db(conn)
+        # Now create indexes — all columns are guaranteed to exist.
+        for stmt in _TX_DDL.strip().split(";"):
+            s = stmt.strip()
+            if s and s.upper().startswith("CREATE INDEX"):
+                try:
+                    conn.execute(s)
+                except sqlite3.OperationalError:
+                    pass  # index already exists
     conn.close()
     # Backfill the new data hub table from the legacy transactions table.
     # Idempotent (uses INSERT OR REPLACE keyed on the synthetic SKU), so it's
