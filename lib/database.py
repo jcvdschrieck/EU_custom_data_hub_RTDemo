@@ -275,11 +275,15 @@ def init_european_custom_db() -> None:
 def init_simulation_db() -> None:
     conn = _connect(SIMULATION_DB)
     with conn:
-        # Base table
+        # Two-pass DDL: tables first, then migrate, then indexes.
         for stmt in _TX_DDL.strip().split(";"):
             s = stmt.strip()
-            if s:
+            if not s or s.upper().startswith("CREATE INDEX"):
+                continue
+            try:
                 conn.execute(s)
+            except sqlite3.OperationalError:
+                pass
         # fired column (ignore error if already exists)
         try:
             conn.execute(
@@ -289,6 +293,14 @@ def init_simulation_db() -> None:
             pass
         # Producer columns may be missing on old simulation.db files.
         _migrate_simulation_db(conn)
+        # Now create all indexes — columns are guaranteed to exist.
+        for stmt in _TX_DDL.strip().split(";"):
+            s = stmt.strip()
+            if s and s.upper().startswith("CREATE INDEX"):
+                try:
+                    conn.execute(s)
+                except sqlite3.OperationalError:
+                    pass
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_fired "
             "ON transactions(fired, transaction_date)"
