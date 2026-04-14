@@ -500,14 +500,42 @@ async def _release_factory() -> None:
             return
 
         val = entry["validation"]
+        import uuid
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        # Uniformized field names matching the data model
+        so_bk = f"{tx['transaction_id']}-001"  # business key
+        risk_id = f"RISK-{uuid.uuid4().hex[:12].upper()}"
+
         risk_payload = {
-            "risk_score":   score,
-            "risk_route":   route,
-            "confidence":   round(confidence, 2),
+            # Data model fields
+            "Sales_Order_Risk_ID":         risk_id,
+            "Sales_Order_Business_Key":    so_bk,
+            "Sales_Order_ID":              tx["transaction_id"],
+            "Risk_Type":                   "VAT",
+            "Overall_Risk_Score":          round(score * 100, 1),
+            "Overall_Risk_Level":          route,
+            "Confidence_Score":            round(confidence, 2),
+            "Proposed_Risk_Action":        {"red": "retain", "amber": "investigate", "green": "release"}[route],
+            # Dimensional scores (populated where available, None otherwise)
+            "Seller_Risk_Score":           None,
+            "Country_Risk_Score":          None,
+            "Product_Category_Risk_Score": None,
+            "Manufacturer_Risk_Score":     None,
+            "Overall_Risk_Description":    None,
+            "Risk_Comment":                None,
+            "Evaluation_by":               None,
+            "Update_time":                 now_iso,
+            "Updated_by":                  None,
+            # Internal fields for downstream processing
             "engines":      {eng: o.get("flagged", False)
                              for eng, o in outcomes.items()},
             "alarm_id":     alarm_id,
             "alarm":        alarm,
+            # Legacy fields
+            "risk_score":   score,
+            "risk_route":   route,
+            "confidence":   round(confidence, 2),
         }
 
         # Legacy RT_SCORE event for pipeline counter compatibility
@@ -527,6 +555,19 @@ async def _release_factory() -> None:
             "route": route_label,
             "validated": val["validated"],
             "validation_errors": val["validation_errors"],
+            # Uniformized Sales_Order fields
+            "Sales_Order_ID":           tx["transaction_id"],
+            "Sales_Order_Business_Key": so_bk,
+            "HS_Product_Category":      tx.get("item_category"),
+            "Product_Description":      tx.get("item_description"),
+            "Product_Value":            tx.get("value"),
+            "VAT_Rate":                 tx.get("vat_rate"),
+            "VAT_Fee":                  tx.get("vat_amount"),
+            "Seller_Name":              tx.get("seller_name"),
+            "Country_Origin":           tx.get("seller_country"),
+            "Country_Destination":      tx.get("buyer_country"),
+            "Status":                   route_label,
+            "Update_time":              now_iso,
             **risk_payload,
         }
 
@@ -620,17 +661,11 @@ async def _ct_risk_management_factory() -> None:
             route = msg.get("route")
             if route not in ("retain", "investigate"):
                 continue
-            # Produce investigation outcome (echo for now)
+            # Produce investigation outcome — passes through all data model
+            # fields from the assessment + adds investigation metadata.
             await broker.publish(INVESTIGATION_OUTCOME, {
-                "tx":             msg.get("tx"),
-                "route":          route,
-                "risk_score":     msg.get("risk_score"),
-                "risk_route":     msg.get("risk_route"),
-                "confidence":     msg.get("confidence"),
-                "engines":        msg.get("engines"),
-                "alarm_id":       msg.get("alarm_id"),
-                "alarm":          msg.get("alarm"),
-                "investigation":  "auto",   # placeholder
+                **msg,  # all assessment fields pass through
+                "investigation":  "auto",   # placeholder for future logic
                 "outcome":        route,     # echoes assessment for now
             })
 
@@ -656,19 +691,29 @@ _REMOVED_FLAT_TX_VIEW = True  # marker — old _flat_tx_view and related
 
 async def _db_store_worker() -> None:
     """
-    Terminal worker — persists transactions to the European Custom DB,
-    live queue, and SSE clients.
+    DB Store Factory — persists transactions to the data hub.
 
     Subscribes to:
-      ASSESSMENT_OUTCOME   — release-routed events (green path, no suspicious flag)
-      INVESTIGATION_OUTCOME — all investigation results (suspicious flag set)
-      SALES_ORDER_EVENT    — raw sales orders for historical storage
+      ASSESSMENT_OUTCOME    — release: store immediately
+                             — retain/investigate: buffer, await investigation
+      INVESTIGATION_OUTCOME — triggers storage of buffered retain/investigate
+      SALES_ORDER_EVENT     — raw sales orders for legacy transactions table
+
+    Stores to:
+      Sales_Order           — order details + status (new data model)
+      Sales_Order_Risk      — risk assessment data (new data model)
+      transactions          — legacy flat table
     """
+    from lib.database import upsert_sales_order, upsert_sales_order_risk
+
+    # Buffer for retain/investigate assessments awaiting investigation outcome
+    _pending: dict[str, dict] = {}  # Sales_Order_Business_Key -> assessment msg
+
     async def _push_sse(row: dict) -> None:
         if not _sse_queues:
             return
         payload = _json.dumps(row)
-        dead    = set()
+        dead = set()
         for sse_q in _sse_queues:
             try:
                 sse_q.put_nowait(payload)
@@ -676,49 +721,88 @@ async def _db_store_worker() -> None:
                 dead.add(sse_q)
         _sse_queues.difference_update(dead)
 
-    async def _store(msg: dict, suspicious: bool) -> None:
-        tx         = msg["tx"]
-        risk_score = msg.get("risk_score", "green")
-        alarm_id   = msg.get("alarm_id")
+    def _store_to_data_model(msg: dict, status: str) -> None:
+        """Persist to the new data model tables."""
+        now_iso = datetime.now(timezone.utc).isoformat()
+        bk = msg.get("Sales_Order_Business_Key", "")
 
+        upsert_sales_order({
+            "Sales_Order_ID":           msg.get("Sales_Order_ID", ""),
+            "Sales_Order_Business_Key": bk,
+            "HS_Product_Category":      msg.get("HS_Product_Category"),
+            "Product_Description":      msg.get("Product_Description"),
+            "Product_Value":            msg.get("Product_Value"),
+            "VAT_Rate":                 msg.get("VAT_Rate"),
+            "VAT_Fee":                  msg.get("VAT_Fee"),
+            "Seller_Name":              msg.get("Seller_Name"),
+            "Country_Origin":           msg.get("Country_Origin"),
+            "Country_Destination":      msg.get("Country_Destination"),
+            "Status":                   status,
+            "Update_time":              now_iso,
+            "Updated_by":               None,
+        })
+
+        upsert_sales_order_risk({
+            "Sales_Order_Risk_ID":         msg.get("Sales_Order_Risk_ID", ""),
+            "Sales_Order_Business_Key":    bk,
+            "Risk_Type":                   msg.get("Risk_Type", "VAT"),
+            "Overall_Risk_Score":          msg.get("Overall_Risk_Score"),
+            "Overall_Risk_Level":          msg.get("Overall_Risk_Level"),
+            "Seller_Risk_Score":           msg.get("Seller_Risk_Score"),
+            "Country_Risk_Score":          msg.get("Country_Risk_Score"),
+            "Product_Category_Risk_Score": msg.get("Product_Category_Risk_Score"),
+            "Manufacturer_Risk_Score":     msg.get("Manufacturer_Risk_Score"),
+            "Confidence_Score":            msg.get("Confidence_Score"),
+            "Overall_Risk_Description":    msg.get("Overall_Risk_Description"),
+            "Proposed_Risk_Action":        msg.get("Proposed_Risk_Action"),
+            "Risk_Comment":                msg.get("Risk_Comment"),
+            "Evaluation_by":               msg.get("Evaluation_by"),
+            "Update_time":                 now_iso,
+            "Updated_by":                  None,
+        })
+
+    async def _store_legacy(msg: dict, suspicious: bool) -> None:
+        """Legacy flat table + SSE push."""
+        tx = msg.get("tx", {})
+        if not tx.get("transaction_id"):
+            return
         insert_transaction(tx)
-
+        risk_score = msg.get("risk_route", msg.get("risk_score", "green"))
+        alarm_id = msg.get("alarm_id")
         if suspicious:
             flag_transaction_suspicious(tx["transaction_id"], alarm_id, risk_score)
-
         row = dict(tx)
-        row["suspicious"]     = 1 if suspicious else 0
-        row["risk_score"]     = risk_score
-        row["risk_1_flagged"] = msg.get("risk_1_flagged", False)
-        row["risk_2_flagged"] = msg.get("risk_2_flagged", False)
+        row["suspicious"] = 1 if suspicious else 0
+        row["risk_score"] = risk_score
         _live_queue.appendleft(row)
         await _push_sse(row)
 
-    async def _drain(topic: str, suspicious: bool) -> None:
-        q = broker.subscribe(topic)
-        while True:
-            msg = await q.get()
-            await _store(msg, suspicious)
-
     async def _drain_assessment() -> None:
-        """Only store release-routed assessments (green path)."""
+        """Release -> store immediately. Retain/investigate -> buffer."""
         q = broker.subscribe(ASSESSMENT_OUTCOME)
         while True:
             msg = await q.get()
-            if msg.get("route") == "release":
-                await _store(msg, suspicious=False)
-            # Legacy counter compatibility
-            await broker.publish(RELEASE_EVENT, msg)
+            route = msg.get("route")
+            bk = msg.get("Sales_Order_Business_Key", "")
+            if route == "release":
+                _store_to_data_model(msg, "release")
+                await _store_legacy(msg, suspicious=False)
+            elif route in ("retain", "investigate"):
+                _pending[bk] = msg
 
     async def _drain_investigation() -> None:
-        """Store all investigation outcomes (retain + investigate)."""
+        """Investigation outcome -> find buffered assessment and store."""
         q = broker.subscribe(INVESTIGATION_OUTCOME)
         while True:
             msg = await q.get()
-            await _store(msg, suspicious=True)
+            bk = msg.get("Sales_Order_Business_Key", "")
+            route = msg.get("route", msg.get("outcome", ""))
+            assessment = _pending.pop(bk, msg)
+            _store_to_data_model(assessment, route)
+            await _store_legacy(assessment, suspicious=True)
 
     async def _drain_sales_order() -> None:
-        """Store raw sales orders for historical purposes."""
+        """Raw sales orders for legacy transactions table."""
         q = broker.subscribe(SALES_ORDER_EVENT)
         while True:
             msg = await q.get()
@@ -999,9 +1083,10 @@ async def _data_hub_writer() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    from lib.database import init_european_custom_db, init_simulation_db, reset_simulation_db
+    from lib.database import init_european_custom_db, init_simulation_db, init_investigation_db, reset_simulation_db
     init_european_custom_db()
     init_simulation_db()
+    init_investigation_db()
     # Auto-reset: clear the fired flags so the simulation is always
     # ready to run on startup. Without this, a previous completed run
     # leaves all transactions marked fired=1 and the simulation loop

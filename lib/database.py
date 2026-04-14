@@ -10,7 +10,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from lib.config import EUROPEAN_CUSTOM_DB, SIMULATION_DB
+from lib.config import EUROPEAN_CUSTOM_DB, SIMULATION_DB, INVESTIGATION_DB
 
 # ── Schema ────────────────────────────────────────────────────────────────────
 
@@ -123,63 +123,88 @@ CREATE INDEX IF NOT EXISTS idx_ireland_queue_tx ON ireland_queue(transaction_id)
 # worker on a 30-s tick. PK / FK is sales_order_line_item_SKU = the per-line
 # unique identifier f"{so_id}-{n:03d}".
 
-_SO_LI_DDL = """
-CREATE TABLE IF NOT EXISTS sales_order_line_item (
-    sales_order_line_item_SKU TEXT PRIMARY KEY,
-    so_id                     TEXT NOT NULL,
-    line_item_name            TEXT NOT NULL,
-    line_item_SKU             TEXT NOT NULL,
-    line_item_description     TEXT,
-    line_item_price           REAL,
-    product_category          TEXT,
-    deemed_importer_id        TEXT,
-    deemed_importer_name      TEXT,
-    deemed_importer_country   TEXT,
-    seller_id                 TEXT,
-    seller_name               TEXT,
-    seller_city               TEXT,
-    origin_country            TEXT,
-    destination_country       TEXT,
-    dest_country_region       TEXT,
-    VAT_pct                   REAL,
-    VAT_paid                  REAL,
-    date                      TEXT
+# ── New data model (Entity Data Model Simplified) ─────────────────────────────
+# Three tables with 1:1 relationships keyed on Sales_Order_Business_Key.
+# Sales_Order and Sales_Order_Risk live in european_custom.db (data hub).
+# Sales_Order_Case lives in a separate investigation.db.
+# Field names match the JSON event payloads and the data model diagram.
+
+_SALES_ORDER_DDL = """
+CREATE TABLE IF NOT EXISTS Sales_Order (
+    Sales_Order_ID              TEXT NOT NULL,
+    Sales_Order_Business_Key    TEXT PRIMARY KEY,
+    HS_Product_Category         TEXT,
+    Product_Description         TEXT,
+    Product_Value               REAL,
+    VAT_Rate                    REAL,
+    VAT_Fee                     REAL,
+    Seller_Name                 TEXT,
+    Country_Origin              TEXT,
+    Country_Destination         TEXT,
+    Status                      TEXT,
+    Update_time                 TEXT,
+    Updated_by                  TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_so_li_so_id     ON sales_order_line_item(so_id);
-CREATE INDEX IF NOT EXISTS idx_so_li_date      ON sales_order_line_item(date);
-CREATE INDEX IF NOT EXISTS idx_so_li_region    ON sales_order_line_item(dest_country_region);
-CREATE INDEX IF NOT EXISTS idx_so_li_importer  ON sales_order_line_item(deemed_importer_id);
+CREATE INDEX IF NOT EXISTS idx_so_id     ON Sales_Order(Sales_Order_ID);
+CREATE INDEX IF NOT EXISTS idx_so_status ON Sales_Order(Status);
+CREATE INDEX IF NOT EXISTS idx_so_origin ON Sales_Order(Country_Origin);
+CREATE INDEX IF NOT EXISTS idx_so_dest   ON Sales_Order(Country_Destination);
 """
 
-_LI_RISK_DDL = """
-CREATE TABLE IF NOT EXISTS line_item_risk (
-    sales_order_line_item_SKU TEXT PRIMARY KEY,
-    risk_score_numeric        INTEGER,
-    risk_level                TEXT,
-    risk_description          TEXT,
-    suggested_risk_action     TEXT,
-    FOREIGN KEY (sales_order_line_item_SKU)
-        REFERENCES sales_order_line_item(sales_order_line_item_SKU)
+_SALES_ORDER_RISK_DDL = """
+CREATE TABLE IF NOT EXISTS Sales_Order_Risk (
+    Sales_Order_Risk_ID         TEXT PRIMARY KEY,
+    Sales_Order_Business_Key    TEXT NOT NULL,
+    Risk_Type                   TEXT,
+    Overall_Risk_Score          REAL,
+    Overall_Risk_Level          TEXT,
+    Seller_Risk_Score           REAL,
+    Country_Risk_Score          REAL,
+    Product_Category_Risk_Score REAL,
+    Manufacturer_Risk_Score     REAL,
+    Confidence_Score            REAL,
+    Overall_Risk_Description    TEXT,
+    Proposed_Risk_Action        TEXT,
+    Risk_Comment                TEXT,
+    Evaluation_by               TEXT,
+    Update_time                 TEXT,
+    Updated_by                  TEXT,
+    FOREIGN KEY (Sales_Order_Business_Key)
+        REFERENCES Sales_Order(Sales_Order_Business_Key)
 );
-CREATE INDEX IF NOT EXISTS idx_li_risk_level ON line_item_risk(risk_level);
+CREATE INDEX IF NOT EXISTS idx_sor_bk    ON Sales_Order_Risk(Sales_Order_Business_Key);
+CREATE INDEX IF NOT EXISTS idx_sor_level ON Sales_Order_Risk(Overall_Risk_Level);
 """
 
-_LI_AI_DDL = """
-CREATE TABLE IF NOT EXISTS line_item_ai_analysis (
-    sales_order_line_item_SKU TEXT PRIMARY KEY,
-    analysis_outcome          TEXT,
-    analysis_description      TEXT,
-    confidence_score          REAL,
-    source                    TEXT,
-    correct_product_category  TEXT,
-    correct_vat_pct           REAL,
-    correct_vat_value         REAL,
-    vat_exposure              REAL,
-    FOREIGN KEY (sales_order_line_item_SKU)
-        REFERENCES sales_order_line_item(sales_order_line_item_SKU)
+_SALES_ORDER_CASE_DDL = """
+CREATE TABLE IF NOT EXISTS Sales_Order_Case (
+    Case_ID                          TEXT PRIMARY KEY,
+    Sales_Order_Business_Key         TEXT NOT NULL,
+    Status                           TEXT,
+    VAT_Problem_Type                 TEXT,
+    Recommended_Product_Value        REAL,
+    Recommended_VAT_Product_Category TEXT,
+    Recommended_VAT_Rate             REAL,
+    Recommended_VAT_Fee              REAL,
+    AI_Analysis                      TEXT,
+    AI_Confidence                    REAL,
+    VAT_Gap_Fee                      REAL,
+    Evaluation_by                    TEXT,
+    Proposed_Action_Tax              TEXT,
+    Proposed_Action_Customs          TEXT,
+    Communication                    TEXT,
+    Additional_Evidence              TEXT,
+    Update_time                      TEXT,
+    Updated_by                       TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_li_ai_outcome ON line_item_ai_analysis(analysis_outcome);
+CREATE INDEX IF NOT EXISTS idx_soc_bk     ON Sales_Order_Case(Sales_Order_Business_Key);
+CREATE INDEX IF NOT EXISTS idx_soc_status ON Sales_Order_Case(Status);
 """
+
+# Legacy DDLs kept as aliases for backward compatibility with init code
+_SO_LI_DDL   = _SALES_ORDER_DDL
+_LI_RISK_DDL = _SALES_ORDER_RISK_DDL
+_LI_AI_DDL   = _SALES_ORDER_CASE_DDL
 
 
 def _connect(path: Path) -> sqlite3.Connection:
@@ -270,6 +295,113 @@ def init_european_custom_db() -> None:
                   f"({legacy_n} legacy rows, {new_n} already present)")
     except Exception as exc:
         print(f"[data_hub] backfill skipped: {exc}")
+
+    # Create the new data model tables (Sales_Order + Sales_Order_Risk)
+    _init_ddl(EUROPEAN_CUSTOM_DB, _SALES_ORDER_DDL)
+    _init_ddl(EUROPEAN_CUSTOM_DB, _SALES_ORDER_RISK_DDL)
+
+
+def init_investigation_db() -> None:
+    """Create the Sales_Order_Case table in the investigation database."""
+    _init_ddl(INVESTIGATION_DB, _SALES_ORDER_CASE_DDL)
+
+
+def _init_ddl(db_path, ddl: str) -> None:
+    """Two-pass DDL init: tables first, then indexes."""
+    conn = _connect(db_path)
+    with conn:
+        for stmt in ddl.strip().split(";"):
+            s = stmt.strip()
+            if not s or s.upper().startswith("CREATE INDEX"):
+                continue
+            try:
+                conn.execute(s)
+            except sqlite3.OperationalError:
+                pass
+        for stmt in ddl.strip().split(";"):
+            s = stmt.strip()
+            if s and s.upper().startswith("CREATE INDEX"):
+                try:
+                    conn.execute(s)
+                except sqlite3.OperationalError:
+                    pass
+    conn.close()
+
+
+def upsert_sales_order(row: dict) -> None:
+    """Insert or update a Sales_Order record."""
+    conn = _connect(EUROPEAN_CUSTOM_DB)
+    with conn:
+        conn.execute("""
+            INSERT OR REPLACE INTO Sales_Order (
+                Sales_Order_ID, Sales_Order_Business_Key,
+                HS_Product_Category, Product_Description, Product_Value,
+                VAT_Rate, VAT_Fee, Seller_Name,
+                Country_Origin, Country_Destination,
+                Status, Update_time, Updated_by
+            ) VALUES (
+                :Sales_Order_ID, :Sales_Order_Business_Key,
+                :HS_Product_Category, :Product_Description, :Product_Value,
+                :VAT_Rate, :VAT_Fee, :Seller_Name,
+                :Country_Origin, :Country_Destination,
+                :Status, :Update_time, :Updated_by
+            )
+        """, row)
+    conn.close()
+
+
+def upsert_sales_order_risk(row: dict) -> None:
+    """Insert or update a Sales_Order_Risk record."""
+    conn = _connect(EUROPEAN_CUSTOM_DB)
+    with conn:
+        conn.execute("""
+            INSERT OR REPLACE INTO Sales_Order_Risk (
+                Sales_Order_Risk_ID, Sales_Order_Business_Key,
+                Risk_Type, Overall_Risk_Score, Overall_Risk_Level,
+                Seller_Risk_Score, Country_Risk_Score,
+                Product_Category_Risk_Score, Manufacturer_Risk_Score,
+                Confidence_Score, Overall_Risk_Description,
+                Proposed_Risk_Action, Risk_Comment,
+                Evaluation_by, Update_time, Updated_by
+            ) VALUES (
+                :Sales_Order_Risk_ID, :Sales_Order_Business_Key,
+                :Risk_Type, :Overall_Risk_Score, :Overall_Risk_Level,
+                :Seller_Risk_Score, :Country_Risk_Score,
+                :Product_Category_Risk_Score, :Manufacturer_Risk_Score,
+                :Confidence_Score, :Overall_Risk_Description,
+                :Proposed_Risk_Action, :Risk_Comment,
+                :Evaluation_by, :Update_time, :Updated_by
+            )
+        """, row)
+    conn.close()
+
+
+def upsert_sales_order_case(row: dict) -> None:
+    """Insert or update a Sales_Order_Case record in the investigation DB."""
+    conn = _connect(INVESTIGATION_DB)
+    with conn:
+        conn.execute("""
+            INSERT OR REPLACE INTO Sales_Order_Case (
+                Case_ID, Sales_Order_Business_Key, Status,
+                VAT_Problem_Type, Recommended_Product_Value,
+                Recommended_VAT_Product_Category, Recommended_VAT_Rate,
+                Recommended_VAT_Fee, AI_Analysis, AI_Confidence,
+                VAT_Gap_Fee, Evaluation_by,
+                Proposed_Action_Tax, Proposed_Action_Customs,
+                Communication, Additional_Evidence,
+                Update_time, Updated_by
+            ) VALUES (
+                :Case_ID, :Sales_Order_Business_Key, :Status,
+                :VAT_Problem_Type, :Recommended_Product_Value,
+                :Recommended_VAT_Product_Category, :Recommended_VAT_Rate,
+                :Recommended_VAT_Fee, :AI_Analysis, :AI_Confidence,
+                :VAT_Gap_Fee, :Evaluation_by,
+                :Proposed_Action_Tax, :Proposed_Action_Customs,
+                :Communication, :Additional_Evidence,
+                :Update_time, :Updated_by
+            )
+        """, row)
+    conn.close()
 
 
 def init_simulation_db() -> None:

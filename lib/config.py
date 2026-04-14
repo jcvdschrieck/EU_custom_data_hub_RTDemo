@@ -7,6 +7,7 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 EUROPEAN_CUSTOM_DB = DATA_DIR / "european_custom.db"
 SIMULATION_DB      = DATA_DIR / "simulation.db"
+INVESTIGATION_DB   = DATA_DIR / "investigation.db"
 
 API_PORT     = 8505
 API_BASE_URL = f"http://localhost:{API_PORT}"
