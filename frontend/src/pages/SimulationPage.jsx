@@ -1032,6 +1032,19 @@ function KpiStrip({ pipeline }) {
 // ── Pipeline Diagram ──────────────────────────────────────────────────────────
 
 function PipelineDiagram({ pipeline }) {
+  const pipelineRef = useRef(null)
+  useEffect(() => {
+    const syncWidth = () => {
+      const el = pipelineRef.current
+      if (!el) return
+      const spacer = el.previousElementSibling?.querySelector('.pipeline-scroll-spacer')
+      if (spacer) spacer.style.width = el.scrollWidth + 'px'
+    }
+    syncWidth()
+    const id = setInterval(syncWidth, 1000)
+    return () => clearInterval(id)
+  })
+
   const ev         = pipeline?.events             || {}
   const q          = pipeline?.queues             || {}
   const rf         = pipeline?.risk_flags         || {}
@@ -1470,21 +1483,6 @@ export default function SimulationPage() {
       clearInterval(safetyId)
     }
   }, [refreshStatus, refreshPipeline])
-
-  // Sync the top scrollbar spacer width with the pipeline content width
-  // so both scrollbars have the same range.
-  const pipelineRef = useRef(null)
-  useEffect(() => {
-    const syncWidth = () => {
-      const el = pipelineRef.current
-      if (!el) return
-      const spacer = el.previousElementSibling?.querySelector('.pipeline-scroll-spacer')
-      if (spacer) spacer.style.width = el.scrollWidth + 'px'
-    }
-    syncWidth()
-    const id = setInterval(syncWidth, 1000)
-    return () => clearInterval(id)
-  })
 
   return (
     <div className="page-container">
