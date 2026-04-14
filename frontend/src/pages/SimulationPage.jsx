@@ -1066,18 +1066,13 @@ function PipelineDiagram({ pipeline }) {
   const yRT = OV_H + LGAP + RT_H / 2
   const yAN = OV_H + LGAP + RT_H + LGAP + AN_H / 2
 
-  // Shared width for the three top zones so Sales Order Validation and
-  // Goods Transport match the Real-Time Risk Assessment zone
-  const ZONE_W = 440
-  // Shared width for the Sales Order Validation and Goods Transport factories
-  // so they match each other. Each fills its parent zone's content area
-  // (ZONE_W − 2× zone padding 10 = 420). With justifyContent: center the
-  // factory is visually centered AND its right edge lines up with the
-  // Risk Score Consolidation factory on the right side of the Real-Time
-  // Risk Assessment zone (also bounded by the same zone padding).
-  const SIDE_FACTORY_W = 420
+  // Shared width for the three top zones
+  const ZONE_W = 380
+  // Shared width for ALL factories inside the zones (Sales Order Validation,
+  // RT Risk As. 1, RT Risk As. 2, Goods Transport) so they're visually uniform.
+  const FACTORY_W = 340
   // Shared width for the three row-1 output brokers
-  // (Sales Order Validation / RT Score / Goods Arrival Notification)
+  // (Sales Order Validation / RT Risk Outcome / Goods Arrival Notification)
   const OUT_BROKER_W = 170
 
   // RT zone internal row geometry (two stacked broker rows, outcomes flow to Release Factory)
@@ -1170,7 +1165,7 @@ function PipelineDiagram({ pipeline }) {
                 <Zone label="Sales Order Validation" style={{ width: ZONE_W, boxSizing: 'border-box' }}>
                   <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
                     <FactoryNode icon="✅" label="Sales Order Validation"
-                      description="3–5 s · unlimited concurrency" sm width={SIDE_FACTORY_W}
+                      description="3–5 s · unlimited concurrency" sm width={FACTORY_W}
                       tooltip="Sales Order Validation Factory — async per-order task with uniform 3–5 s delay. Emits ORDER_VALIDATION events." />
                   </div>
                 </Zone>
@@ -1183,29 +1178,20 @@ function PipelineDiagram({ pipeline }) {
                       small upward translate balances the gap on either side
                       without affecting layout — the children stay centered on
                       their flex row, the whole row just shifts up by 18 px. */}
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 0, height: '100%', justifyContent: 'flex-end', transform: 'translateY(-18px)' }}>
-                    {/* Entry fan-out — mirrors the fan-in on the right */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 0, height: '100%', justifyContent: 'center', transform: 'translateY(-18px)' }}>
+                    {/* Entry fan-out */}
                     <FanOutSVG height={RT_STACK_H} targetYs={[rtTopY, rtBotY]} width={24} />
-                    {/* Stacked RT1 + RT2 engine factories */}
+                    {/* Stacked RT1 + RT2 engine factories — same width as other factories */}
                     <div style={{ display: 'flex', flexDirection: 'column', gap: RT_ROW_GAP }}>
                       <div style={{ height: RT_ROW_H, display: 'flex', alignItems: 'center' }}>
-                        <FactoryNode icon="⚖️" label="RT Risk As. 1" description="VAT ratio deviation" sm
+                        <FactoryNode icon="⚖️" label="RT Risk As. 1" description="VAT ratio deviation" sm width={FACTORY_W - 30}
                           tooltip="RT Risk Assessment 1 — flags transactions whose VAT-to-value ratio deviates from the supplier's historical baseline. Publishes to the unified RT Risk Outcome broker." />
                       </div>
                       <div style={{ height: RT_ROW_H, display: 'flex', alignItems: 'center' }}>
-                        <FactoryNode icon="🔍" label="RT Risk As. 2" description="Watchlist lookup" sm
+                        <FactoryNode icon="🔍" label="RT Risk As. 2" description="Watchlist lookup" sm width={FACTORY_W - 30}
                           tooltip="RT Risk Assessment 2 — flags transactions whose seller or route appears on the active watchlist. Publishes to the unified RT Risk Outcome broker." />
                       </div>
                     </div>
-                    {/* Fan-in: both engines → single RT Risk Outcome broker */}
-                    <FanInSVG height={RT_STACK_H} inputYs={[rtTopY, rtBotY]} outputY={rtOutY} width={36} />
-                    {/* Single unified broker receiving outcomes from ALL risk engines */}
-                    <BrokerNode label="RT Risk Outcome" topicKey="RT_RISK_1_OUTCOME"
-                      count={(ev.rt_risk_1_outcome || 0) + (ev.rt_risk_2_outcome || 0)} sm
-                      tooltip="RT_RISK_OUTCOME — unified topic. Both risk engines publish here with an engine identifier. The Release Factory subscribes and computes a consolidated score (flagged/total) with confidence.">
-                      <FlaggedBadge flagged={(rf.rt_risk_1_flagged || 0) + (rf.rt_risk_2_flagged || 0)}
-                        total={(ev.rt_risk_1_outcome || 0) + (ev.rt_risk_2_outcome || 0)} />
-                    </BrokerNode>
                   </div>
                 </Zone>
               </div>
@@ -1214,7 +1200,7 @@ function PipelineDiagram({ pipeline }) {
                 <Zone label="Goods Transport" style={{ width: ZONE_W, boxSizing: 'border-box' }}>
                   <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
                     <FactoryNode icon="🚢" label="Goods Transport"
-                      description="exp. delay ~60 s · unlimited concurrency" sm width={SIDE_FACTORY_W}
+                      description="exp. delay ~60 s · unlimited concurrency" sm width={FACTORY_W}
                       tooltip="Goods Transport / Arrival Notification — async per-order task with exponential-delay arrival (~60 s mean). Emits ARRIVAL_NOTIFICATION events." />
                   </div>
                 </Zone>
@@ -1236,10 +1222,13 @@ function PipelineDiagram({ pipeline }) {
                   count={ev.order_validation} sm width={OUT_BROKER_W}
                   tooltip="ORDER_VALIDATION — field-completeness outcome per order. Consumed by the Release Factory." />
               </div>
-              {/* RT Risk Outcome broker is now inside the RT zone above —
-                  this slot carries the arrow through to the Release Factory */}
               <div style={{ height: RT_H, display: 'flex', alignItems: 'center' }}>
-                <Arrow label="" />
+                <BrokerNode label="RT Risk Outcome" topicKey="RT_RISK_1_OUTCOME"
+                  count={(ev.rt_risk_1_outcome || 0) + (ev.rt_risk_2_outcome || 0)} sm width={OUT_BROKER_W}
+                  tooltip="RT_RISK_OUTCOME — unified topic. Both risk engines publish here with an engine identifier. The Release Factory subscribes and computes a consolidated score (flagged/total) with confidence.">
+                  <FlaggedBadge flagged={(rf.rt_risk_1_flagged || 0) + (rf.rt_risk_2_flagged || 0)}
+                    total={(ev.rt_risk_1_outcome || 0) + (ev.rt_risk_2_outcome || 0)} />
+                </BrokerNode>
               </div>
               <div style={{ height: AN_H, display: 'flex', alignItems: 'center' }}>
                 <BrokerNode label="Goods Arrival Notification" topicKey="ARRIVAL_NOTIFICATION"
