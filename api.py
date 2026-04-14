@@ -121,12 +121,18 @@ from pydantic import BaseModel
 
 from lib.broker import (
     broker,
-    SALES_ORDER_EVENT, RT_RISK_1_OUTCOME, RT_RISK_2_OUTCOME,
-    RT_SCORE, ORDER_VALIDATION, ARRIVAL_NOTIFICATION,
+    SALES_ORDER_EVENT, RT_RISK_OUTCOME,
+    RT_RISK_1_OUTCOME, RT_RISK_2_OUTCOME, RT_SCORE,  # legacy counters
+    ORDER_VALIDATION, ARRIVAL_NOTIFICATION,
     RELEASE_EVENT, RETAIN_EVENT, INVESTIGATE_EVENT,
     AGENT_RETAIN_EVENT, AGENT_RELEASE_EVENT, RELEASE_AFTER_INVESTIGATION_EVENT,
     AI_ANALYSIS_EVENT,
 )
+
+# Total number of risk monitoring engines. The release factory waits
+# for this many outcomes (or times out) before computing the score.
+# Adding a new risk engine = increment this + write the factory.
+TOTAL_RISK_ENGINES = 2
 from lib.config import DEFAULT_SPEED, MIN_SPEED, MAX_SPEED, QUEUE_SIZE
 from lib.database import (
     get_latest_transactions,
@@ -275,7 +281,7 @@ async def _RT_risk_monitoring_1_factory() -> None:
     """
     Subscriber of Sales-order Event Broker.
     Runs the VAT/value ratio deviation check (7-day vs 8-week baseline).
-    Publishes outcome to RT_risk_monitoring_1_outcome_broker.
+    Publishes to the unified RT_RISK_OUTCOME topic with engine="vat_ratio".
     """
     from lib.alarm_checker import check_alarm
 
@@ -294,7 +300,8 @@ async def _RT_risk_monitoring_1_factory() -> None:
 
         expire_old_alarms(tx["transaction_date"][:19])
 
-        await broker.publish(RT_RISK_1_OUTCOME, {
+        await broker.publish(RT_RISK_OUTCOME, {
+            "engine":   "vat_ratio",
             "tx":       tx,
             "flagged":  flagged,
             "alarm_id": alarm_id,
@@ -302,6 +309,8 @@ async def _RT_risk_monitoring_1_factory() -> None:
                 (a for a in _live_alarms if a.get("id") == alarm_id), {}
             ) if flagged else None,
         })
+        # Legacy counter
+        await broker.publish(RT_RISK_1_OUTCOME, {"tx": tx, "flagged": flagged})
 
 
 # ── RT Risk Monitoring 2 Factory (watchlist check) ───────────────────────────
@@ -311,7 +320,7 @@ async def _RT_risk_monitoring_2_factory() -> None:
     Subscriber of Sales-order Event Broker.
     Checks whether the (seller_id, seller_country) pair — supplier × country
     of origin — appears in the configured watchlist (lib/watchlist.py).
-    Publishes outcome to RT_risk_monitoring_2_outcome_broker.
+    Publishes to the unified RT_RISK_OUTCOME topic with engine="watchlist".
     """
     from lib.watchlist import is_watchlisted
 
@@ -321,70 +330,18 @@ async def _RT_risk_monitoring_2_factory() -> None:
 
         flagged = is_watchlisted(tx["seller_id"], tx["seller_country"])
 
-        await broker.publish(RT_RISK_2_OUTCOME, {
+        await broker.publish(RT_RISK_OUTCOME, {
+            "engine":  "watchlist",
             "tx":      tx,
             "flagged": flagged,
             "reason":  "watchlist_match" if flagged else "clear",
         })
+        # Legacy counter
+        await broker.publish(RT_RISK_2_OUTCOME, {"tx": tx, "flagged": flagged})
 
 
-# ── RT Consolidation Factory ──────────────────────────────────────────────────
-
-async def _RT_consolidation_factory() -> None:
-    """
-    Subscribes to RT_risk_monitoring_1_outcome_broker AND
-    RT_risk_monitoring_2_outcome_broker.
-    Correlates both outcomes by transaction_id and computes a risk score:
-      • both flagged  → RED
-      • one flagged   → AMBER
-      • neither       → GREEN
-    Publishes to RT_score_broker.
-    """
-    _buffer: dict[str, dict] = {}   # tx_id → {"r1": ..., "r2": ...}
-
-    async def _emit_if_ready(tx_id: str) -> None:
-        entry = _buffer.get(tx_id, {})
-        if "r1" not in entry or "r2" not in entry:
-            return
-        del _buffer[tx_id]
-
-        r1, r2   = entry["r1"], entry["r2"]
-        flag_1   = r1["flagged"]
-        flag_2   = r2["flagged"]
-
-        if flag_1 and flag_2:
-            risk_score = "red"
-        elif flag_1 or flag_2:
-            risk_score = "amber"
-        else:
-            risk_score = "green"
-
-        await broker.publish(RT_SCORE, {
-            "tx":             r1["tx"],
-            "risk_score":     risk_score,
-            "risk_1_flagged": flag_1,
-            "risk_2_flagged": flag_2,
-            "alarm_id":       r1.get("alarm_id"),
-            "alarm":          r1.get("alarm"),
-        })
-
-    async def _drain_r1() -> None:
-        q = broker.subscribe(RT_RISK_1_OUTCOME)
-        while True:
-            item = await q.get()
-            tx_id = item["tx"]["transaction_id"]
-            _buffer.setdefault(tx_id, {})["r1"] = item
-            await _emit_if_ready(tx_id)
-
-    async def _drain_r2() -> None:
-        q = broker.subscribe(RT_RISK_2_OUTCOME)
-        while True:
-            item = await q.get()
-            tx_id = item["tx"]["transaction_id"]
-            _buffer.setdefault(tx_id, {})["r2"] = item
-            await _emit_if_ready(tx_id)
-
-    await asyncio.gather(_drain_r1(), _drain_r2())
+# ── (RT Consolidation Factory removed — its logic is now inside
+# _release_factory which subscribes to RT_RISK_OUTCOME directly.) ──
 
 
 # ── Order Validation Factory ──────────────────────────────────────────────────
@@ -466,55 +423,184 @@ async def _arrival_notification_factory() -> None:
         _track_factory_task(_schedule(tx))
 
 
-# ── Release Factory (GREEN path) ─────────────────────────────────────────────
+# ── Release Factory (unified routing: consolidation + release/retain/investigate) ─
+#
+# Replaces the old RT Consolidation Factory + three separate routing factories.
+# Subscribes to:
+#   - RT_RISK_OUTCOME (all risk engines publish here with an "engine" field)
+#   - ORDER_VALIDATION
+#   - ARRIVAL_NOTIFICATION
+#
+# For each transaction, collects risk outcomes and computes:
+#   - risk_score  = flagged_count / total_outcomes (50% if no outcomes)
+#   - confidence  = outcomes_received / TOTAL_RISK_ENGINES (0%, 50%, 100%)
+#   - route:  score < 33.33% → release
+#             33.33% ≤ score ≤ 66.66% → investigate
+#             score > 66.66% → retain
+#
+# GREEN path (release) additionally requires validation + arrival notification.
+# RED path (retain) fires immediately once the score exceeds 66.66%.
+# AMBER path (investigate) requires validation before dispatch.
+
+THRESHOLD_RELEASE    = 1.0 / 3.0   # < 33.33% → release
+THRESHOLD_RETAIN     = 2.0 / 3.0   # > 66.66% → retain
 
 async def _release_factory() -> None:
-    """
-    GREEN path: validation + green RT score + arrival notification → RELEASE_EVENT.
-    Non-green scores are ignored (handled by _retain_factory / _investigate_dispatch_factory).
-    """
-    _buffer: dict[str, dict] = {}
-    _skip:   set[str]        = set()
+    """Unified routing factory: collects risk outcomes, computes
+    consolidated score, and routes to RELEASE / INVESTIGATE / RETAIN."""
 
-    async def _emit_if_ready(tx_id: str) -> None:
-        entry = _buffer.get(tx_id, {})
-        if "validation" not in entry or "score" not in entry or "arrival" not in entry:
-            return
-        del _buffer[tx_id]
-        _skip.discard(tx_id)
-        val, score = entry["validation"], entry["score"]
-        await broker.publish(RELEASE_EVENT, {
-            "tx":                val["tx"],
-            "validated":         val["validated"],
-            "validation_errors": val["validation_errors"],
-            "risk_score":        score["risk_score"],
-            "risk_1_flagged":    score["risk_1_flagged"],
-            "risk_2_flagged":    score["risk_2_flagged"],
-            "alarm_id":          score["alarm_id"],
-            "alarm":             score["alarm"],
+    # Per-transaction buffer: tx_id → {
+    #   "risk_outcomes": {engine_name: item, ...},
+    #   "validation": item | None,
+    #   "arrival": item | None,
+    #   "routed": bool,
+    # }
+    _buffer: dict[str, dict] = {}
+
+    def _get(tx_id: str) -> dict:
+        return _buffer.setdefault(tx_id, {
+            "risk_outcomes": {},
+            "validation": None,
+            "arrival": None,
+            "routed": False,
         })
 
+    def _compute_score(entry: dict) -> tuple[float, float, str]:
+        """Return (score, confidence, route)."""
+        outcomes = entry["risk_outcomes"]
+        n_received = len(outcomes)
+        confidence = n_received / TOTAL_RISK_ENGINES if TOTAL_RISK_ENGINES > 0 else 0
+
+        if n_received == 0:
+            score = 0.5   # no outcomes → 50% (uncertain)
+        else:
+            flagged = sum(1 for o in outcomes.values() if o.get("flagged"))
+            score = flagged / n_received
+
+        if score > THRESHOLD_RETAIN:
+            route = "red"
+        elif score >= THRESHOLD_RELEASE:
+            route = "amber"
+        else:
+            route = "green"
+
+        return score, confidence, route
+
+    async def _try_route(tx_id: str) -> None:
+        entry = _get(tx_id)
+        if entry["routed"]:
+            return
+
+        score, confidence, route = _compute_score(entry)
+        outcomes = entry["risk_outcomes"]
+
+        # Collect alarm info from risk outcomes (first alarm found)
+        alarm_id = None
+        alarm = None
+        for o in outcomes.values():
+            if o.get("alarm_id"):
+                alarm_id = o["alarm_id"]
+                alarm = o.get("alarm")
+                break
+
+        # Build the common payload fields
+        tx = None
+        for o in outcomes.values():
+            tx = o.get("tx")
+            if tx:
+                break
+        if tx is None and entry["validation"]:
+            tx = entry["validation"]["tx"]
+        if tx is None:
+            return   # no transaction data yet
+
+        risk_payload = {
+            "risk_score":   score,
+            "risk_route":   route,
+            "confidence":   round(confidence, 2),
+            "engines":      {eng: o.get("flagged", False)
+                             for eng, o in outcomes.items()},
+            "alarm_id":     alarm_id,
+            "alarm":        alarm,
+        }
+
+        # Legacy RT_SCORE event for pipeline counter compatibility
+        await broker.publish(RT_SCORE, {
+            "tx": tx,
+            "risk_score": route,
+            "risk_1_flagged": outcomes.get("vat_ratio", {}).get("flagged", False),
+            "risk_2_flagged": outcomes.get("watchlist", {}).get("flagged", False),
+            "alarm_id": alarm_id,
+            "alarm": alarm,
+        })
+
+        # ── RED path: retain immediately once score > 66.66% ──
+        if route == "red":
+            entry["routed"] = True
+            await broker.publish(RETAIN_EVENT, {
+                "tx": tx,
+                **risk_payload,
+                # Legacy fields for downstream compatibility
+                "risk_1_flagged": outcomes.get("vat_ratio", {}).get("flagged", False),
+                "risk_2_flagged": outcomes.get("watchlist", {}).get("flagged", False),
+            })
+            _buffer.pop(tx_id, None)
+            return
+
+        # ── AMBER path: investigate — needs validation before dispatch ──
+        if route == "amber":
+            if entry["validation"] is None:
+                return   # wait for validation
+            entry["routed"] = True
+            val = entry["validation"]
+            await broker.publish(INVESTIGATE_EVENT, {
+                "tx": tx,
+                "validated": val["validated"],
+                "validation_errors": val["validation_errors"],
+                **risk_payload,
+                "alarm_id": alarm_id,
+                "alarm": alarm,
+            })
+            _buffer.pop(tx_id, None)
+            return
+
+        # ── GREEN path: release — needs validation + arrival ──
+        if route == "green":
+            if entry["validation"] is None or entry["arrival"] is None:
+                return   # wait for both
+            entry["routed"] = True
+            val = entry["validation"]
+            await broker.publish(RELEASE_EVENT, {
+                "tx": tx,
+                "validated": val["validated"],
+                "validation_errors": val["validation_errors"],
+                **risk_payload,
+            })
+            _buffer.pop(tx_id, None)
+            return
+
+    # ── Drain: risk outcomes ──
+    async def _drain_risk() -> None:
+        q = broker.subscribe(RT_RISK_OUTCOME)
+        while True:
+            item = await q.get()
+            tx_id = item["tx"]["transaction_id"]
+            engine = item.get("engine", "unknown")
+            entry = _get(tx_id)
+            entry["risk_outcomes"][engine] = item
+            await _try_route(tx_id)
+
+    # ── Drain: order validation ──
     async def _drain_validation() -> None:
         q = broker.subscribe(ORDER_VALIDATION)
         while True:
             item = await q.get()
             tx_id = item["tx"]["transaction_id"]
-            if tx_id not in _skip:
-                _buffer.setdefault(tx_id, {})["validation"] = item
-                await _emit_if_ready(tx_id)
+            entry = _get(tx_id)
+            entry["validation"] = item
+            await _try_route(tx_id)
 
-    async def _drain_score() -> None:
-        q = broker.subscribe(RT_SCORE)
-        while True:
-            item = await q.get()
-            tx_id = item["tx"]["transaction_id"]
-            if item["risk_score"] == "green":
-                _buffer.setdefault(tx_id, {})["score"] = item
-                await _emit_if_ready(tx_id)
-            else:
-                _skip.add(tx_id)
-                _buffer.pop(tx_id, None)
-
+    # ── Drain: arrival notification ──
     async def _drain_arrival() -> None:
         q = broker.subscribe(ARRIVAL_NOTIFICATION)
         while True:
@@ -525,83 +611,12 @@ async def _release_factory() -> None:
                 or item.get("sales_order_id")
                 or ((item.get("HouseConsignment") or {}).get("Order") or {}).get("orderIdentifier")
             )
-            if tx_id and tx_id not in _skip:
-                _buffer.setdefault(tx_id, {})["arrival"] = item
-                await _emit_if_ready(tx_id)
+            if tx_id:
+                entry = _get(tx_id)
+                entry["arrival"] = item
+                await _try_route(tx_id)
 
-    await asyncio.gather(_drain_validation(), _drain_score(), _drain_arrival())
-
-
-# ── Retain Factory (RED path — immediate) ────────────────────────────────────
-
-async def _retain_factory() -> None:
-    """
-    RED path: red RT score → RETAIN_EVENT immediately, no other conditions needed.
-    """
-    q = broker.subscribe(RT_SCORE)
-    while True:
-        item = await q.get()
-        if item["risk_score"] != "red":
-            continue
-        tx = item["tx"]
-        await broker.publish(RETAIN_EVENT, {
-            "tx":             tx,
-            "risk_score":     "red",
-            "risk_1_flagged": item["risk_1_flagged"],
-            "risk_2_flagged": item["risk_2_flagged"],
-            "alarm_id":       item["alarm_id"],
-            "alarm":          item["alarm"],
-        })
-
-
-# ── Investigate Dispatch Factory (AMBER path) ─────────────────────────────────
-
-async def _investigate_dispatch_factory() -> None:
-    """
-    AMBER path: amber RT score + order validation → INVESTIGATE_EVENT.
-    Non-amber scores are discarded immediately.
-    """
-    _buffer: dict[str, dict] = {}
-    _skip:   set[str]        = set()
-
-    async def _emit_if_ready(tx_id: str) -> None:
-        entry = _buffer.get(tx_id, {})
-        if "validation" not in entry or "score" not in entry:
-            return
-        del _buffer[tx_id]
-        _skip.discard(tx_id)
-        val, score = entry["validation"], entry["score"]
-        await broker.publish(INVESTIGATE_EVENT, {
-            "tx":                val["tx"],
-            "validated":         val["validated"],
-            "validation_errors": val["validation_errors"],
-            "risk_score":        "amber",
-            "alarm_id":          score["alarm_id"],
-            "alarm":             score["alarm"],
-        })
-
-    async def _drain_validation() -> None:
-        q = broker.subscribe(ORDER_VALIDATION)
-        while True:
-            item = await q.get()
-            tx_id = item["tx"]["transaction_id"]
-            if tx_id not in _skip:
-                _buffer.setdefault(tx_id, {})["validation"] = item
-                await _emit_if_ready(tx_id)
-
-    async def _drain_score() -> None:
-        q = broker.subscribe(RT_SCORE)
-        while True:
-            item = await q.get()
-            tx_id = item["tx"]["transaction_id"]
-            if item["risk_score"] == "amber":
-                _buffer.setdefault(tx_id, {})["score"] = item
-                await _emit_if_ready(tx_id)
-            else:
-                _skip.add(tx_id)
-                _buffer.pop(tx_id, None)
-
-    await asyncio.gather(_drain_validation(), _drain_score())
+    await asyncio.gather(_drain_risk(), _drain_validation(), _drain_arrival())
 
 
 # ── Two-entity manual workflow (Customs Office + Tax Office) ─────────────────
@@ -1197,12 +1212,12 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(simulation_loop(_fire_transactions))
     asyncio.create_task(_RT_risk_monitoring_1_factory())
     asyncio.create_task(_RT_risk_monitoring_2_factory())
-    asyncio.create_task(_RT_consolidation_factory())
+    # Consolidation is now handled inside _release_factory (unified routing).
     asyncio.create_task(_order_validation_factory())
     asyncio.create_task(_arrival_notification_factory())
     asyncio.create_task(_release_factory())
-    asyncio.create_task(_retain_factory())
-    asyncio.create_task(_investigate_dispatch_factory())
+    # _retain_factory and _investigate_dispatch_factory are removed —
+    # the unified _release_factory handles all three routes.
     # Two-entity model: each office has its own listener.
     #   RED   → RETAIN_EVENT      → _customs_listener → _customs_queue
     #   AMBER → INVESTIGATE_EVENT → _tax_listener     → _tax_queue

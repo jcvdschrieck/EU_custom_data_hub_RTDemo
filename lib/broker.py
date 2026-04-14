@@ -109,10 +109,12 @@ class MessageBroker:
 # ── Topic name constants ──────────────────────────────────────────────────────
 
 SALES_ORDER_EVENT    = "sales_order_event"      # simulation → risk factories + order validation
-RT_RISK_1_OUTCOME    = "rt_risk_1_outcome"    # VAT-ratio factory      → consolidation
-RT_RISK_2_OUTCOME    = "rt_risk_2_outcome"    # watchlist factory      → consolidation
-RT_SCORE             = "rt_score"             # consolidation          → routing factories
-ORDER_VALIDATION     = "order_validation"     # validation factory     → routing factories
+RT_RISK_OUTCOME      = "rt_risk_outcome"      # all risk engines → release factory (single topic)
+# Legacy aliases kept for event_store compatibility during migration
+RT_RISK_1_OUTCOME    = "rt_risk_1_outcome"    # (legacy — counted for pipeline stats)
+RT_RISK_2_OUTCOME    = "rt_risk_2_outcome"    # (legacy — counted for pipeline stats)
+RT_SCORE             = "rt_score"             # (legacy — counted for pipeline stats)
+ORDER_VALIDATION     = "order_validation"     # validation factory     → release factory
 ARRIVAL_NOTIFICATION = "arrival_notification" # arrival factory        → routing + release factories
 RELEASE_EVENT        = "release_event"        # green path             → DB store worker
 RETAIN_EVENT         = "retain_event"         # red path (immediate)   → DB store worker
