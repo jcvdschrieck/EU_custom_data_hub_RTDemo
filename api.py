@@ -407,15 +407,27 @@ async def _order_validation_factory() -> None:
 
 THRESHOLD_RELEASE    = 1.0 / 3.0   # < 33.33% → release
 THRESHOLD_RETAIN     = 2.0 / 3.0   # > 66.66% → retain
+ASSESSMENT_TIMER_S   = 3.0         # seconds after validation before forced publish
 
 async def _release_factory() -> None:
-    """Unified routing factory: collects risk outcomes, computes
-    consolidated score, and routes to RELEASE / INVESTIGATE / RETAIN."""
+    """Automated Assessment Factory.
+
+    Collects risk outcomes + validation for each transaction. Once
+    validation arrives, a 3-second timer starts. The assessment is
+    published either:
+      (a) immediately, if all TOTAL_RISK_ENGINES outcomes arrive
+          before the timer fires, OR
+      (b) when the timer fires, with whatever risk info is available
+          at that point.
+
+    Once published, the transaction is marked "routed" and any late
+    risk outcomes are discarded."""
 
     # Per-transaction buffer: tx_id → {
     #   "risk_outcomes": {engine_name: item, ...},
     #   "validation": item | None,
     #   "routed": bool,
+    #   "timer_task": asyncio.Task | None,
     # }
     _buffer: dict[str, dict] = {}
 
@@ -424,6 +436,7 @@ async def _release_factory() -> None:
             "risk_outcomes": {},
             "validation": None,
             "routed": False,
+            "timer_task": None,
         })
 
     def _compute_score(entry: dict) -> tuple[float, float, str]:
@@ -447,15 +460,25 @@ async def _release_factory() -> None:
 
         return score, confidence, route
 
-    async def _try_route(tx_id: str) -> None:
-        entry = _get(tx_id)
-        if entry["routed"]:
+    async def _publish_assessment(tx_id: str) -> None:
+        """Publish the assessment outcome for a transaction using
+        whatever risk info is available now."""
+        entry = _buffer.get(tx_id)
+        if entry is None or entry["routed"]:
             return
+        if entry["validation"] is None:
+            return   # should not happen — timer starts after validation
+
+        entry["routed"] = True
+        # Cancel the timer if it hasn't fired yet
+        timer = entry.get("timer_task")
+        if timer and not timer.done():
+            timer.cancel()
 
         score, confidence, route = _compute_score(entry)
         outcomes = entry["risk_outcomes"]
 
-        # Collect alarm info from risk outcomes (first alarm found)
+        # Collect alarm info
         alarm_id = None
         alarm = None
         for o in outcomes.values():
@@ -464,7 +487,7 @@ async def _release_factory() -> None:
                 alarm = o.get("alarm")
                 break
 
-        # Build the common payload fields
+        # Get tx data
         tx = None
         for o in outcomes.values():
             tx = o.get("tx")
@@ -473,8 +496,10 @@ async def _release_factory() -> None:
         if tx is None and entry["validation"]:
             tx = entry["validation"]["tx"]
         if tx is None:
-            return   # no transaction data yet
+            _buffer.pop(tx_id, None)
+            return
 
+        val = entry["validation"]
         risk_payload = {
             "risk_score":   score,
             "risk_route":   route,
@@ -495,58 +520,51 @@ async def _release_factory() -> None:
             "alarm": alarm,
         })
 
-        # ── RED path: retain immediately once score > 66.66% ──
-        if route == "red":
-            if entry["validation"] is None:
-                return   # wait for validation even on RED
-            entry["routed"] = True
-            val = entry["validation"]
-            payload = {
-                "tx": tx, "route": "retain",
-                "validated": val["validated"],
-                "validation_errors": val["validation_errors"],
-                **risk_payload,
-            }
-            await broker.publish(ASSESSMENT_OUTCOME, payload)
-            await broker.publish(RETAIN_EVENT, payload)   # legacy counter
-            _buffer.pop(tx_id, None)
-            return
+        # Route label for the payload
+        route_label = {"red": "retain", "amber": "investigate", "green": "release"}[route]
+        payload = {
+            "tx": tx,
+            "route": route_label,
+            "validated": val["validated"],
+            "validation_errors": val["validation_errors"],
+            **risk_payload,
+        }
 
-        # ── AMBER path: investigate — needs validation ──
-        if route == "amber":
-            if entry["validation"] is None:
-                return   # wait for validation
-            entry["routed"] = True
-            val = entry["validation"]
-            payload = {
-                "tx": tx, "route": "investigate",
-                "validated": val["validated"],
-                "validation_errors": val["validation_errors"],
-                **risk_payload,
-                "alarm_id": alarm_id,
-                "alarm": alarm,
-            }
-            await broker.publish(ASSESSMENT_OUTCOME, payload)
-            await broker.publish(INVESTIGATE_EVENT, payload)  # legacy counter
-            _buffer.pop(tx_id, None)
-            return
+        await broker.publish(ASSESSMENT_OUTCOME, payload)
 
-        # ── GREEN path: release — needs validation ──
-        if route == "green":
-            if entry["validation"] is None:
-                return   # wait for validation
-            entry["routed"] = True
-            val = entry["validation"]
-            payload = {
-                "tx": tx, "route": "release",
-                "validated": val["validated"],
-                "validation_errors": val["validation_errors"],
-                **risk_payload,
-            }
-            await broker.publish(ASSESSMENT_OUTCOME, payload)
-            await broker.publish(RELEASE_EVENT, payload)  # legacy counter
-            _buffer.pop(tx_id, None)
+        # Legacy counter
+        legacy_topic = {
+            "retain": RETAIN_EVENT,
+            "investigate": INVESTIGATE_EVENT,
+            "release": RELEASE_EVENT,
+        }[route_label]
+        await broker.publish(legacy_topic, payload)
+
+        _buffer.pop(tx_id, None)
+
+    async def _timer_callback(tx_id: str) -> None:
+        """Fires ASSESSMENT_TIMER_S seconds after validation. Publishes
+        the assessment with whatever risk info has accumulated."""
+        try:
+            await asyncio.sleep(ASSESSMENT_TIMER_S)
+            await _publish_assessment(tx_id)
+        except asyncio.CancelledError:
+            pass  # timer cancelled because all risk outcomes arrived early
+
+    def _start_timer(tx_id: str) -> None:
+        """Start the assessment timer for a transaction."""
+        entry = _get(tx_id)
+        if entry["timer_task"] is None and not entry["routed"]:
+            entry["timer_task"] = asyncio.create_task(_timer_callback(tx_id))
+
+    async def _try_early_publish(tx_id: str) -> None:
+        """Check if all risk outcomes have arrived. If so, publish
+        immediately (cancelling the timer)."""
+        entry = _get(tx_id)
+        if entry["routed"] or entry["validation"] is None:
             return
+        if len(entry["risk_outcomes"]) >= TOTAL_RISK_ENGINES:
+            await _publish_assessment(tx_id)
 
     # ── Drain: risk outcomes ──
     async def _drain_risk() -> None:
@@ -554,10 +572,12 @@ async def _release_factory() -> None:
         while True:
             item = await q.get()
             tx_id = item["tx"]["transaction_id"]
-            engine = item.get("engine", "unknown")
             entry = _get(tx_id)
+            if entry["routed"]:
+                continue   # late arrival — discard
+            engine = item.get("engine", "unknown")
             entry["risk_outcomes"][engine] = item
-            await _try_route(tx_id)
+            await _try_early_publish(tx_id)
 
     # ── Drain: order validation ──
     async def _drain_validation() -> None:
@@ -566,8 +586,13 @@ async def _release_factory() -> None:
             item = await q.get()
             tx_id = item["tx"]["transaction_id"]
             entry = _get(tx_id)
+            if entry["routed"]:
+                continue
             entry["validation"] = item
-            await _try_route(tx_id)
+            # Start the timer — assessment publishes in 3s or sooner
+            _start_timer(tx_id)
+            # Check if all risk outcomes already arrived
+            await _try_early_publish(tx_id)
 
     await asyncio.gather(_drain_risk(), _drain_validation())
 
