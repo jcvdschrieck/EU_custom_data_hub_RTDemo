@@ -1095,11 +1095,30 @@ function PipelineDiagram({ pipeline }) {
         <span style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 400 }}>live stream · ~5 Hz</span>
       </div>
 
-      <div className="pipeline-scroll" style={{
+      {/* Top scrollbar: a zero-height mirror that syncs scroll position
+          with the main pipeline container below. */}
+      <div
+        className="pipeline-scroll-top"
+        style={{ overflowX: 'auto', overflowY: 'hidden' }}
+        onScroll={(e) => {
+          const bot = e.currentTarget.nextElementSibling;
+          if (bot) bot.scrollLeft = e.currentTarget.scrollLeft;
+        }}
+      >
+        {/* Invisible spacer matching the pipeline content width */}
+        <div style={{ height: 1 }} className="pipeline-scroll-spacer" />
+      </div>
+
+      <div ref={pipelineRef} className="pipeline-scroll" style={{
         overflowX: 'auto', overflowY: 'hidden',
         padding: '20px 20px 20px',
         borderBottom: '1px solid var(--border-light)',
-      }}>
+      }}
+        onScroll={(e) => {
+          const top = e.currentTarget.previousElementSibling;
+          if (top) top.scrollLeft = e.currentTarget.scrollLeft;
+        }}
+      >
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16, minWidth: 'max-content' }}>
 
           {/* ══ MAIN FLOW — single horizontal row: Entry → zones → brokers → Release Factory → event brokers → DB Store ══
@@ -1451,6 +1470,21 @@ export default function SimulationPage() {
       clearInterval(safetyId)
     }
   }, [refreshStatus, refreshPipeline])
+
+  // Sync the top scrollbar spacer width with the pipeline content width
+  // so both scrollbars have the same range.
+  const pipelineRef = useRef(null)
+  useEffect(() => {
+    const syncWidth = () => {
+      const el = pipelineRef.current
+      if (!el) return
+      const spacer = el.previousElementSibling?.querySelector('.pipeline-scroll-spacer')
+      if (spacer) spacer.style.width = el.scrollWidth + 'px'
+    }
+    syncWidth()
+    const id = setInterval(syncWidth, 1000)
+    return () => clearInterval(id)
+  })
 
   return (
     <div className="page-container">
