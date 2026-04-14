@@ -108,23 +108,22 @@ class MessageBroker:
 
 # ── Topic name constants ──────────────────────────────────────────────────────
 
-SALES_ORDER_EVENT    = "sales_order_event"      # simulation → risk factories + order validation
-RT_RISK_OUTCOME      = "rt_risk_outcome"      # all risk engines → release factory (single topic)
-ORDER_VALIDATION     = "order_validation"     # validation factory     → release factory
-# Unified release outcome: single topic for all three routing decisions.
+SALES_ORDER_EVENT    = "sales_order_event"      # simulation → risk + validation + DB store
+RT_RISK_OUTCOME      = "rt_risk_outcome"      # all risk engines → assessment factory
+ORDER_VALIDATION     = "order_validation"     # validation factory → assessment factory
+# Unified assessment outcome: single topic for all three routing decisions.
 # Each event carries a "route" field: "release" / "retain" / "investigate".
-RELEASE_OUTCOME      = "release_outcome"      # release factory → listeners + DB store
+ASSESSMENT_OUTCOME   = "assessment_outcome"   # assessment factory → DB store + C&T risk mgmt
+# Investigation outcome: produced by the Custom & Tax Risk Management system.
+INVESTIGATION_OUTCOME = "investigation_outcome"  # C&T risk mgmt → DB store
 # Legacy aliases — kept so event_store counters and pipeline stats still work.
+RELEASE_OUTCOME      = "assessment_outcome"   # alias
 RT_RISK_1_OUTCOME    = "rt_risk_1_outcome"
 RT_RISK_2_OUTCOME    = "rt_risk_2_outcome"
 RT_SCORE             = "rt_score"
 RELEASE_EVENT        = "release_event"
 RETAIN_EVENT         = "retain_event"
 INVESTIGATE_EVENT    = "investigate_event"
-AGENT_RETAIN_EVENT   = "agent_retain_event"   # agent: incorrect       → DB store worker
-AGENT_RELEASE_EVENT  = "agent_release_event"  # agent: correct/uncertain → release-after-inv factory
-RELEASE_AFTER_INVESTIGATION_EVENT = "release_after_investigation_event"  # cleared → DB store worker
-AI_ANALYSIS_EVENT    = "ai_analysis_event"    # tax officer triggered VAT agent → data hub writer
 
 
 # ── Singleton used across api.py and workers ─────────────────────────────────

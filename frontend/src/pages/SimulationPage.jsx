@@ -919,10 +919,10 @@ function MiddleSection({ ev, rf, customs, tax, taxRunning, stored, newStored, H,
           tooltip="Investigation Clearance — transactions the Customs officer cleared for release. Forwarded to the Post-Investigation Release factory." />
       </div>
 
-      {/* Post-Investigation Release Factory */}
+      {/* Post-Investigation Automated Assessment Factory */}
       <div style={{ position: 'absolute', top: CUSTOMS_ROW_TOP, left: POSTINV_LEFT, width: POSTINV_W }}>
         <FactoryNode icon="🔓" label="Post-Inv. Release" description="cleared + OV + arrival" sm width={POSTINV_W}
-          tooltip="Post-Investigation Release Factory — waits for OV + Arrival on cleared transactions, then emits a Release After Investigation event." />
+          tooltip="Post-Investigation Automated Assessment Factory — waits for OV + Arrival on cleared transactions, then emits a Release After Investigation event." />
       </div>
     </div>
   )
@@ -1037,7 +1037,7 @@ function PipelineDiagram({ pipeline }) {
   // (Sales Order Validation / RT Risk Outcome)
   const OUT_BROKER_W = 170
 
-  // RT zone internal row geometry (two stacked broker rows, outcomes flow to Release Factory)
+  // RT zone internal row geometry (two stacked broker rows, outcomes flow to Automated Assessment Factory)
   const RT_ROW_H   = 84
   const RT_ROW_GAP = 10
   const RT_STACK_H = RT_ROW_H * 2 + RT_ROW_GAP    // 178
@@ -1092,7 +1092,7 @@ function PipelineDiagram({ pipeline }) {
       >
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16, minWidth: 'max-content' }}>
 
-          {/* ══ MAIN FLOW — single horizontal row: Entry → zones → brokers → Release Factory → event brokers → DB Store ══
+          {/* ══ MAIN FLOW — single horizontal row: Entry → zones → brokers → Automated Assessment Factory → event brokers → DB Store ══
               alignItems is "flex-start" so the LEFT columns (all natural height = ROW1_H)
               stay at the top of the row even when the MiddleSection grows taller to
               accommodate the VAT Fraud Detection Agent stacked under the Tax Officer.
@@ -1171,12 +1171,12 @@ function PipelineDiagram({ pipeline }) {
               <div style={{ height: OV_H, display: 'flex', alignItems: 'center' }}>
                 <BrokerNode label="Sales Order Validation" topicKey="ORDER_VALIDATION"
                   count={ev.order_validation} sm width={OUT_BROKER_W}
-                  tooltip="ORDER_VALIDATION — field-completeness outcome per order. Consumed by the Release Factory." />
+                  tooltip="ORDER_VALIDATION — field-completeness outcome per order. Consumed by the Automated Assessment Factory." />
               </div>
               <div style={{ height: RT_H, display: 'flex', alignItems: 'center' }}>
                 <BrokerNode label="RT Risk Outcome" topicKey="RT_RISK_OUTCOME"
                   count={(ev.rt_risk_1_outcome || 0) + (ev.rt_risk_2_outcome || 0)} sm width={OUT_BROKER_W}
-                  tooltip="RT_RISK_OUTCOME — unified topic. Both risk engines publish here with an engine identifier. The Release Factory subscribes and computes a consolidated score (flagged/total) with confidence.">
+                  tooltip="RT_RISK_OUTCOME — unified topic. Both risk engines publish here with an engine identifier. The Automated Assessment Factory subscribes and computes a consolidated score (flagged/total) with confidence.">
                   <FlaggedBadge flagged={(rf.rt_risk_1_flagged || 0) + (rf.rt_risk_2_flagged || 0)}
                     total={(ev.rt_risk_1_outcome || 0) + (ev.rt_risk_2_outcome || 0)} />
                 </BrokerNode>
@@ -1184,35 +1184,40 @@ function PipelineDiagram({ pipeline }) {
               {/* Goods Arrival Notification broker removed */}
             </div>
 
-            {/* Fan-in: 2 output brokers → Release Factory */}
+            {/* Fan-in: 2 output brokers → Automated Assessment Factory */}
             <FanInSVG height={ROW1_H} inputYs={[yOV, yRT]} outputY={ROW1_H / 2} width={60} />
 
-            {/* Release Factory — vertically centered at ROW1_H/2 to line up with the fan-in output */}
+            {/* Automated Assessment Factory — vertically centered at ROW1_H/2 to line up with the fan-in output */}
             <div style={{ height: ROW1_H, display: 'flex', alignItems: 'center' }}>
-              <FactoryNode icon="🎯" label="Release Factory" description="consolidates risk + routes" sm
-                tooltip="Release Factory — collects risk outcomes from all engines, computes a consolidated score (flagged/total, with confidence), then routes: score < 33% → Release, 33–66% → Investigate, > 66% → Retain. GREEN/AMBER paths wait for validation; RED fires immediately." />
+              <FactoryNode icon="🎯" label="Automated Assessment Factory" description="consolidates risk outcomes" sm
+                tooltip="Automated Assessment Factory — collects risk outcomes from all engines, computes a consolidated score (flagged/total, with confidence), then routes: score < 33% → Release, 33–66% → Investigate, > 66% → Retain. GREEN/AMBER paths wait for validation; RED fires immediately." />
             </div>
 
-            {/* Arrow: Release Factory → single Automated Release Outcome broker */}
+            {/* Arrow: Automated Assessment Factory → single Assessment Outcome broker */}
             <Arrow />
 
             {/* Single unified release outcome broker — carries all three routes */}
             <div style={{ height: ROW1_H, display: 'flex', alignItems: 'center' }}>
-              <BrokerNode label="Automated Release Outcome" topicKey="RELEASE_OUTCOME"
+              <BrokerNode label="Assessment Outcome" topicKey="ASSESSMENT_OUTCOME"
                 count={(ev.release_event || 0) + (ev.retain_event || 0) + (ev.investigate_event || 0)}
                 sm width={OUT_BROKER_W}
-                tooltip="RELEASE_OUTCOME — unified topic carrying all routing decisions (release / retain / investigate) with the consolidated risk score and confidence.">
+                tooltip="ASSESSMENT_OUTCOME — unified topic carrying all routing decisions (release / retain / investigate) with the consolidated risk score and confidence.">
                 <ScoreBadges green={ev.release_event} amber={ev.investigate_event} red={ev.retain_event} />
               </BrokerNode>
             </div>
 
-            {/* Middle section: DB Store Factory + Hub (grouped in a dashed zone) + After-Inv
-                brokers (mirroring event brokers) + the two-entity bottom band: Customs Office
-                row above, Tax Office row + VAT Fraud Detection Agent below. Absolute-positioned
-                canvas sized so the band extends below ROW1_H to fit both rows. */}
-            <MiddleSection ev={ev} rf={rf} customs={customs} tax={tax} taxRunning={taxRunning}
-              stored={stored} newStored={newStored}
-              H={ROW1_H} yRel={yOV} yRet={yRT} yInv={yINV} />
+            {/* Subscribers: DB Store + C&T Risk Management + Investigation Outcome */}
+            <Arrow />
+            <div style={{ display: 'flex', flexDirection: 'column', gap: LGAP, justifyContent: 'center', height: ROW1_H }}>
+              <FactoryNode icon="💾" label="DB Store Factory" description="stores release events + investigation outcomes" sm
+                tooltip="DB Store Factory — subscribes to Assessment Outcome (release route), Investigation Outcome, and Sales Order Event. Persists to european_custom.db." />
+              <FactoryNode icon="🏛️" label="C&T Risk Management" description="acts on retain + investigate" sm
+                tooltip="Custom & Tax Risk Management System — subscribes to Assessment Outcome (retain + investigate routes) and Sales Order Event. Produces Investigation Outcome events." />
+            </div>
+            <Arrow />
+            <BrokerNode label="Investigation Outcome" topicKey="INVESTIGATION_OUTCOME"
+              count={ev.investigation_outcome || 0} sm width={OUT_BROKER_W}
+              tooltip="INVESTIGATION_OUTCOME — produced by the C&T Risk Management system for retain and investigate routes. Consumed by the DB Store Factory." />
 
           </div>
 
@@ -1234,7 +1239,7 @@ function PipelineDiagram({ pipeline }) {
         <LegendItem color="#1f7a3c" bg="#e8f5e9" label="Release (automated + post inv.)" />
         <LegendItem color="#c0392b" bg="#fde8e8" label="Retain (automated + post inv.)" />
         <LegendItem color="#e6820a" bg="#fff3e0" label="Investigation notification" />
-        <LegendItem color="#6366f1" bg="#eef2ff" label="Revenue Guardian UI (operator)" />
+        {/* Revenue Guardian legend removed */}
         {/* Connector / arrow coding — all line strokes are neutral grey;
             only the dashed style remains as a semantic differentiator. */}
         <LegendItem color="#adb5bd" bg="#f8f9fa" label="Goods Transport / Arrival (dashed)" dashed />
@@ -1267,11 +1272,11 @@ const TOPIC_META = [
   { key: 'order_validation',                    label: 'Sales Order Validation',           factory: 'Sales Order Validation Factory',     color: '#1f7a3c' },
   { key: 'rt_risk_1_outcome',                   label: 'RT Risk 1 Outcome',                factory: 'Real-Time Risk Assessment 1',        color: '#6f42c1' },
   { key: 'rt_risk_2_outcome',                   label: 'RT Risk 2 Outcome',                factory: 'Real-Time Risk Assessment 2',        color: '#6f42c1' },
-  { key: 'rt_score',                            label: 'RT Risk Outcome',                  factory: 'Release Factory (consolidation)',      color: '#e6820a' },
+  { key: 'rt_score',                            label: 'RT Risk Outcome',                  factory: 'Automated Assessment Factory (consolidation)',      color: '#e6820a' },
   // arrival_notification removed (Goods Transport flow eliminated)
-  { key: 'release_event',                       label: 'Release Outcome (green)',          factory: 'Release Factory',                     color: '#1f7a3c' },
-  { key: 'retain_event',                        label: 'Release Outcome (red)',            factory: 'Release Factory',                     color: '#c0392b' },
-  { key: 'investigate_event',                   label: 'Release Outcome (amber)',          factory: 'Release Factory',                     color: '#e6820a' },
+  { key: 'release_event',                       label: 'Release Outcome (green)',          factory: 'Automated Assessment Factory',                     color: '#1f7a3c' },
+  { key: 'retain_event',                        label: 'Release Outcome (red)',            factory: 'Automated Assessment Factory',                     color: '#c0392b' },
+  { key: 'investigate_event',                   label: 'Release Outcome (amber)',          factory: 'Automated Assessment Factory',                     color: '#e6820a' },
   { key: 'agent_retain_event',                  label: 'Retain Post Inv.',                 factory: 'Investigation Agent Worker',          color: '#c0392b' },
   { key: 'agent_release_event',                 label: 'Investigation Clearance',          factory: 'Investigation Agent Worker',          color: '#1f7a3c' },
   { key: 'release_after_investigation_event',   label: 'Release Post Inv.',                factory: 'Release After Investigation Factory', color: '#2e7d32' },
@@ -1412,23 +1417,7 @@ export default function SimulationPage() {
             Control the simulation and monitor the pub/sub pipeline in real time
           </div>
         </div>
-        <a
-          href="http://localhost:8080"
-          target="_blank"
-          rel="noopener noreferrer"
-          title="Open the Revenue Guardian operator console (port 8080) in a new tab"
-          style={{
-            display: 'inline-flex', alignItems: 'center', gap: 6,
-            background: '#6366f1', color: '#fff',
-            border: 'none', borderRadius: 'var(--radius)',
-            padding: '8px 14px', fontSize: 12, fontWeight: 700,
-            textDecoration: 'none', whiteSpace: 'nowrap',
-            boxShadow: '0 1px 4px rgba(99, 102, 241, 0.25)',
-            cursor: 'pointer', flex: '0 0 auto',
-          }}>
-          🧑‍💼 Open Revenue Guardian
-          <span style={{ fontSize: 11, opacity: 0.85 }}>↗</span>
-        </a>
+        {/* Revenue Guardian link removed */}
         <button
           onClick={() => setPresentationMode(p => !p)}
           title="Reduce UI refresh rate to 2 fps for smooth screen-sharing"
