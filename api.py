@@ -121,10 +121,10 @@ from pydantic import BaseModel
 
 from lib.broker import (
     broker,
-    SALES_ORDER_EVENT, RT_RISK_OUTCOME,
+    SALES_ORDER_EVENT, RT_RISK_OUTCOME, ORDER_VALIDATION,
+    RELEASE_OUTCOME,
     RT_RISK_1_OUTCOME, RT_RISK_2_OUTCOME, RT_SCORE,  # legacy counters
-    ORDER_VALIDATION,
-    RELEASE_EVENT, RETAIN_EVENT, INVESTIGATE_EVENT,
+    RELEASE_EVENT, RETAIN_EVENT, INVESTIGATE_EVENT,   # legacy counters
     AGENT_RETAIN_EVENT, AGENT_RELEASE_EVENT, RELEASE_AFTER_INVESTIGATION_EVENT,
     AI_ANALYSIS_EVENT,
 )
@@ -504,31 +504,37 @@ async def _release_factory() -> None:
 
         # ── RED path: retain immediately once score > 66.66% ──
         if route == "red":
+            if entry["validation"] is None:
+                return   # wait for validation even on RED
             entry["routed"] = True
-            await broker.publish(RETAIN_EVENT, {
-                "tx": tx,
+            val = entry["validation"]
+            payload = {
+                "tx": tx, "route": "retain",
+                "validated": val["validated"],
+                "validation_errors": val["validation_errors"],
                 **risk_payload,
-                # Legacy fields for downstream compatibility
-                "risk_1_flagged": outcomes.get("vat_ratio", {}).get("flagged", False),
-                "risk_2_flagged": outcomes.get("watchlist", {}).get("flagged", False),
-            })
+            }
+            await broker.publish(RELEASE_OUTCOME, payload)
+            await broker.publish(RETAIN_EVENT, payload)   # legacy counter
             _buffer.pop(tx_id, None)
             return
 
-        # ── AMBER path: investigate — needs validation before dispatch ──
+        # ── AMBER path: investigate — needs validation ──
         if route == "amber":
             if entry["validation"] is None:
                 return   # wait for validation
             entry["routed"] = True
             val = entry["validation"]
-            await broker.publish(INVESTIGATE_EVENT, {
-                "tx": tx,
+            payload = {
+                "tx": tx, "route": "investigate",
                 "validated": val["validated"],
                 "validation_errors": val["validation_errors"],
                 **risk_payload,
                 "alarm_id": alarm_id,
                 "alarm": alarm,
-            })
+            }
+            await broker.publish(RELEASE_OUTCOME, payload)
+            await broker.publish(INVESTIGATE_EVENT, payload)  # legacy counter
             _buffer.pop(tx_id, None)
             return
 
@@ -538,12 +544,14 @@ async def _release_factory() -> None:
                 return   # wait for validation
             entry["routed"] = True
             val = entry["validation"]
-            await broker.publish(RELEASE_EVENT, {
-                "tx": tx,
+            payload = {
+                "tx": tx, "route": "release",
                 "validated": val["validated"],
                 "validation_errors": val["validation_errors"],
                 **risk_payload,
-            })
+            }
+            await broker.publish(RELEASE_OUTCOME, payload)
+            await broker.publish(RELEASE_EVENT, payload)  # legacy counter
             _buffer.pop(tx_id, None)
             return
 
@@ -689,15 +697,16 @@ async def _customs_listener_factory() -> None:
       - Decide release/retain directly (terminal)
       - Escalate to Tax (transfer entry to _tax_queue)
     """
-    q = broker.subscribe(RETAIN_EVENT)
+    q = broker.subscribe(RELEASE_OUTCOME)
     while True:
         msg   = await q.get()
+        if msg.get("route") != "retain":
+            continue
         tx    = msg.get("tx") or {}
         tx_id = tx.get("transaction_id")
         if not tx_id:
             continue
         if tx_id in _customs_queue or tx_id in _tax_queue:
-            # Idempotent: don't double-route the same transaction.
             continue
         now_iso = datetime.now(timezone.utc).isoformat()
         _customs_queue[tx_id] = {
@@ -726,9 +735,11 @@ async def _tax_listener_factory() -> None:
       - Recommend release/retain (transfer entry back to _customs_queue
         with tax_recommendation set; Customs takes the final decision)
     """
-    q = broker.subscribe(INVESTIGATE_EVENT)
+    q = broker.subscribe(RELEASE_OUTCOME)
     while True:
         msg   = await q.get()
+        if msg.get("route") != "investigate":
+            continue
         tx    = msg.get("tx") or {}
         tx_id = tx.get("transaction_id")
         if not tx_id:
@@ -1241,7 +1252,7 @@ def _compute_sim_state_snapshot() -> dict:
     # ── Pipeline block (same shape as GET /api/simulation/pipeline) ──
     topics = [
         SALES_ORDER_EVENT, RT_RISK_1_OUTCOME, RT_RISK_2_OUTCOME,
-        RT_SCORE, ORDER_VALIDATION,
+        RT_SCORE, ORDER_VALIDATION, RELEASE_OUTCOME,
         RELEASE_EVENT, RETAIN_EVENT, INVESTIGATE_EVENT,
         AGENT_RETAIN_EVENT, AGENT_RELEASE_EVENT, RELEASE_AFTER_INVESTIGATION_EVENT,
     ]
@@ -1780,7 +1791,7 @@ def sim_pipeline():
     from lib.broker import broker as _broker
     topics = [
         SALES_ORDER_EVENT, RT_RISK_1_OUTCOME, RT_RISK_2_OUTCOME,
-        RT_SCORE, ORDER_VALIDATION,
+        RT_SCORE, ORDER_VALIDATION, RELEASE_OUTCOME,
         RELEASE_EVENT, RETAIN_EVENT, INVESTIGATE_EVENT,
         AGENT_RETAIN_EVENT, AGENT_RELEASE_EVENT, RELEASE_AFTER_INVESTIGATION_EVENT,
     ]

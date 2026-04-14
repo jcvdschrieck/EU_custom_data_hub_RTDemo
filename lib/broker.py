@@ -110,15 +110,17 @@ class MessageBroker:
 
 SALES_ORDER_EVENT    = "sales_order_event"      # simulation → risk factories + order validation
 RT_RISK_OUTCOME      = "rt_risk_outcome"      # all risk engines → release factory (single topic)
-# Legacy aliases kept for event_store compatibility during migration
-RT_RISK_1_OUTCOME    = "rt_risk_1_outcome"    # (legacy — counted for pipeline stats)
-RT_RISK_2_OUTCOME    = "rt_risk_2_outcome"    # (legacy — counted for pipeline stats)
-RT_SCORE             = "rt_score"             # (legacy — counted for pipeline stats)
 ORDER_VALIDATION     = "order_validation"     # validation factory     → release factory
-ARRIVAL_NOTIFICATION = "arrival_notification" # arrival factory        → routing + release factories
-RELEASE_EVENT        = "release_event"        # green path             → DB store worker
-RETAIN_EVENT         = "retain_event"         # red path (immediate)   → DB store worker
-INVESTIGATE_EVENT    = "investigate_event"    # amber path             → investigator factory
+# Unified release outcome: single topic for all three routing decisions.
+# Each event carries a "route" field: "release" / "retain" / "investigate".
+RELEASE_OUTCOME      = "release_outcome"      # release factory → listeners + DB store
+# Legacy aliases — kept so event_store counters and pipeline stats still work.
+RT_RISK_1_OUTCOME    = "rt_risk_1_outcome"
+RT_RISK_2_OUTCOME    = "rt_risk_2_outcome"
+RT_SCORE             = "rt_score"
+RELEASE_EVENT        = "release_event"
+RETAIN_EVENT         = "retain_event"
+INVESTIGATE_EVENT    = "investigate_event"
 AGENT_RETAIN_EVENT   = "agent_retain_event"   # agent: incorrect       → DB store worker
 AGENT_RELEASE_EVENT  = "agent_release_event"  # agent: correct/uncertain → release-after-inv factory
 RELEASE_AFTER_INVESTIGATION_EVENT = "release_after_investigation_event"  # cleared → DB store worker

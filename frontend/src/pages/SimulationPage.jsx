@@ -1139,15 +1139,17 @@ function PipelineDiagram({ pipeline }) {
                   <div style={{ display: 'flex', alignItems: 'center', gap: 0, height: '100%', justifyContent: 'center', transform: 'translateY(-18px)' }}>
                     {/* Entry fan-out */}
                     <FanOutSVG height={RT_STACK_H} targetYs={[rtTopY, rtBotY]} width={24} />
-                    {/* Stacked RT1 + RT2 engine factories — same width as other factories */}
+                    {/* Stacked RT1 + RT2 engine factories with arrows */}
                     <div style={{ display: 'flex', flexDirection: 'column', gap: RT_ROW_GAP }}>
-                      <div style={{ height: RT_ROW_H, display: 'flex', alignItems: 'center' }}>
+                      <div style={{ height: RT_ROW_H, display: 'flex', alignItems: 'center', gap: 4 }}>
                         <FactoryNode icon="⚖️" label="RT Risk As. 1" description="VAT ratio deviation" sm width={RT_FACTORY_W}
                           tooltip="RT Risk Assessment 1 — flags transactions whose VAT-to-value ratio deviates from the supplier's historical baseline. Publishes to the unified RT Risk Outcome broker." />
+                        <Arrow />
                       </div>
-                      <div style={{ height: RT_ROW_H, display: 'flex', alignItems: 'center' }}>
+                      <div style={{ height: RT_ROW_H, display: 'flex', alignItems: 'center', gap: 4 }}>
                         <FactoryNode icon="🔍" label="RT Risk As. 2" description="Watchlist lookup" sm width={RT_FACTORY_W}
                           tooltip="RT Risk Assessment 2 — flags transactions whose seller or route appears on the active watchlist. Publishes to the unified RT Risk Outcome broker." />
+                        <Arrow />
                       </div>
                     </div>
                   </div>
@@ -1172,7 +1174,7 @@ function PipelineDiagram({ pipeline }) {
                   tooltip="ORDER_VALIDATION — field-completeness outcome per order. Consumed by the Release Factory." />
               </div>
               <div style={{ height: RT_H, display: 'flex', alignItems: 'center' }}>
-                <BrokerNode label="RT Risk Outcome" topicKey="RT_RISK_1_OUTCOME"
+                <BrokerNode label="RT Risk Outcome" topicKey="RT_RISK_OUTCOME"
                   count={(ev.rt_risk_1_outcome || 0) + (ev.rt_risk_2_outcome || 0)} sm width={OUT_BROKER_W}
                   tooltip="RT_RISK_OUTCOME — unified topic. Both risk engines publish here with an engine identifier. The Release Factory subscribes and computes a consolidated score (flagged/total) with confidence.">
                   <FlaggedBadge flagged={(rf.rt_risk_1_flagged || 0) + (rf.rt_risk_2_flagged || 0)}
@@ -1191,26 +1193,17 @@ function PipelineDiagram({ pipeline }) {
                 tooltip="Release Factory — collects risk outcomes from all engines, computes a consolidated score (flagged/total, with confidence), then routes: score < 33% → Release, 33–66% → Investigate, > 66% → Retain. GREEN/AMBER paths wait for validation; RED fires immediately." />
             </div>
 
-            {/* Fan-out: Release Factory → 3 event brokers */}
-            <FanOutSVG height={ROW1_H} targetYs={[yOV, yRT, yINV]} width={48} />
+            {/* Arrow: Release Factory → single Automated Release Outcome broker */}
+            <Arrow />
 
-            {/* Three event brokers — heights match row-1 zones so centers land at yOV / yRT / yAN */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: LGAP }}>
-              <div style={{ height: OV_H, display: 'flex', alignItems: 'center' }}>
-                <BrokerNode label="Sales Order Release" topicKey="AUTOMATED_RELEASE"
-                  count={ev.release_event} accent="#1f7a3c" sm width={OUT_BROKER_W}
-                  tooltip="Sales Order Release — GREEN-path transactions cleared for storage without further investigation." />
-              </div>
-              <div style={{ height: RT_H, display: 'flex', alignItems: 'center' }}>
-                <BrokerNode label="Sales Order Retained" topicKey="AUTOMATED_RETAIN"
-                  count={ev.retain_event} accent="#c0392b" sm width={OUT_BROKER_W}
-                  tooltip="Sales Order Retained — RED-path transactions stored with the suspicious flag set." />
-              </div>
-              <div style={{ height: INV_H, display: 'flex', alignItems: 'center' }}>
-                <BrokerNode label="Sales Order for Investigation" topicKey="INVESTIGATION_NOTIFICATION"
-                  count={ev.investigate_event} accent="#e6820a" sm width={OUT_BROKER_W}
-                  tooltip="Sales Order for Investigation — AMBER-path transactions handed off to the investigation sub-pipeline." />
-              </div>
+            {/* Single unified release outcome broker — carries all three routes */}
+            <div style={{ height: ROW1_H, display: 'flex', alignItems: 'center' }}>
+              <BrokerNode label="Automated Release Outcome" topicKey="RELEASE_OUTCOME"
+                count={(ev.release_event || 0) + (ev.retain_event || 0) + (ev.investigate_event || 0)}
+                sm width={OUT_BROKER_W}
+                tooltip="RELEASE_OUTCOME — unified topic carrying all routing decisions (release / retain / investigate) with the consolidated risk score and confidence.">
+                <ScoreBadges green={ev.release_event} amber={ev.investigate_event} red={ev.retain_event} />
+              </BrokerNode>
             </div>
 
             {/* Middle section: DB Store Factory + Hub (grouped in a dashed zone) + After-Inv
@@ -1276,9 +1269,9 @@ const TOPIC_META = [
   { key: 'rt_risk_2_outcome',                   label: 'RT Risk 2 Outcome',                factory: 'Real-Time Risk Assessment 2',        color: '#6f42c1' },
   { key: 'rt_score',                            label: 'RT Risk Outcome',                  factory: 'Release Factory (consolidation)',      color: '#e6820a' },
   // arrival_notification removed (Goods Transport flow eliminated)
-  { key: 'release_event',                       label: 'Sales Order Release',              factory: 'Release Factory (GREEN)',             color: '#1f7a3c' },
-  { key: 'retain_event',                        label: 'Sales Order Retained',             factory: 'Retain Factory (RED)',                color: '#c0392b' },
-  { key: 'investigate_event',                   label: 'Sales Order for Investigation',    factory: 'Investigate Dispatch Factory (AMBER)', color: '#e6820a' },
+  { key: 'release_event',                       label: 'Release Outcome (green)',          factory: 'Release Factory',                     color: '#1f7a3c' },
+  { key: 'retain_event',                        label: 'Release Outcome (red)',            factory: 'Release Factory',                     color: '#c0392b' },
+  { key: 'investigate_event',                   label: 'Release Outcome (amber)',          factory: 'Release Factory',                     color: '#e6820a' },
   { key: 'agent_retain_event',                  label: 'Retain Post Inv.',                 factory: 'Investigation Agent Worker',          color: '#c0392b' },
   { key: 'agent_release_event',                 label: 'Investigation Clearance',          factory: 'Investigation Agent Worker',          color: '#1f7a3c' },
   { key: 'release_after_investigation_event',   label: 'Release Post Inv.',                factory: 'Release After Investigation Factory', color: '#2e7d32' },
