@@ -1028,11 +1028,11 @@ function PipelineDiagram({ pipeline }) {
   const yRT = OV_H + LGAP + RT_H / 2
   const yINV = OV_H + LGAP + RT_H + LGAP + INV_H / 2
 
-  // Shared width for the three top zones
-  const ZONE_W = 380
-  // Shared width for ALL factories inside the zones (Sales Order Validation,
-  // RT Risk As. 1, RT Risk As. 2, Goods Transport) so they're visually uniform.
-  const FACTORY_W = 340
+  // Zone width wraps the widest factory + fan-out + padding
+  const ZONE_W = 280
+  // Factory widths sized to their text content — no wider than needed.
+  const OV_FACTORY_W = 220    // "Sales Order Validation"
+  const RT_FACTORY_W = 180    // "RT Risk As. 1/2"
   // Shared width for the three row-1 output brokers
   // (Sales Order Validation / RT Risk Outcome)
   const OUT_BROKER_W = 170
@@ -1123,7 +1123,7 @@ function PipelineDiagram({ pipeline }) {
                 <Zone label="Sales Order Validation" style={{ width: ZONE_W, boxSizing: 'border-box' }}>
                   <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
                     <FactoryNode icon="✅" label="Sales Order Validation"
-                      description="3–5 s · unlimited concurrency" sm width={FACTORY_W}
+                      description="3–5 s · unlimited concurrency" sm width={OV_FACTORY_W}
                       tooltip="Sales Order Validation Factory — async per-order task with uniform 3–5 s delay. Emits ORDER_VALIDATION events." />
                   </div>
                 </Zone>
@@ -1142,11 +1142,11 @@ function PipelineDiagram({ pipeline }) {
                     {/* Stacked RT1 + RT2 engine factories — same width as other factories */}
                     <div style={{ display: 'flex', flexDirection: 'column', gap: RT_ROW_GAP }}>
                       <div style={{ height: RT_ROW_H, display: 'flex', alignItems: 'center' }}>
-                        <FactoryNode icon="⚖️" label="RT Risk As. 1" description="VAT ratio deviation" sm width={FACTORY_W - 30}
+                        <FactoryNode icon="⚖️" label="RT Risk As. 1" description="VAT ratio deviation" sm width={RT_FACTORY_W}
                           tooltip="RT Risk Assessment 1 — flags transactions whose VAT-to-value ratio deviates from the supplier's historical baseline. Publishes to the unified RT Risk Outcome broker." />
                       </div>
                       <div style={{ height: RT_ROW_H, display: 'flex', alignItems: 'center' }}>
-                        <FactoryNode icon="🔍" label="RT Risk As. 2" description="Watchlist lookup" sm width={FACTORY_W - 30}
+                        <FactoryNode icon="🔍" label="RT Risk As. 2" description="Watchlist lookup" sm width={RT_FACTORY_W}
                           tooltip="RT Risk Assessment 2 — flags transactions whose seller or route appears on the active watchlist. Publishes to the unified RT Risk Outcome broker." />
                       </div>
                     </div>
