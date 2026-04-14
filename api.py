@@ -1185,9 +1185,14 @@ async def _data_hub_writer() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    from lib.database import init_european_custom_db, init_simulation_db
+    from lib.database import init_european_custom_db, init_simulation_db, reset_simulation_db
     init_european_custom_db()
     init_simulation_db()
+    # Auto-reset: clear the fired flags so the simulation is always
+    # ready to run on startup. Without this, a previous completed run
+    # leaves all transactions marked fired=1 and the simulation loop
+    # has nothing to replay after a restart.
+    reset_simulation_db()
 
     asyncio.create_task(simulation_loop(_fire_transactions))
     asyncio.create_task(_RT_risk_monitoring_1_factory())
