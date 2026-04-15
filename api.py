@@ -1224,13 +1224,13 @@ def api_rg_case_detail(case_id: str):
     return case
 
 
-def _publish_investigation_outcome(case_id: str, outcome: str) -> None:
+async def _publish_investigation_outcome(case_id: str, outcome: str) -> None:
     """Emit the C&T factory's exit event when a case is closed."""
     from lib.database import get_case_hydrated
     case = get_case_hydrated(case_id)
     if not case:
         return
-    asyncio.create_task(broker.publish(INVESTIGATION_OUTCOME, {
+    await broker.publish(INVESTIGATION_OUTCOME, {
         "Case_ID":                  case_id,
         "Sales_Order_Business_Key": case.get("Sales_Order_Business_Key"),
         "Sales_Order_ID":           case.get("Sales_Order_ID"),
@@ -1244,7 +1244,7 @@ def _publish_investigation_outcome(case_id: str, outcome: str) -> None:
         "Recommended_VAT_Fee":              case.get("Recommended_VAT_Fee"),
         "closed_by":                case.get("Updated_by"),
         "closed_at":                case.get("Update_time"),
-    }))
+    })
 
 
 def _emit_case_updated_sse(case_id: str, action: str) -> None:
@@ -1255,7 +1255,7 @@ def _emit_case_updated_sse(case_id: str, action: str) -> None:
 
 
 @app.post("/api/rg/cases/{case_id}/customs-action")
-def api_rg_customs_action(case_id: str, body: dict):
+async def api_rg_customs_action(case_id: str, body: dict):
     """
     Customs officer action on a case.
     body: {action: "tax_review"|"retainment"|"release"|"input_requested",
@@ -1303,7 +1303,7 @@ def api_rg_customs_action(case_id: str, body: dict):
 
     _emit_case_updated_sse(case_id, action)
     if action in ("retainment", "release"):
-        _publish_investigation_outcome(
+        await _publish_investigation_outcome(
             case_id, "retained" if action == "retainment" else "released"
         )
     return {"ok": True}
@@ -1361,7 +1361,7 @@ def api_rg_tax_action(case_id: str, body: dict):
 
 
 @app.post("/api/rg/cases/{case_id}/final-decision")
-def api_rg_final_decision(case_id: str, body: dict):
+async def api_rg_final_decision(case_id: str, body: dict):
     """
     Final investigation decision.
     body: {decision: "released"|"retained"|"refused", officer?: str}
@@ -1395,7 +1395,7 @@ def api_rg_final_decision(case_id: str, body: dict):
     update_case(case_id, updates)
 
     _emit_case_updated_sse(case_id, f"final_{decision}")
-    _publish_investigation_outcome(case_id, decision)
+    await _publish_investigation_outcome(case_id, decision)
     return {"ok": True}
 
 
