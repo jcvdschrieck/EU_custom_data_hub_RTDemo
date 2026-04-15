@@ -1099,7 +1099,7 @@ function PipelineDiagram({ pipeline }) {
               With center alignment the LEFT side would shift downward by
               (Heff - ROW1_H) / 2 and break alignment with MiddleSection's absolute
               children. */}
-          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 0, position: 'relative' }}>
 
             {/* Entry Broker — centered at the midpoint between the two fan-out
                 targets (yOV and yRT) so it sits visually between both arrows. */}
@@ -1243,34 +1243,51 @@ function PipelineDiagram({ pipeline }) {
               </div>
             </div>
 
-            {/* Subscription annotations — back-references that can't be drawn
-                as inline arrows because they loop back to earlier components.
-                Shown as small dashed-border labels below each target. */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: LGAP, marginLeft: -8 }}>
-              <div style={{ height: OV_H, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end' }}>
-                <div style={{ fontSize: 8, color: '#6366f1', fontWeight: 600,
-                              border: '1px dashed #6366f1', borderRadius: 4,
-                              padding: '1px 5px', textAlign: 'center', whiteSpace: 'nowrap' }}
-                     title="C&T Risk Management also subscribes to Sales Order Event">
-                  ← Sales Order Event
+            {/* Return arrow: Investigation Outcome → DB Store Factory.
+                Vertical arrow connecting the two rows on the right side. */}
+            {(() => {
+              const arrowH = OV_H / 2 + LGAP + RT_H / 2
+              return (
+                <div style={{ marginLeft: 6, display: 'flex', alignItems: 'center', height: ROW1_H,
+                              paddingTop: yOV }}>
+                  <svg width="28" height={arrowH} style={{ overflow: 'visible' }}>
+                    <line x1="14" y1="0" x2="14" y2={arrowH - 8}
+                          stroke="#868e96" strokeWidth="1.5" />
+                    <polygon points={`8,${arrowH - 8} 20,${arrowH - 8} 14,${arrowH}`}
+                             fill="#868e96" />
+                    <text x="3" y={arrowH / 2} fontSize="7" fill="#868e96"
+                          fontWeight="600" writingMode="tb">
+                      Inv→DB
+                    </text>
+                  </svg>
                 </div>
-              </div>
-              <div style={{ height: RT_H, display: 'flex', flexDirection: 'column', gap: 4, justifyContent: 'center' }}>
-                <div style={{ fontSize: 8, color: '#868e96', fontWeight: 600,
-                              border: '1px dashed #868e96', borderRadius: 4,
-                              padding: '1px 5px', textAlign: 'center', whiteSpace: 'nowrap' }}
-                     title="DB Store Factory also subscribes to Investigation Outcome">
-                  ← Investigation Outcome
-                </div>
-                <div style={{ fontSize: 8, color: '#868e96', fontWeight: 600,
-                              border: '1px dashed #868e96', borderRadius: 4,
-                              padding: '1px 5px', textAlign: 'center', whiteSpace: 'nowrap' }}
-                     title="DB Store Factory also subscribes to Sales Order Event">
-                  ← Sales Order Event
-                </div>
-              </div>
-            </div>
+              )
+            })()}
 
+          </div>
+
+          {/* Sales Order Event subscription arrows — dashed horizontal lines
+              running below the main flow from the Entry broker area to the
+              C&T Risk Management and DB Store Factory boxes. */}
+          <div style={{ marginTop: 8, padding: '4px 0', borderTop: '1px dashed #e0e0e0' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginLeft: 4 }}>
+              <svg width="16" height="12">
+                <line x1="0" y1="6" x2="12" y2="6" stroke="#adb5bd" strokeWidth="1.5" strokeDasharray="4 2" />
+                <polygon points="10,2 16,6 10,10" fill="#adb5bd" />
+              </svg>
+              <span style={{ fontSize: 9, color: '#868e96', fontWeight: 600 }}>
+                Sales Order Event also subscribes to: C&T Risk Management + DB Store Factory
+              </span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginLeft: 4, marginTop: 2 }}>
+              <svg width="16" height="12">
+                <line x1="0" y1="6" x2="12" y2="6" stroke="#adb5bd" strokeWidth="1.5" strokeDasharray="4 2" />
+                <polygon points="10,2 16,6 10,10" fill="#adb5bd" />
+              </svg>
+              <span style={{ fontSize: 9, color: '#868e96', fontWeight: 600 }}>
+                Investigation Outcome also feeds into DB Store Factory (vertical arrow on far right)
+              </span>
+            </div>
           </div>
 
         </div>
