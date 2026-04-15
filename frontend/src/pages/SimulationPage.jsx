@@ -1287,54 +1287,58 @@ function PipelineDiagram({ pipeline }) {
             </div>
 
             {/* SVG overlay: subscription arrows that loop back to earlier components */}
-            {overlayPaths && (
-              <svg style={{ position: 'absolute', left: 0, top: 0, width: '100%', height: '100%',
-                            pointerEvents: 'none', overflow: 'visible' }}>
-                {/* 1. Sales Order Event → C&T Risk Management (L-shape: up, right, down) */}
-                <polyline
-                  points={`${overlayPaths.ex},${overlayPaths.ey} ${overlayPaths.ex},-16 ${overlayPaths.ctx},-16 ${overlayPaths.ctx},${overlayPaths.cty}`}
-                  stroke="#6366f1" strokeWidth="1.5" strokeDasharray="6 3" fill="none" />
-                <polygon points={`${overlayPaths.ctx - 4},${overlayPaths.cty - 2} ${overlayPaths.ctx + 4},${overlayPaths.cty - 2} ${overlayPaths.ctx},${overlayPaths.cty + 4}`}
-                         fill="#6366f1" />
-                <text x={(overlayPaths.ex + overlayPaths.ctx) / 2} y={-22}
-                      textAnchor="middle" fontSize="8" fill="#6366f1" fontWeight="600">
-                  Sales Order Event → C&amp;T Risk Management
-                </text>
+            {overlayPaths && (() => {
+              const blue = '#003399'
+              // Offsets to avoid overlapping with pipeline boxes
+              const topRunwayY = -30       // how far above the pipeline the top arrow runs
+              const bottomRunwayY = overlayPaths.dby + 60  // how far below for the bottom arrow
+              const rightOffsetX = 35      // how far right of Inv Outcome for the right arrow
+              return (
+                <svg style={{ position: 'absolute', left: 0, top: 0, width: '100%', height: '100%',
+                              pointerEvents: 'none', overflow: 'visible' }}>
+                  {/* 1. Sales Order Event → C&T Risk Management (L-shape: up, right, down) */}
+                  <polyline
+                    points={`${overlayPaths.ex},${overlayPaths.ey} ${overlayPaths.ex},${topRunwayY} ${overlayPaths.ctx},${topRunwayY} ${overlayPaths.ctx},${overlayPaths.cty}`}
+                    stroke={blue} strokeWidth="1.5" fill="none" />
+                  <polygon points={`${overlayPaths.ctx - 4},${overlayPaths.cty - 2} ${overlayPaths.ctx + 4},${overlayPaths.cty - 2} ${overlayPaths.ctx},${overlayPaths.cty + 4}`}
+                           fill={blue} />
+                  <text x={(overlayPaths.ex + overlayPaths.ctx) / 2} y={topRunwayY - 6}
+                        textAnchor="middle" fontSize="8" fill={blue} fontWeight="600">
+                    Sales Order Event → C&amp;T Risk Management
+                  </text>
 
-                {/* 2. Investigation Outcome → DB Store Factory (vertical right side) */}
-                {overlayPaths.ix > 0 && (
-                  <>
-                    <polyline
-                      points={`${overlayPaths.ix + 4},${overlayPaths.iy} ${overlayPaths.ix + 20},${overlayPaths.iy} ${overlayPaths.ix + 20},${overlayPaths.dby} ${overlayPaths.dbx},${overlayPaths.dby}`}
-                      stroke="#868e96" strokeWidth="1.5" fill="none" />
-                    <polygon points={`${overlayPaths.dbx + 6},${overlayPaths.dby - 4} ${overlayPaths.dbx + 6},${overlayPaths.dby + 4} ${overlayPaths.dbx},${overlayPaths.dby}`}
-                             fill="#868e96" />
-                    <text x={overlayPaths.ix + 24} y={(overlayPaths.iy + overlayPaths.dby) / 2 + 3}
-                          fontSize="7" fill="#868e96" fontWeight="600" writingMode="tb">
-                      Inv Outcome → DB Store
-                    </text>
-                  </>
-                )}
-
-                {/* 3. Sales Order Event → DB Store Factory (L-shape: down, right, up) */}
-                {overlayPaths.dbx > 0 && (() => {
-                  const belowY = overlayPaths.dby + 40
-                  return (
+                  {/* 2. Investigation Outcome → DB Store Factory (U-shape on the right) */}
+                  {overlayPaths.ix > 0 && (
                     <>
                       <polyline
-                        points={`${overlayPaths.ex},${overlayPaths.ey} ${overlayPaths.ex},${belowY} ${overlayPaths.dbx + 10},${belowY} ${overlayPaths.dbx + 10},${overlayPaths.dby + 16}`}
-                        stroke="#868e96" strokeWidth="1.5" strokeDasharray="6 3" fill="none" />
+                        points={`${overlayPaths.ix + 4},${overlayPaths.iy} ${overlayPaths.ix + rightOffsetX},${overlayPaths.iy} ${overlayPaths.ix + rightOffsetX},${overlayPaths.dby} ${overlayPaths.dbx},${overlayPaths.dby}`}
+                        stroke={blue} strokeWidth="1.5" fill="none" />
+                      <polygon points={`${overlayPaths.dbx + 6},${overlayPaths.dby - 4} ${overlayPaths.dbx + 6},${overlayPaths.dby + 4} ${overlayPaths.dbx},${overlayPaths.dby}`}
+                               fill={blue} />
+                      <text x={overlayPaths.ix + rightOffsetX + 4} y={(overlayPaths.iy + overlayPaths.dby) / 2 + 3}
+                            fontSize="7" fill={blue} fontWeight="600" writingMode="tb">
+                        Inv Outcome → DB Store
+                      </text>
+                    </>
+                  )}
+
+                  {/* 3. Sales Order Event → DB Store Factory (L-shape: down, right, up) */}
+                  {overlayPaths.dbx > 0 && (
+                    <>
+                      <polyline
+                        points={`${overlayPaths.ex - 10},${overlayPaths.ey} ${overlayPaths.ex - 10},${bottomRunwayY} ${overlayPaths.dbx + 10},${bottomRunwayY} ${overlayPaths.dbx + 10},${overlayPaths.dby + 16}`}
+                        stroke={blue} strokeWidth="1.5" fill="none" />
                       <polygon points={`${overlayPaths.dbx + 6},${overlayPaths.dby + 18} ${overlayPaths.dbx + 14},${overlayPaths.dby + 18} ${overlayPaths.dbx + 10},${overlayPaths.dby + 12}`}
-                               fill="#868e96" />
-                      <text x={(overlayPaths.ex + overlayPaths.dbx) / 2} y={belowY - 4}
-                            textAnchor="middle" fontSize="8" fill="#868e96" fontWeight="600">
+                               fill={blue} />
+                      <text x={(overlayPaths.ex + overlayPaths.dbx) / 2} y={bottomRunwayY - 4}
+                            textAnchor="middle" fontSize="8" fill={blue} fontWeight="600">
                         Sales Order Event → DB Store Factory
                       </text>
                     </>
-                  )
-                })()}
-              </svg>
-            )}
+                  )}
+                </svg>
+              )
+            })()}
 
           </div>
 
