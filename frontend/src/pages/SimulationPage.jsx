@@ -1211,10 +1211,11 @@ function PipelineDiagram({ pipeline }) {
             {/* Fan-out: Assessment Outcome → C&T Risk Management (top) + DB Store (bottom) */}
             <FanOutSVG height={ROW1_H} targetYs={[yOV, yRT]} width={48} />
 
-            {/* Subscribers: C&T Risk Management (top) + DB Store Factory (bottom) */}
+            {/* Subscribers: C&T Risk Management (top, purple) + DB Store Factory (bottom) */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: LGAP }}>
               <div style={{ height: OV_H, display: 'flex', alignItems: 'center' }}>
                 <FactoryNode icon="🏛️" label="C&T Risk Management" description="acts on retain + investigate" sm
+                  accent="#6366f1"
                   tooltip="Custom & Tax Risk Management System — subscribes to Assessment Outcome (retain + investigate routes) and Sales Order Event. Produces Investigation Outcome events." />
               </div>
               <div style={{ height: RT_H, display: 'flex', alignItems: 'center' }}>
@@ -1242,6 +1243,34 @@ function PipelineDiagram({ pipeline }) {
               </div>
             </div>
 
+            {/* Subscription annotations — back-references that can't be drawn
+                as inline arrows because they loop back to earlier components.
+                Shown as small dashed-border labels below each target. */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: LGAP, marginLeft: -8 }}>
+              <div style={{ height: OV_H, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end' }}>
+                <div style={{ fontSize: 8, color: '#6366f1', fontWeight: 600,
+                              border: '1px dashed #6366f1', borderRadius: 4,
+                              padding: '1px 5px', textAlign: 'center', whiteSpace: 'nowrap' }}
+                     title="C&T Risk Management also subscribes to Sales Order Event">
+                  ← Sales Order Event
+                </div>
+              </div>
+              <div style={{ height: RT_H, display: 'flex', flexDirection: 'column', gap: 4, justifyContent: 'center' }}>
+                <div style={{ fontSize: 8, color: '#868e96', fontWeight: 600,
+                              border: '1px dashed #868e96', borderRadius: 4,
+                              padding: '1px 5px', textAlign: 'center', whiteSpace: 'nowrap' }}
+                     title="DB Store Factory also subscribes to Investigation Outcome">
+                  ← Investigation Outcome
+                </div>
+                <div style={{ fontSize: 8, color: '#868e96', fontWeight: 600,
+                              border: '1px dashed #868e96', borderRadius: 4,
+                              padding: '1px 5px', textAlign: 'center', whiteSpace: 'nowrap' }}
+                     title="DB Store Factory also subscribes to Sales Order Event">
+                  ← Sales Order Event
+                </div>
+              </div>
+            </div>
+
           </div>
 
         </div>
@@ -1252,24 +1281,20 @@ function PipelineDiagram({ pipeline }) {
         <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-muted)' }}>Legend:</span>
 
         {/* Element types */}
-        <LegendItem color="var(--eu-blue)" bg="var(--eu-blue-light)" label="Broker" />
+        <LegendItem color="var(--eu-blue)" bg="var(--eu-blue-light)" label="Event Broker" />
         <LegendItem color="#868e96" bg="#f8f9fa" label="Factory" />
-        <LegendItem color="#868e96" bg="#eceff1" label="Queue (FIFO)" dashed />
-        <LegendItem color="#0284c7" bg="#e0f2fe" label="Custom Data Hub (MongoDB)" />
+        <LegendItem color="#6366f1" bg="#6366f112" label="Application (C&T Risk Mgmt)" />
+        <LegendItem color="#0284c7" bg="#e0f2fe" label="Custom Data Hub (database)" />
         <LegendItem color="var(--text-muted)" bg="#ffffff" label="Processing zone" dashed />
 
-        {/* Sub-box accent colors carried by the broker inner sub-boxes */}
-        <LegendItem color="#1f7a3c" bg="#e8f5e9" label="Release (automated + post inv.)" />
-        <LegendItem color="#c0392b" bg="#fde8e8" label="Retain (automated + post inv.)" />
-        <LegendItem color="#e6820a" bg="#fff3e0" label="Investigation notification" />
-        {/* Revenue Guardian legend removed */}
-        {/* Connector / arrow coding — all line strokes are neutral grey;
-            only the dashed style remains as a semantic differentiator. */}
-        <LegendItem color="#adb5bd" bg="#f8f9fa" label="Goods Transport / Arrival (dashed)" dashed />
+        {/* Score badges */}
+        <LegendItem color="#1f7a3c" bg="#e8f5e9" label="Release (green)" />
+        <LegendItem color="#e6820a" bg="#fff3e0" label="Investigate (amber)" />
+        <LegendItem color="#c0392b" bg="#fde8e8" label="Retain (red)" />
 
         <div style={{ marginLeft: 8, fontSize: 11, color: 'var(--text-muted)' }}>
-          Brokers all share the blue outer border — the inner sub-box carries the differentiating color.
-          Counts reflect JSON events persisted to <code>data/events/</code> since last reset.
+          Dashed labels indicate additional subscriptions (back-references to earlier brokers).
+          Counts reflect events persisted since last reset.
         </div>
       </div>
     </div>
