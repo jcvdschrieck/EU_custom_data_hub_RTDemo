@@ -786,11 +786,30 @@ function MiddleSection({ ev, rf, customs, tax, taxRunning, stored, newStored, H,
           display: 'flex', flexDirection: 'column', alignItems: 'center',
           gap: 6, height: 'calc(100% - 32px)', justifyContent: 'center',
         }}>
-          <FactoryNode icon="💾" label="DB Store Factory" description="Insert + flag suspicious" sm
-            tooltip="DB Store Factory — subscribes to Sales Order Release, Release Post Inv. and Retain Post Inv. Inserts into european_custom.db and pushes to the live queue / SSE stream." />
+          <FactoryNode icon="💾" label="DB Store Factory" description="emits CUSTOM_OUTCOME" sm
+            tooltip="DB Store Factory — subscribes to Assessment Outcome (release route) and Investigation Outcome. Emits one CUSTOM_OUTCOME event per completed order; persistence to the legacy hub is deactivated." />
           <Arrow down />
-          <DBSinkNode count={stored} newCount={newStored}
-            tooltip={`Custom Data Hub — ${fmt(stored)} total records (includes historical seed). ${fmt(newStored)} new records stored since the last simulation reset.`} />
+          <div style={{
+            border: '2px solid #0d6efd', borderRadius: 8, padding: '10px 12px',
+            background: '#f0f6ff', minWidth: 200,
+          }} title={`Custom Outcome — ${customTotal} terminal events.`}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: '#0d6efd', marginBottom: 4 }}>📤 Custom Outcome</div>
+            <div style={{ fontSize: 10, color: '#495057', marginBottom: 6 }}>{fmt(customTotal)} total</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 3, fontSize: 10 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                <span style={{ color: '#198754' }}>● automated_release</span>
+                <span style={{ fontWeight: 600 }}>{fmt(customStatus.automated_release || 0)}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                <span style={{ color: '#0d6efd' }}>● custom_release</span>
+                <span style={{ fontWeight: 600 }}>{fmt(customStatus.custom_release || 0)}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                <span style={{ color: '#dc3545' }}>● custom_retain</span>
+                <span style={{ fontWeight: 600 }}>{fmt(customStatus.custom_retain || 0)}</span>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -1388,7 +1407,7 @@ function PipelineDiagram({ pipeline }) {
         <LegendItem color="var(--eu-blue)" bg="var(--eu-blue-light)" label="Event Broker" />
         <LegendItem color="#868e96" bg="#f8f9fa" label="Factory" />
         <LegendItem color="#6366f1" bg="#6366f112" label="Application (C&T Risk Mgmt)" />
-        <LegendItem color="#0284c7" bg="#e0f2fe" label="Custom Data Hub (database)" />
+        <LegendItem color="#0d6efd" bg="#f0f6ff" label="Custom Outcome (terminal broker)" />
         <LegendItem color="var(--text-muted)" bg="#ffffff" label="Processing zone" dashed />
 
         {/* Score badges */}
