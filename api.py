@@ -164,6 +164,23 @@ _live_queue:          deque[dict]        = deque(maxlen=QUEUE_SIZE)
 _live_alarms:         list[dict]         = []
 _sse_queues:          set[asyncio.Queue] = set()   # live-transaction stream subscribers
 _sim_state_sse:       set[asyncio.Queue] = set()   # pipeline + status stream subscribers
+_rg_case_sse:         set[asyncio.Queue] = set()   # Revenue Guardian case stream subscribers
+
+
+def _push_rg_case_sse(payload: dict) -> None:
+    """Push a case event to all connected Revenue Guardian SSE clients."""
+    if not _rg_case_sse:
+        return
+    import json as _json
+    data = _json.dumps(payload)
+    dead: set[asyncio.Queue] = set()
+    for q in _rg_case_sse:
+        try:
+            q.put_nowait(data)
+        except asyncio.QueueFull:
+            dead.add(q)
+    _rg_case_sse.difference_update(dead)
+
 
 # ── Two-entity workflow queues ───────────────────────────────────────────────
 #
@@ -646,33 +663,72 @@ async def _ct_risk_management_factory() -> None:
     """
     Custom & Tax Risk Management System.
 
-    Subscribes to ASSESSMENT_OUTCOME (retain + investigate routes) and
-    SALES_ORDER_EVENT. For retain and investigate events, produces an
-    INVESTIGATION_OUTCOME event. Currently echoes the assessment input
-    (placeholder for future investigation logic).
+    Subscribes to ASSESSMENT_OUTCOME (retain + investigate routes).
+    For each retain/investigate event:
+      1. Creates a Sales_Order_Case row in investigation.db
+      2. Pushes an SSE notification to Revenue Guardian clients
+      3. Produces an INVESTIGATION_OUTCOME event for the DB Store Factory
     """
-    async def _drain_assessment() -> None:
-        q = broker.subscribe(ASSESSMENT_OUTCOME)
-        while True:
-            msg = await q.get()
-            route = msg.get("route")
-            if route not in ("retain", "investigate"):
-                continue
-            # Produce investigation outcome — passes through all data model
-            # fields from the assessment + adds investigation metadata.
-            await broker.publish(INVESTIGATION_OUTCOME, {
-                **msg,  # all assessment fields pass through
-                "investigation":  "auto",   # placeholder for future logic
-                "outcome":        route,     # echoes assessment for now
-            })
+    from lib.database import upsert_sales_order_case
+    import uuid as _uuid
 
-    async def _drain_sales_order() -> None:
-        # Subscribe to Sales Order Event for future enrichment
-        q = broker.subscribe(SALES_ORDER_EVENT)
-        while True:
-            await q.get()  # consumed but not acted on yet (placeholder)
+    q = broker.subscribe(ASSESSMENT_OUTCOME)
+    while True:
+        msg = await q.get()
+        route = msg.get("route")
+        if route not in ("retain", "investigate"):
+            continue
 
-    await asyncio.gather(_drain_assessment(), _drain_sales_order())
+        now_iso = datetime.now(timezone.utc).isoformat()
+        bk = msg.get("Sales_Order_Business_Key", "")
+        case_id = f"CASE-{_uuid.uuid4().hex[:12].upper()}"
+
+        # Derive VAT problem type from risk engine flags
+        engines = msg.get("engines", {})
+        problem_type = "Risk Pattern"
+        if engines.get("vat_ratio"):
+            problem_type = "VAT Rate Deviation"
+        if engines.get("watchlist"):
+            problem_type = "Watchlist Match" if not engines.get("vat_ratio") else "VAT Rate Deviation + Watchlist Match"
+
+        # Build a fully populated case row from the ASSESSMENT_OUTCOME
+        # (which carries all Sales_Order + risk fields)
+        case_row = {
+            "Case_ID":                          case_id,
+            "Sales_Order_Business_Key":         bk,
+            "Status":                           "New",
+            "VAT_Problem_Type":                 problem_type,
+            "Recommended_Product_Value":        None,
+            "Recommended_VAT_Product_Category": None,
+            "Recommended_VAT_Rate":             None,
+            "Recommended_VAT_Fee":              None,
+            "AI_Analysis":                      None,
+            "AI_Confidence":                    None,
+            "VAT_Gap_Fee":                      None,
+            "Evaluation_by":                    None,
+            "Proposed_Action_Tax":              None,
+            "Proposed_Action_Customs":          None,
+            "Communication":                    "[]",
+            "Additional_Evidence":              None,
+            "Update_time":                      now_iso,
+            "Updated_by":                       "system",
+        }
+        upsert_sales_order_case(case_row)
+
+        # Notify Revenue Guardian SSE subscribers
+        _push_rg_case_sse({
+            "event": "new_case",
+            "case_id": case_id,
+            "business_key": bk,
+        })
+
+        # Produce investigation outcome for the DB Store Factory
+        await broker.publish(INVESTIGATION_OUTCOME, {
+            **msg,
+            "investigation": "auto",
+            "outcome":       route,
+            "Case_ID":       case_id,
+        })
 
 
 # ── (Revenue Guardian two-entity workflow removed — replaced by
@@ -1099,7 +1155,224 @@ def api_ireland_case(transaction_id: str):
 
 
 
-# ── (Revenue Guardian API endpoints removed) ──
+# ── Revenue Guardian: REST + SSE endpoints ────────────────────────────────────
+
+@app.get("/api/rg/cases")
+def api_rg_cases(status: str | None = Query(None), limit: int = Query(200, ge=1, le=1000)):
+    """List all cases for Revenue Guardian. Optionally filter by Status."""
+    from lib.database import get_all_cases
+    return {"items": get_all_cases(status=status, limit=limit)}
+
+
+@app.get("/api/rg/cases/stream")
+async def api_rg_cases_stream(request: Request):
+    """SSE stream: pushes case events (new_case, case_updated) to Revenue Guardian."""
+    q: asyncio.Queue = asyncio.Queue(maxsize=100)
+    _rg_case_sse.add(q)
+    async def _gen():
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    data = await asyncio.wait_for(q.get(), timeout=15)
+                    yield f"data: {data}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+        finally:
+            _rg_case_sse.discard(q)
+    return StreamingResponse(_gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.get("/api/rg/cases/{case_id}")
+def api_rg_case_detail(case_id: str):
+    """Single case detail."""
+    from lib.database import get_case_by_id
+    case = get_case_by_id(case_id)
+    if not case:
+        return JSONResponse(status_code=404, content={"detail": "Case not found"})
+    return case
+
+
+@app.post("/api/rg/cases/{case_id}/customs-action")
+def api_rg_customs_action(case_id: str, body: dict):
+    """
+    Customs officer action on a case.
+    body: {action: "tax_review"|"retainment"|"release"|"input_requested",
+           comment?: str, officer?: str, risk_breakdown?: dict}
+    """
+    import json as _json
+    from lib.database import get_case_by_id, update_case
+
+    case = get_case_by_id(case_id)
+    if not case:
+        return JSONResponse(status_code=404, content={"detail": "Case not found"})
+
+    action = body.get("action", "")
+    comment = body.get("comment", "")
+    officer = body.get("officer", "Customs Officer")
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+
+    status_map = {
+        "tax_review":       "Under Review by Tax",
+        "retainment":       "Closed",
+        "release":          "Closed",
+        "input_requested":  "Requested Input by Third Party",
+    }
+    new_status = status_map.get(action)
+    if not new_status:
+        return JSONResponse(status_code=400, content={"detail": f"Unknown action: {action}"})
+
+    # Build updates
+    updates: dict = {
+        "Status":     new_status,
+        "Update_time": now_iso,
+        "Updated_by":  officer,
+    }
+    if action in ("retainment", "release"):
+        updates["Proposed_Action_Customs"] = "retain" if action == "retainment" else "release"
+
+    # Append to communication log
+    comm = case.get("Communication", [])
+    if not isinstance(comm, list):
+        comm = []
+    comm.append({"date": now_iso, "from": "Customs Authority", "action": action, "message": comment})
+    updates["Communication"] = comm
+
+    update_case(case_id, updates)
+
+    _push_rg_case_sse({"event": "case_updated", "case_id": case_id, "action": action})
+    return {"ok": True}
+
+
+@app.post("/api/rg/cases/{case_id}/tax-action")
+def api_rg_tax_action(case_id: str, body: dict):
+    """
+    Tax officer action on a case.
+    body: {action: "risk_confirmed"|"no_limited_risk"|"input_requested",
+           comment?: str, officer?: str, vat_category?: str}
+    """
+    import json as _json
+    from lib.database import get_case_by_id, update_case
+
+    case = get_case_by_id(case_id)
+    if not case:
+        return JSONResponse(status_code=404, content={"detail": "Case not found"})
+
+    action = body.get("action", "")
+    comment = body.get("comment", "")
+    officer = body.get("officer", "Tax Officer")
+    vat_category = body.get("vat_category")
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+
+    if action not in ("risk_confirmed", "no_limited_risk", "input_requested"):
+        return JSONResponse(status_code=400, content={"detail": f"Unknown action: {action}"})
+
+    updates: dict = {
+        "Proposed_Action_Tax": action,
+        "Update_time": now_iso,
+        "Updated_by": officer,
+    }
+    if vat_category:
+        updates["Recommended_VAT_Product_Category"] = vat_category
+
+    # Propagate status back for customs visibility
+    if action == "risk_confirmed":
+        updates["Status"] = "Under Review by Customs"
+    elif action == "no_limited_risk":
+        updates["Status"] = "Under Review by Customs"
+    elif action == "input_requested":
+        updates["Status"] = "Requested Input by Third Party"
+
+    comm = case.get("Communication", [])
+    if not isinstance(comm, list):
+        comm = []
+    comm.append({"date": now_iso, "from": "Tax Authority", "action": action, "message": comment})
+    updates["Communication"] = comm
+
+    update_case(case_id, updates)
+
+    _push_rg_case_sse({"event": "case_updated", "case_id": case_id, "action": action})
+    return {"ok": True}
+
+
+@app.post("/api/rg/cases/{case_id}/final-decision")
+def api_rg_final_decision(case_id: str, body: dict):
+    """
+    Final investigation decision.
+    body: {decision: "released"|"retained"|"refused", officer?: str}
+    """
+    from lib.database import get_case_by_id, update_case
+
+    case = get_case_by_id(case_id)
+    if not case:
+        return JSONResponse(status_code=404, content={"detail": "Case not found"})
+
+    decision = body.get("decision", "")
+    officer = body.get("officer", "Senior Officer")
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+
+    if decision not in ("released", "retained", "refused"):
+        return JSONResponse(status_code=400, content={"detail": f"Unknown decision: {decision}"})
+
+    updates: dict = {
+        "Status": "Closed",
+        "Proposed_Action_Customs": {"released": "release", "retained": "retain", "refused": "refuse"}[decision],
+        "Update_time": now_iso,
+        "Updated_by": officer,
+    }
+
+    comm = case.get("Communication", [])
+    if not isinstance(comm, list):
+        comm = []
+    comm.append({"date": now_iso, "from": officer, "action": f"Final decision: {decision}", "message": ""})
+    updates["Communication"] = comm
+
+    update_case(case_id, updates)
+
+    _push_rg_case_sse({"event": "case_updated", "case_id": case_id, "action": f"final_{decision}"})
+    return {"ok": True}
+
+
+@app.post("/api/rg/cases/{case_id}/communication")
+def api_rg_add_communication(case_id: str, body: dict):
+    """
+    Add a communication entry to a case.
+    body: {from: str, action: str, message: str}
+    """
+    from lib.database import get_case_by_id, update_case
+
+    case = get_case_by_id(case_id)
+    if not case:
+        return JSONResponse(status_code=404, content={"detail": "Case not found"})
+
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+    comm = case.get("Communication", [])
+    if not isinstance(comm, list):
+        comm = []
+    comm.append({
+        "date": now_iso,
+        "from": body.get("from", "System"),
+        "action": body.get("action", ""),
+        "message": body.get("message", ""),
+    })
+
+    update_case(case_id, {"Communication": comm, "Update_time": now_iso})
+
+    _push_rg_case_sse({"event": "case_updated", "case_id": case_id, "action": "communication"})
+    return {"ok": True}
+
+
+@app.get("/api/rg/cases/{case_id}/communication")
+def api_rg_get_communication(case_id: str):
+    """Get communication log for a case."""
+    from lib.database import get_case_by_id
+    case = get_case_by_id(case_id)
+    if not case:
+        return JSONResponse(status_code=404, content={"detail": "Case not found"})
+    return case.get("Communication", [])
+
 
 # ── Simulation control ────────────────────────────────────────────────────────
 
@@ -1182,6 +1455,8 @@ def sim_reset():
     state.reset()
     reset_simulation_db()
     reset_alarms()          # removes March+ rows, keeps Sep–Feb history
+    from lib.database import reset_cases
+    reset_cases()           # clear investigation cases
     flush_events()
     # Re-seed historical data if it was wiped (e.g. first run or manual DB delete)
     if historical_transaction_count() == 0:
@@ -1203,6 +1478,7 @@ def sim_reset():
             sse_q.put_nowait("__reset__")
         except asyncio.QueueFull:
             pass
+    _push_rg_case_sse({"event": "reset"})
     return {"ok": True, "status": state.to_dict()}
 
 

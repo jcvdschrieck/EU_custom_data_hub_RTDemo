@@ -901,5 +901,82 @@ def get_ireland_case(transaction_id: str) -> dict | None:
     return result
 
 
+# ── Sales_Order_Case read / update (investigation.db) ────────────────────────
+
+def get_all_cases(status: str | None = None, limit: int = 200) -> list[dict]:
+    """Return Sales_Order_Case rows, optionally filtered by Status."""
+    import json as _json
+    conn = _connect(INVESTIGATION_DB)
+    if status:
+        rows = conn.execute(
+            "SELECT * FROM Sales_Order_Case WHERE Status = ? "
+            "ORDER BY Update_time DESC LIMIT ?", (status, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM Sales_Order_Case ORDER BY Update_time DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    conn.close()
+    result = []
+    for r in rows:
+        d = dict(r)
+        # Parse Communication JSON string into a list
+        try:
+            d["Communication"] = _json.loads(d["Communication"]) if d.get("Communication") else []
+        except Exception:
+            d["Communication"] = []
+        result.append(d)
+    return result
+
+
+def get_case_by_id(case_id: str) -> dict | None:
+    """Single case from investigation.db."""
+    import json as _json
+    conn = _connect(INVESTIGATION_DB)
+    row = conn.execute(
+        "SELECT * FROM Sales_Order_Case WHERE Case_ID = ? LIMIT 1",
+        (case_id,),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    d = dict(row)
+    try:
+        d["Communication"] = _json.loads(d["Communication"]) if d.get("Communication") else []
+    except Exception:
+        d["Communication"] = []
+    return d
+
+
+def update_case(case_id: str, updates: dict) -> bool:
+    """Partial update of a Sales_Order_Case row. Returns True if a row was updated."""
+    import json as _json
+    if not updates:
+        return False
+    # Serialize Communication back to JSON string if present
+    if "Communication" in updates and isinstance(updates["Communication"], list):
+        updates["Communication"] = _json.dumps(updates["Communication"])
+    set_clause = ", ".join(f"{k} = ?" for k in updates)
+    values = list(updates.values()) + [case_id]
+    conn = _connect(INVESTIGATION_DB)
+    with conn:
+        cur = conn.execute(
+            f"UPDATE Sales_Order_Case SET {set_clause} WHERE Case_ID = ?",
+            values,
+        )
+    changed = cur.rowcount > 0
+    conn.close()
+    return changed
+
+
+def reset_cases() -> None:
+    """Clear all Sales_Order_Case rows (called on simulation reset)."""
+    conn = _connect(INVESTIGATION_DB)
+    with conn:
+        conn.execute("DELETE FROM Sales_Order_Case")
+    conn.close()
+
+
 # ── Data hub upserts (3 dark-purple tables) ──────────────────────────────────
 
