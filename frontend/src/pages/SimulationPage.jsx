@@ -1101,19 +1101,17 @@ function PipelineDiagram({ pipeline }) {
               children. */}
           <div style={{ display: 'flex', alignItems: 'flex-start', gap: 0 }}>
 
-            {/* Entry Broker — vertically centered on yRT (= ROW1_H/2) so it
-                lines up with the RT_Score output broker on the same horizontal. */}
-            <div style={{ height: ROW1_H, display: 'flex', alignItems: 'center' }}>
+            {/* Entry Broker — centered at the midpoint between the two fan-out
+                targets (yOV and yRT) so it sits visually between both arrows. */}
+            <div style={{ height: ROW1_H, display: 'flex', alignItems: 'center',
+                          paddingTop: (yOV + yRT) / 2 - ROW1_H / 2 }}>
               <Zone label="Entry">
                 <BrokerNode label="Sales-order Event" topicKey="SALES_ORDER"
                   count={ev.sales_order_event} queueSize={q.sales_order_event} sm />
               </Zone>
             </div>
 
-            {/* FanOut: solid grey → Sales Order Validation + Real-Time Risk
-                Assessment | dashed grey → Goods Transport (the spine segment
-                between Real-Time Risk Assessment and Goods Transport is
-                dashed too) */}
+            {/* FanOut: Entry → Sales Order Validation + Real-Time Risk Assessment */}
             <FanOutSVG height={ROW1_H} targetYs={[yOV, yRT]} width={48} />
 
             {/* Three parallel zones stacked — all at ZONE_W so Row 1 is visually aligned */}
@@ -1185,19 +1183,23 @@ function PipelineDiagram({ pipeline }) {
             </div>
 
             {/* Fan-in: 2 output brokers → Automated Assessment Factory */}
-            <FanInSVG height={ROW1_H} inputYs={[yOV, yRT]} outputY={ROW1_H / 2} width={60} />
+            <FanInSVG height={ROW1_H} inputYs={[yOV, yRT]} outputY={(yOV + yRT) / 2} width={60} />
 
-            {/* Automated Assessment Factory — vertically centered at ROW1_H/2 to line up with the fan-in output */}
-            <div style={{ height: ROW1_H, display: 'flex', alignItems: 'center' }}>
+            {/* Automated Assessment Factory + Arrow + Assessment Outcome — all
+                centered at the midpoint between yOV and yRT */}
+            <div style={{ height: ROW1_H, display: 'flex', alignItems: 'center',
+                          paddingTop: (yOV + yRT) / 2 - ROW1_H / 2 }}>
               <FactoryNode icon="🎯" label="Automated Assessment Factory" description="consolidates risk outcomes" sm
                 tooltip="Automated Assessment Factory — collects risk outcomes from all engines, computes a consolidated score (flagged/total, with confidence), then routes: score < 33% → Release, 33–66% → Investigate, > 66% → Retain. GREEN/AMBER paths wait for validation; RED fires immediately." />
             </div>
 
-            {/* Arrow: Automated Assessment Factory → single Assessment Outcome broker */}
-            <Arrow />
+            <div style={{ height: ROW1_H, display: 'flex', alignItems: 'center',
+                          paddingTop: (yOV + yRT) / 2 - ROW1_H / 2 }}>
+              <Arrow />
+            </div>
 
-            {/* Single unified release outcome broker — carries all three routes */}
-            <div style={{ height: ROW1_H, display: 'flex', alignItems: 'center' }}>
+            <div style={{ height: ROW1_H, display: 'flex', alignItems: 'center',
+                          paddingTop: (yOV + yRT) / 2 - ROW1_H / 2 }}>
               <BrokerNode label="Assessment Outcome" topicKey="ASSESSMENT_OUTCOME"
                 count={(ev.release_event || 0) + (ev.retain_event || 0) + (ev.investigate_event || 0)}
                 sm width={OUT_BROKER_W}
@@ -1206,18 +1208,39 @@ function PipelineDiagram({ pipeline }) {
               </BrokerNode>
             </div>
 
-            {/* Subscribers: DB Store + C&T Risk Management + Investigation Outcome */}
-            <Arrow />
-            <div style={{ display: 'flex', flexDirection: 'column', gap: LGAP, justifyContent: 'center', height: ROW1_H }}>
-              <FactoryNode icon="💾" label="DB Store Factory" description="stores release events + investigation outcomes" sm
-                tooltip="DB Store Factory — subscribes to Assessment Outcome (release route), Investigation Outcome, and Sales Order Event. Persists to european_custom.db." />
-              <FactoryNode icon="🏛️" label="C&T Risk Management" description="acts on retain + investigate" sm
-                tooltip="Custom & Tax Risk Management System — subscribes to Assessment Outcome (retain + investigate routes) and Sales Order Event. Produces Investigation Outcome events." />
+            {/* Fan-out: Assessment Outcome → C&T Risk Management (top) + DB Store (bottom) */}
+            <FanOutSVG height={ROW1_H} targetYs={[yOV, yRT]} width={48} />
+
+            {/* Subscribers: C&T Risk Management (top) + DB Store Factory (bottom) */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: LGAP }}>
+              <div style={{ height: OV_H, display: 'flex', alignItems: 'center' }}>
+                <FactoryNode icon="🏛️" label="C&T Risk Management" description="acts on retain + investigate" sm
+                  tooltip="Custom & Tax Risk Management System — subscribes to Assessment Outcome (retain + investigate routes) and Sales Order Event. Produces Investigation Outcome events." />
+              </div>
+              <div style={{ height: RT_H, display: 'flex', alignItems: 'center' }}>
+                <FactoryNode icon="💾" label="DB Store Factory" description="stores release + investigation outcomes" sm
+                  tooltip="DB Store Factory — subscribes to Assessment Outcome (release route), Investigation Outcome, and Sales Order Event. Persists to european_custom.db." />
+              </div>
             </div>
-            <Arrow />
-            <BrokerNode label="Investigation Outcome" topicKey="INVESTIGATION_OUTCOME"
-              count={ev.investigation_outcome || 0} sm width={OUT_BROKER_W}
-              tooltip="INVESTIGATION_OUTCOME — produced by the C&T Risk Management system for retain and investigate routes. Consumed by the DB Store Factory." />
+
+            {/* Arrows: subscribers → output */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: LGAP }}>
+              <div style={{ height: OV_H, display: 'flex', alignItems: 'center' }}><Arrow /></div>
+              <div style={{ height: RT_H, display: 'flex', alignItems: 'center' }}><Arrow /></div>
+            </div>
+
+            {/* Output: Investigation Outcome (top) + DB cylinder (bottom) */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: LGAP }}>
+              <div style={{ height: OV_H, display: 'flex', alignItems: 'center' }}>
+                <BrokerNode label="Investigation Outcome" topicKey="INVESTIGATION_OUTCOME"
+                  count={ev.investigation_outcome || 0} sm width={OUT_BROKER_W}
+                  tooltip="INVESTIGATION_OUTCOME — produced by the C&T Risk Management system for retain and investigate routes. Consumed by the DB Store Factory." />
+              </div>
+              <div style={{ height: RT_H, display: 'flex', alignItems: 'center' }}>
+                <DBSinkNode count={stored} newCount={newStored}
+                  tooltip={`Custom Data Hub — ${stored ?? '?'} total records. ${newStored ?? 0} new since last reset.`} />
+              </div>
+            </div>
 
           </div>
 
