@@ -1521,6 +1521,7 @@ def sim_reset():
     reset_alarms()          # removes March+ rows, keeps Sep–Feb history
     from lib.database import reset_cases
     reset_cases()           # clear investigation cases
+    _push_rg_case_sse({"event": "cases_reset"})  # notify Revenue Guardian clients
     flush_events()
     # Re-seed historical data if it was wiped (e.g. first run or manual DB delete)
     if historical_transaction_count() == 0:
