@@ -1249,6 +1249,7 @@ async def _agent_worker() -> None:
     global _agent_in_progress
     from lib.database import get_case_hydrated, update_case
     from lib.agent_bridge import analyse_transaction_sync
+    from lib.llm_client import acquire_slot
 
     assert _agent_queue is not None
     while True:
@@ -1262,7 +1263,11 @@ async def _agent_worker() -> None:
             destination = (case.get("Country_Destination") or "").upper()
             if destination == "IE":
                 tx = _build_agent_tx(case)
-                result = await asyncio.to_thread(analyse_transaction_sync, tx)
+                # Acquire the shared LM Studio slot so any future second
+                # agent queues against the same semaphore, not against
+                # LM Studio's invisible internal queue.
+                async with acquire_slot():
+                    result = await asyncio.to_thread(analyse_transaction_sync, tx)
             else:
                 # Out-of-scope country: short-circuit with a fixed delay so
                 # the UI still shows the AI step taking visible time.
