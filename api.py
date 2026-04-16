@@ -689,7 +689,9 @@ async def _ct_risk_management_factory() -> None:
     while True:
         msg = await q.get()
         route = msg.get("route")
-        if route not in ("retain", "investigate"):
+        # Only investigation cases require human review. Automated retain
+        # decisions are now finalised directly by the Exit Process Factory.
+        if route != "investigate":
             continue
 
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -780,17 +782,18 @@ _REMOVED_FLAT_TX_VIEW = True  # marker — old _flat_tx_view and related
 # have been removed. The C&T Risk Management factory replaces them.
 
 
-# ── DB Store Worker (all terminal event topics) ───────────────────────────────
+# ── Exit Process Worker (all terminal event topics) ──────────────────────────
 
 async def _db_store_worker() -> None:
     """
-    DB Store Factory — emits a single terminal CUSTOM_OUTCOME event per
-    completed order. Persistence to the legacy data hub is deactivated.
+    Exit Process Factory — emits a single terminal CUSTOM_OUTCOME event
+    per completed order. Persistence to the legacy data hub is deactivated.
 
     Subscribes to:
-      ASSESSMENT_OUTCOME    — release route → emit CUSTOM_OUTCOME automated_release
-      INVESTIGATION_OUTCOME — outcome released/retained → emit CUSTOM_OUTCOME
-                              custom_release / custom_retain
+      ASSESSMENT_OUTCOME    — release route  → CUSTOM_OUTCOME automated_release
+                            — retain route   → CUSTOM_OUTCOME automated_retain
+      INVESTIGATION_OUTCOME — outcome released/retained →
+                            CUSTOM_OUTCOME custom_release / custom_retain
 
     Each emitted event carries: order_id, timestamp, status.
     """
@@ -805,9 +808,14 @@ async def _db_store_worker() -> None:
         q = broker.subscribe(ASSESSMENT_OUTCOME)
         while True:
             msg = await q.get()
-            if msg.get("route") == "release":
+            route = msg.get("route")
+            if route == "release":
                 order_id = msg.get("Sales_Order_ID") or msg.get("Sales_Order_Business_Key", "")
                 await _emit(order_id, "automated_release")
+            elif route == "retain":
+                # Automated retain: no human review needed — finalise here.
+                order_id = msg.get("Sales_Order_ID") or msg.get("Sales_Order_Business_Key", "")
+                await _emit(order_id, "automated_retain")
 
     async def _drain_investigation() -> None:
         q = broker.subscribe(INVESTIGATION_OUTCOME)
@@ -965,6 +973,7 @@ def _compute_sim_state_snapshot() -> dict:
         },
         "custom_outcome_status": {
             "automated_release": count_field_value(CUSTOM_OUTCOME, "outcome.status", "automated_release"),
+            "automated_retain":  count_field_value(CUSTOM_OUTCOME, "outcome.status", "automated_retain"),
             "custom_release":    count_field_value(CUSTOM_OUTCOME, "outcome.status", "custom_release"),
             "custom_retain":     count_field_value(CUSTOM_OUTCOME, "outcome.status", "custom_retain"),
         },
@@ -1539,6 +1548,7 @@ def sim_pipeline():
         },
         "custom_outcome_status": {
             "automated_release": count_field_value(CUSTOM_OUTCOME, "outcome.status", "automated_release"),
+            "automated_retain":  count_field_value(CUSTOM_OUTCOME, "outcome.status", "automated_retain"),
             "custom_release":    count_field_value(CUSTOM_OUTCOME, "outcome.status", "custom_release"),
             "custom_retain":     count_field_value(CUSTOM_OUTCOME, "outcome.status", "custom_retain"),
         },

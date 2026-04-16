@@ -197,6 +197,7 @@ function CustomOutcomeBreakdown({ s }) {
   return (
     <div style={{ marginTop: 4, paddingTop: 4, borderTop: '1px dashed var(--border-light)', display: 'flex', flexDirection: 'column', gap: 2 }}>
       <Row color="#198754" label="automated_release" n={s.automated_release} />
+      <Row color="#fd7e14" label="automated_retain"  n={s.automated_retain} />
       <Row color="#0d6efd" label="custom_release"    n={s.custom_release} />
       <Row color="#dc3545" label="custom_retain"     n={s.custom_retain} />
     </div>
@@ -807,8 +808,8 @@ function MiddleSection({ ev, rf, customs, tax, taxRunning, stored, newStored, H,
           display: 'flex', flexDirection: 'column', alignItems: 'center',
           gap: 6, height: 'calc(100% - 32px)', justifyContent: 'center',
         }}>
-          <FactoryNode icon="💾" label="DB Store Factory" description="emits CUSTOM_OUTCOME" sm
-            tooltip="DB Store Factory — subscribes to Assessment Outcome (release route) and Investigation Outcome. Emits one CUSTOM_OUTCOME event per completed order; persistence to the legacy hub is deactivated." />
+          <FactoryNode icon="🚪" label="Exit Process Factory" description="emits CUSTOM_OUTCOME" sm
+            tooltip="Exit Process Factory — subscribes to Assessment Outcome (release + retain routes) and Investigation Outcome. Emits one CUSTOM_OUTCOME event per completed order; persistence to the legacy hub is deactivated." />
           <Arrow down />
           <BrokerNode label="Custom Outcome" topicKey="CUSTOM_OUTCOME" sm
             count={customTotal}
@@ -1093,8 +1094,11 @@ function PipelineDiagram({ pipeline }) {
   const tax        = pipeline?.tax_queue              ?? null
   const taxRunning = pipeline?.tax_queue_agent_running ?? null
   const stored     = pipeline?.stored_count           ?? null
-  const customStatus = pipeline?.custom_outcome_status ?? { automated_release: 0, custom_release: 0, custom_retain: 0 }
-  const customTotal  = (customStatus.automated_release || 0) + (customStatus.custom_release || 0) + (customStatus.custom_retain || 0)
+  const customStatus = pipeline?.custom_outcome_status ?? { automated_release: 0, automated_retain: 0, custom_release: 0, custom_retain: 0 }
+  const customTotal  = (customStatus.automated_release || 0)
+                     + (customStatus.automated_retain  || 0)
+                     + (customStatus.custom_release    || 0)
+                     + (customStatus.custom_retain     || 0)
 
   // Row 1: two processing zones + Investigation event broker below
   const OV_H = 94, RT_H = 230, INV_H = 94, LGAP = 10
@@ -1288,16 +1292,16 @@ function PipelineDiagram({ pipeline }) {
             {/* Fan-out: Assessment Outcome → C&T Risk Management (top) + DB Store (bottom) */}
             <FanOutSVG height={ROW1_H} targetYs={[yOV, yRT]} width={48} />
 
-            {/* Subscribers: C&T Risk Management (top, purple) + DB Store Factory (bottom) */}
+            {/* Subscribers: C&T Risk Management (top) + Exit Process Factory (bottom) */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: LGAP }}>
               <div style={{ height: OV_H, display: 'flex', alignItems: 'center' }}>
-                <div ref={ctRef}><FactoryNode icon="🏛️" label="C&T Risk Management" description="acts on retain + investigate" sm
-                  accent="#6366f1"
-                  tooltip="Custom & Tax Risk Management System — subscribes to Assessment Outcome (retain + investigate routes) and Sales Order Event. Produces Investigation Outcome events." /></div>
+                <div ref={ctRef}><FactoryNode icon="🏛️" label="C&T Risk Management" description="acts on investigate"
+                  width={210}
+                  tooltip="Custom & Tax Risk Management System — subscribes to Assessment Outcome (investigate route only). Opens cases in investigation.db and produces Investigation Outcome events on closure." /></div>
               </div>
               <div style={{ height: RT_H, display: 'flex', alignItems: 'center' }}>
-                <div ref={dbStoreRef}><FactoryNode icon="💾" label="DB Store Factory" description="stores release + investigation outcomes" sm
-                  tooltip="DB Store Factory — subscribes to Assessment Outcome (release route), Investigation Outcome, and Sales Order Event. Persists to european_custom.db." /></div>
+                <div ref={dbStoreRef}><FactoryNode icon="🚪" label="Exit Process Factory" description="emits CUSTOM_OUTCOME" sm
+                  tooltip="Exit Process Factory — subscribes to Assessment Outcome (release + retain routes) and Investigation Outcome. Emits a single terminal CUSTOM_OUTCOME event per completed order." /></div>
               </div>
             </div>
 
@@ -1391,7 +1395,6 @@ function PipelineDiagram({ pipeline }) {
         {/* Element types */}
         <LegendItem color="var(--eu-blue)" bg="var(--eu-blue-light)" label="Event Broker" />
         <LegendItem color="#868e96" bg="#f8f9fa" label="Factory" />
-        <LegendItem color="#6366f1" bg="#6366f112" label="Application (C&T Risk Mgmt)" />
         <LegendItem color="var(--eu-blue)" bg="var(--eu-blue-light)" label="Custom Outcome (terminal broker)" />
         <LegendItem color="var(--text-muted)" bg="#ffffff" label="Processing zone" dashed />
 
