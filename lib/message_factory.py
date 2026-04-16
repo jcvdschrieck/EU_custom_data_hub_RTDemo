@@ -46,6 +46,7 @@ _DEFAULT_CODES: dict[str, str] = {
 _TOPIC_SALES_ORDER    = "sales_order_event"
 _TOPIC_RT_RISK_1      = "rt_risk_1_outcome"
 _TOPIC_RT_RISK_2      = "rt_risk_2_outcome"
+_TOPIC_RT_RISK_3      = "rt_risk_3_outcome"
 _TOPIC_RT_SCORE       = "rt_score"
 _TOPIC_ORDER_VAL      = "order_validation"
 _TOPIC_ARRIVAL        = "arrival_notification"
@@ -295,6 +296,11 @@ def build_file_payload(topic: str, message: dict) -> dict:
             "alarm_id": message.get("alarm_id"),
         }
     elif topic == _TOPIC_RT_RISK_2:
+        outcome = {
+            "flagged": message.get("flagged"),
+            "reason":  message.get("reason"),
+        }
+    elif topic == _TOPIC_RT_RISK_3:
         outcome = {
             "flagged": message.get("flagged"),
             "reason":  message.get("reason"),

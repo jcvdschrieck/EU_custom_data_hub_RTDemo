@@ -123,14 +123,14 @@ from lib.broker import (
     broker,
     SALES_ORDER_EVENT, RT_RISK_OUTCOME, ORDER_VALIDATION,
     ASSESSMENT_OUTCOME, INVESTIGATION_OUTCOME, CUSTOM_OUTCOME,
-    RT_RISK_1_OUTCOME, RT_RISK_2_OUTCOME, RT_SCORE,  # legacy counters
+    RT_RISK_1_OUTCOME, RT_RISK_2_OUTCOME, RT_RISK_3_OUTCOME, RT_SCORE,  # legacy counters
     RELEASE_EVENT, RETAIN_EVENT, INVESTIGATE_EVENT,   # legacy counters
 )
 
 # Total number of risk monitoring engines. The release factory waits
 # for this many outcomes (or times out) before computing the score.
 # Adding a new risk engine = increment this + write the factory.
-TOTAL_RISK_ENGINES = 2
+TOTAL_RISK_ENGINES = 3
 from lib.config import DEFAULT_SPEED, MIN_SPEED, MAX_SPEED, QUEUE_SIZE
 from lib.database import (
     get_latest_transactions,
@@ -354,6 +354,63 @@ async def _RT_risk_monitoring_2_factory() -> None:
         })
         # Legacy counter
         await broker.publish(RT_RISK_2_OUTCOME, {"tx": tx, "flagged": flagged})
+
+
+# ── RT Risk Monitoring 3 Factory (Ireland-specific watchlist) ───────────────
+#
+# Hosted (in real life) on a server managed by the Irish authority. This
+# factory subscribes to SALES_ORDER_EVENT but only PROCESSES events whose
+# country of destination is "IE" — events for other destinations are
+# silently dropped (no publish at all). Adds a uniform 1–5 s latency to
+# simulate the round-trip to the remote server.
+#
+# Watchlist is intentionally empty for now — fill IE_WATCHLIST below to
+# start flagging matches.
+
+import random as _random
+
+# Watchlist of (seller_id, seller_country) tuples that the Irish authority
+# has flagged. Empty by design — nothing is currently flagged.
+IE_WATCHLIST: set[tuple[str, str]] = set()
+
+
+async def _RT_risk_monitoring_3_factory() -> None:
+    """
+    Subscriber of Sales-order Event Broker, country-specific (IE).
+
+    For each event:
+      - if Country_Destination != "IE" → drop silently (engine doesn't apply)
+      - otherwise: sleep uniform(1, 5) s, run the IE_WATCHLIST check,
+        publish to RT_RISK_OUTCOME with engine="ireland_watchlist".
+
+    Because the latency can exceed ASSESSMENT_TIMER_S (3 s by design),
+    some IE outcomes legitimately arrive too late to influence the
+    Release Factory's consolidation. That is the intended behaviour.
+    """
+    q = broker.subscribe(SALES_ORDER_EVENT)
+    while True:
+        tx = await q.get()
+        if (tx.get("buyer_country") or "").upper() != "IE":
+            continue   # not applicable — third-party server is not invoked
+
+        async def _process(tx=tx):
+            # Run each IE evaluation in its own task so a slow remote
+            # response doesn't block the next event.
+            await asyncio.sleep(_random.uniform(1.0, 5.0))
+            seller_id      = tx.get("seller_id", "")
+            seller_country = (tx.get("seller_country") or "").upper()
+            flagged = (seller_id, seller_country) in IE_WATCHLIST
+            await broker.publish(RT_RISK_OUTCOME, {
+                "engine":  "ireland_watchlist",
+                "tx":      tx,
+                "flagged": flagged,
+                "reason":  "ie_watchlist_match" if flagged else "clear",
+            })
+            # Legacy counter
+            await broker.publish(RT_RISK_3_OUTCOME, {"tx": tx, "flagged": flagged})
+
+        # Fire-and-forget so the engine can pick up the next event immediately.
+        asyncio.create_task(_process())
 
 
 # ── (RT Consolidation Factory removed — its logic is now inside
@@ -852,6 +909,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(simulation_loop(_fire_transactions))
     asyncio.create_task(_RT_risk_monitoring_1_factory())
     asyncio.create_task(_RT_risk_monitoring_2_factory())
+    asyncio.create_task(_RT_risk_monitoring_3_factory())
     # Consolidation is now handled inside _release_factory (unified routing).
     asyncio.create_task(_order_validation_factory())
     # _arrival_notification_factory removed (Goods Transport flow eliminated)
@@ -955,7 +1013,7 @@ def _compute_sim_state_snapshot() -> dict:
 
     # ── Pipeline block (same shape as GET /api/simulation/pipeline) ──
     topics = [
-        SALES_ORDER_EVENT, RT_RISK_1_OUTCOME, RT_RISK_2_OUTCOME,
+        SALES_ORDER_EVENT, RT_RISK_1_OUTCOME, RT_RISK_2_OUTCOME, RT_RISK_3_OUTCOME,
         RT_SCORE, ORDER_VALIDATION, ASSESSMENT_OUTCOME, INVESTIGATION_OUTCOME,
         CUSTOM_OUTCOME,
         RELEASE_EVENT, RETAIN_EVENT, INVESTIGATE_EVENT,
@@ -967,6 +1025,7 @@ def _compute_sim_state_snapshot() -> dict:
         "risk_flags": {
             "rt_risk_1_flagged": count_field_value(RT_RISK_1_OUTCOME, "outcome.flagged", True),
             "rt_risk_2_flagged": count_field_value(RT_RISK_2_OUTCOME, "outcome.flagged", True),
+            "rt_risk_3_flagged": count_field_value(RT_RISK_3_OUTCOME, "outcome.flagged", True),
             "rt_score_green":    count_field_value(RT_SCORE, "outcome.risk_score", "green"),
             "rt_score_amber":    count_field_value(RT_SCORE, "outcome.risk_score", "amber"),
             "rt_score_red":      count_field_value(RT_SCORE, "outcome.risk_score", "red"),
@@ -1530,7 +1589,7 @@ def sim_pipeline():
     from lib.event_store import event_count, count_field_value
     from lib.broker import broker as _broker
     topics = [
-        SALES_ORDER_EVENT, RT_RISK_1_OUTCOME, RT_RISK_2_OUTCOME,
+        SALES_ORDER_EVENT, RT_RISK_1_OUTCOME, RT_RISK_2_OUTCOME, RT_RISK_3_OUTCOME,
         RT_SCORE, ORDER_VALIDATION, ASSESSMENT_OUTCOME, INVESTIGATION_OUTCOME,
         CUSTOM_OUTCOME,
         RELEASE_EVENT, RETAIN_EVENT, INVESTIGATE_EVENT,
@@ -1542,6 +1601,7 @@ def sim_pipeline():
         "risk_flags": {
             "rt_risk_1_flagged": count_field_value(RT_RISK_1_OUTCOME, "outcome.flagged", True),
             "rt_risk_2_flagged": count_field_value(RT_RISK_2_OUTCOME, "outcome.flagged", True),
+            "rt_risk_3_flagged": count_field_value(RT_RISK_3_OUTCOME, "outcome.flagged", True),
             "rt_score_green":    count_field_value(RT_SCORE, "outcome.risk_score", "green"),
             "rt_score_amber":    count_field_value(RT_SCORE, "outcome.risk_score", "amber"),
             "rt_score_red":      count_field_value(RT_SCORE, "outcome.risk_score", "red"),
