@@ -1569,15 +1569,26 @@ def sim_start():
     from lib.config import SIM_END_DT
     from lib.event_store import flush_events
     from lib.alarm_checker import bootstrap_scenario_alarm
+    from lib.database import seed_open_cases_if_empty, get_all_cases_hydrated
     if state.sim_time >= SIM_END_DT:
         return {"ok": False, "reason": "simulation already finished — reset first"}
+    seeded = 0
     # Flush persisted events and bootstrap alarm on first launch (fired_count == 0).
     # Pause → resume does not flush (fired_count > 0 at that point).
     if state.fired_count == 0:
         flush_events()
         bootstrap_scenario_alarm()
+        # Pre-load open cases from the persisted seed DB so officers
+        # have something to triage from t=0. No-op if cases are already
+        # present (e.g. resume after pause without reset).
+        seeded = seed_open_cases_if_empty()
+        if seeded:
+            # Push each seeded case as a new_case event so the frontend
+            # caseStore upserts them without needing a full re-fetch.
+            for case in get_all_cases_hydrated(limit=seeded):
+                _push_rg_case_sse({"event": "new_case", "case": case})
     state.running = True
-    return {"ok": True, "status": state.to_dict()}
+    return {"ok": True, "status": state.to_dict(), "seeded_cases": seeded}
 
 
 @app.post("/api/simulation/pause")

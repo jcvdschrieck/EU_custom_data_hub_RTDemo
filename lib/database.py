@@ -10,7 +10,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from lib.config import EUROPEAN_CUSTOM_DB, SIMULATION_DB, INVESTIGATION_DB
+from lib.config import EUROPEAN_CUSTOM_DB, SIMULATION_DB, INVESTIGATION_DB, SEED_CASES_DB
 
 # ── Schema ────────────────────────────────────────────────────────────────────
 
@@ -1154,6 +1154,42 @@ def get_suspicion_types() -> list[dict]:
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def seed_open_cases_if_empty() -> int:
+    """Copy all rows from data/seed_cases.db into investigation.db when
+    the latter currently has zero cases. Idempotent: a no-op if cases
+    already exist or if the seed file is missing.
+
+    Returns the number of cases inserted (0 if no seeding occurred).
+    """
+    if not SEED_CASES_DB.exists():
+        return 0
+    target = _connect(INVESTIGATION_DB)
+    try:
+        n = target.execute("SELECT COUNT(*) FROM Sales_Order_Case").fetchone()[0]
+        if n > 0:
+            return 0
+        src = sqlite3.connect(SEED_CASES_DB)
+        src.row_factory = sqlite3.Row
+        try:
+            with target:
+                # Order matters because of the FK from Risk → Order
+                for table in ("Sales_Order", "Sales_Order_Risk", "Sales_Order_Case"):
+                    rows = src.execute(f"SELECT * FROM {table}").fetchall()
+                    for r in rows:
+                        cols = ",".join(r.keys())
+                        placeholders = ",".join("?" * len(r.keys()))
+                        target.execute(
+                            f"INSERT OR REPLACE INTO {table} ({cols}) VALUES ({placeholders})",
+                            list(r),
+                        )
+            inserted = target.execute("SELECT COUNT(*) FROM Sales_Order_Case").fetchone()[0]
+            return inserted
+        finally:
+            src.close()
+    finally:
+        target.close()
 
 
 def reset_cases() -> None:

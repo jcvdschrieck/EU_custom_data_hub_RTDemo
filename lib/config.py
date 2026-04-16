@@ -8,6 +8,10 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 EUROPEAN_CUSTOM_DB = DATA_DIR / "european_custom.db"
 SIMULATION_DB      = DATA_DIR / "simulation.db"
 INVESTIGATION_DB   = DATA_DIR / "investigation.db"
+# Persistent seed of pre-existing open cases. Loaded into investigation.db
+# at simulation start when the latter is empty. Built by
+# scripts/build_seed_cases.py.
+SEED_CASES_DB      = DATA_DIR / "seed_cases.db"
 
 API_PORT     = 8505
 API_BASE_URL = f"http://localhost:{API_PORT}"
