@@ -329,29 +329,72 @@ async def _RT_risk_monitoring_1_factory() -> None:
         await broker.publish(RT_RISK_1_OUTCOME, {"tx": tx, "flagged": flagged})
 
 
-# ── RT Risk Monitoring 2 Factory (watchlist check) ───────────────────────────
+# ── RT Risk Monitoring 2 Factory (ML watchlist — 4-tuple + per-dim weights) ──
+
+# Overall-risk threshold above which the engine flags the transaction.
+ML_RISK_FLAG_THRESHOLD = 0.5
+
 
 async def _RT_risk_monitoring_2_factory() -> None:
     """
     Subscriber of Sales-order Event Broker.
-    Checks whether the (seller_id, seller_country) pair — supplier × country
-    of origin — appears in the configured watchlist (lib/watchlist.py).
-    Publishes to the unified RT_RISK_OUTCOME topic with engine="watchlist".
+
+    Replaces the old supplier × country watchlist with a richer rule set
+    (see ml_risk_rules in european_custom.db, seeded from Fake ML.xlsx).
+    Each rule keys on the 4-tuple
+        (seller, country_origin, vat_product_category, country_destination)
+    and carries an overall risk score plus four per-dimension weights.
+
+    Outcome payload — if the 4-tuple matches a rule:
+        flagged = (risk >= ML_RISK_FLAG_THRESHOLD)
+        risk = rule.risk (0-1)
+        seller_risk / country_risk / product_category_risk / destination_risk
+        (the four weighted sub-scores from the rule; propagated via the
+        release factory into Sales_Order_Risk at case creation)
+
+    Otherwise:  flagged=False, no per-dimension scores attached.
     """
-    from lib.watchlist import is_watchlisted
+    from lib.database import lookup_ml_risk_rule
 
     q = broker.subscribe(SALES_ORDER_EVENT)
     while True:
         tx = await q.get()
 
-        flagged = is_watchlisted(tx["seller_id"], tx["seller_country"])
+        rule = lookup_ml_risk_rule(
+            seller               = tx.get("seller_name", ""),
+            country_origin       = tx.get("seller_country", ""),
+            vat_product_category = tx.get("item_category", ""),
+            country_destination  = tx.get("buyer_country", ""),
+        )
 
-        await broker.publish(RT_RISK_OUTCOME, {
-            "engine":  "watchlist",
-            "tx":      tx,
-            "flagged": flagged,
-            "reason":  "watchlist_match" if flagged else "clear",
-        })
+        if rule is None:
+            flagged = False
+            payload: dict = {
+                "engine":  "watchlist",
+                "tx":      tx,
+                "flagged": False,
+                "reason":  "clear",
+            }
+        else:
+            risk    = float(rule.get("risk", 0.0) or 0.0)
+            flagged = risk >= ML_RISK_FLAG_THRESHOLD
+            payload = {
+                "engine":        "watchlist",
+                "tx":            tx,
+                "flagged":       flagged,
+                "reason":        "ml_watchlist_match" if flagged else "ml_watchlist_low_risk",
+                "risk":          risk,
+                "description":   rule.get("description"),
+                # Per-dimension weighted sub-scores — propagated into
+                # ASSESSMENT_OUTCOME by the release factory, then written
+                # onto Sales_Order_Risk by the C&T factory.
+                "seller_risk":               rule.get("seller_weight"),
+                "country_risk":              rule.get("country_origin_weight"),
+                "product_category_risk":     rule.get("vat_product_category_weight"),
+                "destination_risk":          rule.get("country_destination_weight"),
+            }
+
+        await broker.publish(RT_RISK_OUTCOME, payload)
         # Legacy counter
         await broker.publish(RT_RISK_2_OUTCOME, {"tx": tx, "flagged": flagged})
 
@@ -587,6 +630,16 @@ async def _release_factory() -> None:
         so_bk = f"{tx['transaction_id']}-001"  # business key
         risk_id = f"RISK-{uuid.uuid4().hex[:12].upper()}"
 
+        # Per-dimension scores come from the ML watchlist engine (engine 2)
+        # when it has a rule hit. The Manufacturer_Risk_Score column is
+        # repurposed to store the Country-of-Destination weight (frontend
+        # label relabels accordingly).
+        ml = outcomes.get("watchlist", {}) or {}
+
+        def _pct(v):
+            """Rule weights are 0-1; store as 0-100 to match Overall_Risk_Score scale."""
+            return round(float(v) * 100, 1) if v is not None else None
+
         risk_payload = {
             # Data model fields
             "Sales_Order_Risk_ID":         risk_id,
@@ -597,12 +650,12 @@ async def _release_factory() -> None:
             "Overall_Risk_Level":          route,
             "Confidence_Score":            round(confidence, 2),
             "Proposed_Risk_Action":        {"red": "retain", "amber": "investigate", "green": "release"}[route],
-            # Dimensional scores (populated where available, None otherwise)
-            "Seller_Risk_Score":           None,
-            "Country_Risk_Score":          None,
-            "Product_Category_Risk_Score": None,
-            "Manufacturer_Risk_Score":     None,
-            "Overall_Risk_Description":    None,
+            # Dimensional scores from the ML rule (None when no rule hit)
+            "Seller_Risk_Score":           _pct(ml.get("seller_risk")),
+            "Country_Risk_Score":          _pct(ml.get("country_risk")),
+            "Product_Category_Risk_Score": _pct(ml.get("product_category_risk")),
+            "Manufacturer_Risk_Score":     _pct(ml.get("destination_risk")),
+            "Overall_Risk_Description":    ml.get("description"),
             "Risk_Comment":                None,
             "Evaluation_by":               None,
             "Update_time":                 now_iso,

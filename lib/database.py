@@ -199,6 +199,26 @@ _SEED_REGIONS = [
     ("FI", "Finland",         "Nordics"),
 ]
 
+_ML_RISK_RULES_DDL = """
+CREATE TABLE IF NOT EXISTS ml_risk_rules (
+    id                           INTEGER PRIMARY KEY AUTOINCREMENT,
+    seller                       TEXT NOT NULL,
+    country_origin               TEXT NOT NULL,
+    vat_product_category         TEXT NOT NULL,
+    country_destination          TEXT NOT NULL,
+    risk                         REAL NOT NULL,
+    description                  TEXT,
+    seller_weight                REAL,
+    country_origin_weight        REAL,
+    vat_product_category_weight  REAL,
+    country_destination_weight   REAL,
+    UNIQUE(seller, country_origin, vat_product_category, country_destination)
+);
+CREATE INDEX IF NOT EXISTS idx_mlrr_lookup
+    ON ml_risk_rules(seller, country_origin, vat_product_category, country_destination);
+"""
+
+
 _SEED_SUSPICION_TYPES = [
     ("VAT Rate Deviation",
      "Goods reported at differing VAT rates across shipments — pointing to rate misclassification or selective underreporting.",
@@ -384,7 +404,9 @@ def init_european_custom_db() -> None:
     _init_ddl(EUROPEAN_CUSTOM_DB, _RISK_LEVELS_DDL)
     _init_ddl(EUROPEAN_CUSTOM_DB, _EU_REGIONS_DDL)
     _init_ddl(EUROPEAN_CUSTOM_DB, _SUSPICION_TYPES_DDL)
+    _init_ddl(EUROPEAN_CUSTOM_DB, _ML_RISK_RULES_DDL)
     _seed_reference_tables()
+    _seed_ml_risk_rules_from_xlsx()
 
 
 def init_investigation_db() -> None:
@@ -1147,6 +1169,84 @@ def get_eu_regions() -> list[dict]:
     return [dict(r) for r in rows]
 
 
+# ── ML risk-rules table (4-tuple lookup + per-dimension weights) ────────────
+#
+# Single mapping table driving two things:
+#   1. Risk monitoring engine 2 (watchlist): looks up the 4-tuple
+#      (seller, country_origin, vat_product_category, country_destination)
+#      and uses `risk` to decide whether to flag.
+#   2. Case creation: populates Sales_Order_Risk dimensional scores from
+#      the four weight columns.
+# Source of truth: context/Fake ML.xlsx. Re-seeded on every backend start
+# so edits to the spreadsheet propagate after a restart.
+
+_ML_XLSX_PATH = Path(__file__).parent.parent / "context" / "Fake ML.xlsx"
+
+
+def _seed_ml_risk_rules_from_xlsx() -> None:
+    """Clear the ml_risk_rules table and re-load it from Fake ML.xlsx.
+
+    Silent no-op if the spreadsheet (or openpyxl) is missing — the engine
+    then simply flags nothing.
+    """
+    if not _ML_XLSX_PATH.exists():
+        return
+    try:
+        import openpyxl  # type: ignore
+    except ImportError:
+        return
+
+    wb = openpyxl.load_workbook(_ML_XLSX_PATH, data_only=True)
+    ws = wb[wb.sheetnames[0]]
+    rows = list(ws.iter_rows(values_only=True))
+    if not rows or len(rows) < 2:
+        return
+    # row 0 = header; subsequent rows are data.
+    conn = _connect(EUROPEAN_CUSTOM_DB)
+    with conn:
+        conn.execute("DELETE FROM ml_risk_rules")
+        for r in rows[1:]:
+            # Skip blank rows (openpyxl gives a tuple of Nones for empty ones)
+            if r is None or all(c is None for c in r):
+                continue
+            r = list(r) + [None] * max(0, 10 - len(r))
+            conn.execute("""
+                INSERT OR REPLACE INTO ml_risk_rules (
+                    seller, country_origin, vat_product_category, country_destination,
+                    risk, description,
+                    seller_weight, country_origin_weight,
+                    vat_product_category_weight, country_destination_weight
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                (r[0] or "").strip(), (r[1] or "").strip(),
+                (r[2] or "").strip(), (r[3] or "").strip(),
+                float(r[4]) if r[4] is not None else 0.0,
+                r[5],
+                float(r[6]) if r[6] is not None else None,
+                float(r[7]) if r[7] is not None else None,
+                float(r[8]) if r[8] is not None else None,
+                float(r[9]) if r[9] is not None else None,
+            ))
+    conn.close()
+
+
+def lookup_ml_risk_rule(seller: str, country_origin: str,
+                        vat_product_category: str, country_destination: str) -> dict | None:
+    """Case-insensitive 4-tuple lookup. Returns the rule dict or None."""
+    conn = _connect(EUROPEAN_CUSTOM_DB)
+    row = conn.execute("""
+        SELECT * FROM ml_risk_rules
+        WHERE LOWER(seller)               = LOWER(?)
+          AND LOWER(country_origin)       = LOWER(?)
+          AND LOWER(vat_product_category) = LOWER(?)
+          AND LOWER(country_destination)  = LOWER(?)
+        LIMIT 1
+    """, (seller or "", country_origin or "",
+          vat_product_category or "", country_destination or "")).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
 def get_suspicion_types() -> list[dict]:
     conn = _connect(EUROPEAN_CUSTOM_DB)
     rows = conn.execute(
@@ -1284,7 +1384,8 @@ _HYDRATED_CASE_SQL = """
         r.Overall_Risk_Score, r.Overall_Risk_Level,
         r.Seller_Risk_Score, r.Country_Risk_Score,
         r.Product_Category_Risk_Score, r.Manufacturer_Risk_Score,
-        r.Confidence_Score, r.Proposed_Risk_Action
+        r.Confidence_Score, r.Proposed_Risk_Action,
+        r.Overall_Risk_Description
     FROM Sales_Order_Case c
     LEFT JOIN Sales_Order      o ON c.Sales_Order_Business_Key = o.Sales_Order_Business_Key
     LEFT JOIN Sales_Order_Risk r ON c.Sales_Order_Business_Key = r.Sales_Order_Business_Key
