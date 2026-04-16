@@ -1106,6 +1106,26 @@ def api_ireland_case(transaction_id: str):
 
 
 
+# ── Reference data (lookups for dropdowns / categories / regions) ───────────
+
+@app.get("/api/reference")
+def api_reference():
+    """Bundled reference data consumed by the Revenue Guardian SPA at startup.
+
+    Returns the four lookup tables seeded in european_custom.db. Static-ish
+    data — refresh by re-fetching, no SSE channel.
+    """
+    from lib.database import (
+        get_vat_categories, get_risk_levels, get_eu_regions, get_suspicion_types,
+    )
+    return {
+        "vat_categories":  get_vat_categories(),
+        "risk_levels":     get_risk_levels(),
+        "regions":         get_eu_regions(),
+        "suspicion_types": get_suspicion_types(),
+    }
+
+
 # ── Revenue Guardian: REST + SSE endpoints ────────────────────────────────────
 
 @app.get("/api/rg/cases")

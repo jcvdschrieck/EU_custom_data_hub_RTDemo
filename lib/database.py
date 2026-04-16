@@ -115,6 +115,109 @@ CREATE INDEX IF NOT EXISTS idx_ireland_queue_tx ON ireland_queue(transaction_id)
 """
 
 
+# ── Reference tables (lookups previously hardcoded in revenue-guardian) ──────
+#
+# Hosted in european_custom.db. Read by GET /api/reference; seeded on first
+# init from the constants below (idempotent — INSERT OR IGNORE).
+
+_VAT_CATEGORIES_DDL = """
+CREATE TABLE IF NOT EXISTS vat_categories (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    label       TEXT    UNIQUE NOT NULL,
+    rate        REAL    NOT NULL,
+    description TEXT,
+    sort_order  INTEGER NOT NULL DEFAULT 0
+);
+"""
+
+_RISK_LEVELS_DDL = """
+CREATE TABLE IF NOT EXISTS risk_levels (
+    name          TEXT    PRIMARY KEY,
+    display_color TEXT,
+    sort_order    INTEGER NOT NULL DEFAULT 0
+);
+"""
+
+_EU_REGIONS_DDL = """
+CREATE TABLE IF NOT EXISTS eu_regions (
+    country_code TEXT    PRIMARY KEY,
+    country_name TEXT,
+    region       TEXT    NOT NULL
+);
+"""
+
+_SUSPICION_TYPES_DDL = """
+CREATE TABLE IF NOT EXISTS suspicion_types (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT    UNIQUE NOT NULL,
+    description TEXT,
+    icon        TEXT,
+    color       TEXT,
+    sort_order  INTEGER NOT NULL DEFAULT 0
+);
+"""
+
+_SEED_VAT_CATEGORIES = [
+    ("Educational Material", 9.0,  "Books, learning aids", 10),
+    ("Consumer Electronics", 23.0, "Phones, audio, smart devices", 20),
+    ("Fashion & Apparel",    23.0, "Clothing, footwear, accessories", 30),
+    ("Health & Beauty",      13.5, "Cosmetics, personal care", 40),
+    ("Home & Garden",        23.0, "Appliances, furniture, decor", 50),
+    ("Accessories",          23.0, "Phone/computer accessories", 60),
+    ("Toys & Games",         13.5, "Toys, board games", 70),
+]
+
+_SEED_RISK_LEVELS = [
+    ("Critical", "destructive", 10),
+    ("High",     "risk-high",   20),
+    ("Medium",   "warning",     30),
+    ("Low",      "success",     40),
+]
+
+_SEED_REGIONS = [
+    # Ireland
+    ("IE", "Ireland",         "Ireland"),
+    ("GB", "United Kingdom",  "Ireland"),
+    # Western EU
+    ("FR", "France",          "Western EU"),
+    ("BE", "Belgium",         "Western EU"),
+    ("NL", "Netherlands",     "Western EU"),
+    ("LU", "Luxembourg",      "Western EU"),
+    ("DE", "Germany",         "Western EU"),
+    # Southern EU
+    ("ES", "Spain",           "Southern EU"),
+    ("PT", "Portugal",        "Southern EU"),
+    ("IT", "Italy",           "Southern EU"),
+    # Central / Eastern EU
+    ("PL", "Poland",          "Central EU"),
+    ("CZ", "Czech Republic",  "Central EU"),
+    ("HU", "Hungary",         "Central EU"),
+    ("SK", "Slovakia",        "Central EU"),
+    # Nordics
+    ("DK", "Denmark",         "Nordics"),
+    ("SE", "Sweden",          "Nordics"),
+    ("FI", "Finland",         "Nordics"),
+]
+
+_SEED_SUSPICION_TYPES = [
+    ("VAT Rate Deviation",
+     "Goods reported at differing VAT rates across shipments — pointing to rate misclassification or selective underreporting.",
+     "AlertTriangle", "risk-critical", 10),
+    ("Customs Duty Gap",
+     "Customs duties declared differ from the expected tariff for the declared commodity code.",
+     "FileWarning",   "risk-high",     20),
+    ("Product Type Mismatch",
+     "Commodity description conflicts with the product category used in the IOSS VAT filing.",
+     "Package",       "risk-medium",   30),
+    ("Taxable Value Understatement",
+     "Declared item value appears lower than market value for the product category.",
+     "DollarSign",    "risk-high",     40),
+    ("Watchlist Match",
+     "Seller, supplier, or origin matches an active enforcement watchlist.",
+     "ShieldAlert",   "risk-critical", 50),
+]
+
+
 # ── Data hub schema (3 dark-purple tables from the data model diagram) ───────
 #
 # ── New data model (Entity Data Model Simplified) ─────────────────────────────
@@ -274,6 +377,12 @@ def init_european_custom_db() -> None:
     # Create the new data model tables (Sales_Order + Sales_Order_Risk)
     _init_ddl(EUROPEAN_CUSTOM_DB, _SALES_ORDER_DDL)
     _init_ddl(EUROPEAN_CUSTOM_DB, _SALES_ORDER_RISK_DDL)
+    # Reference / lookup tables (replace static frontend constants)
+    _init_ddl(EUROPEAN_CUSTOM_DB, _VAT_CATEGORIES_DDL)
+    _init_ddl(EUROPEAN_CUSTOM_DB, _RISK_LEVELS_DDL)
+    _init_ddl(EUROPEAN_CUSTOM_DB, _EU_REGIONS_DDL)
+    _init_ddl(EUROPEAN_CUSTOM_DB, _SUSPICION_TYPES_DDL)
+    _seed_reference_tables()
 
 
 def init_investigation_db() -> None:
@@ -972,6 +1081,68 @@ def update_case(case_id: str, updates: dict) -> bool:
     changed = cur.rowcount > 0
     conn.close()
     return changed
+
+
+# ── Reference table seed + getters ──────────────────────────────────────────
+
+def _seed_reference_tables() -> None:
+    """Idempotent seed of the four lookup tables. INSERT OR IGNORE keyed on
+    the natural unique column so re-runs don't duplicate rows."""
+    conn = _connect(EUROPEAN_CUSTOM_DB)
+    with conn:
+        conn.executemany(
+            "INSERT OR IGNORE INTO vat_categories (label, rate, description, sort_order) VALUES (?, ?, ?, ?)",
+            _SEED_VAT_CATEGORIES,
+        )
+        conn.executemany(
+            "INSERT OR IGNORE INTO risk_levels (name, display_color, sort_order) VALUES (?, ?, ?)",
+            _SEED_RISK_LEVELS,
+        )
+        conn.executemany(
+            "INSERT OR IGNORE INTO eu_regions (country_code, country_name, region) VALUES (?, ?, ?)",
+            _SEED_REGIONS,
+        )
+        conn.executemany(
+            "INSERT OR IGNORE INTO suspicion_types (name, description, icon, color, sort_order) VALUES (?, ?, ?, ?, ?)",
+            _SEED_SUSPICION_TYPES,
+        )
+    conn.close()
+
+
+def get_vat_categories() -> list[dict]:
+    conn = _connect(EUROPEAN_CUSTOM_DB)
+    rows = conn.execute(
+        "SELECT label, rate, description FROM vat_categories ORDER BY sort_order, label"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_risk_levels() -> list[dict]:
+    conn = _connect(EUROPEAN_CUSTOM_DB)
+    rows = conn.execute(
+        "SELECT name, display_color FROM risk_levels ORDER BY sort_order, name"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_eu_regions() -> list[dict]:
+    conn = _connect(EUROPEAN_CUSTOM_DB)
+    rows = conn.execute(
+        "SELECT country_code, country_name, region FROM eu_regions ORDER BY region, country_code"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_suspicion_types() -> list[dict]:
+    conn = _connect(EUROPEAN_CUSTOM_DB)
+    rows = conn.execute(
+        "SELECT name, description, icon, color FROM suspicion_types ORDER BY sort_order, name"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 def reset_cases() -> None:
