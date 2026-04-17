@@ -1273,17 +1273,26 @@ function PipelineDiagram({ pipeline }) {
             <div style={{ display: 'flex', flexDirection: 'column', gap: LGAP }}>
               <div style={{ height: OV_H, display: 'flex', alignItems: 'center' }}><Arrow /></div>
               <div style={{ height: RT_H, display: 'flex', alignItems: 'center' }}><Arrow /></div>
-              <div style={{ height: MS_H, display: 'flex', alignItems: 'center' }}><Arrow dashed /></div>
+              {/* MS zone: dashed arrow + vertical line up to the RT Risk Outcome broker */}
+              <div style={{ height: MS_H, display: 'flex', alignItems: 'center' }}>
+                <svg width={28} height={MS_H} style={{ flex: '0 0 28px', overflow: 'visible' }}>
+                  {/* Horizontal dashed arrow from MS zone */}
+                  <line x1={0} y1={MS_H / 2} x2={22} y2={MS_H / 2} stroke="#adb5bd" strokeWidth={2} strokeDasharray="4,3" />
+                  {/* Vertical dashed line going up to meet the RT broker row above */}
+                  <line x1={22} y1={MS_H / 2} x2={22} y2={-(LGAP + RT_H / 2 - MS_H / 2)} stroke="#adb5bd" strokeWidth={2} strokeDasharray="4,3" />
+                  <polygon points={`18,${-(LGAP + RT_H / 2 - MS_H / 2) + 4} 26,${-(LGAP + RT_H / 2 - MS_H / 2) + 4} 22,${-(LGAP + RT_H / 2 - MS_H / 2)}`} fill="#adb5bd" />
+                </svg>
+              </div>
             </div>
 
-            {/* Output brokers — OV validation + RT Risk Outcome (spanning RT + MS zones) */}
+            {/* Output brokers — OV validation + RT Risk Outcome at RT height */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: LGAP }}>
               <div style={{ height: OV_H, display: 'flex', alignItems: 'center' }}>
                 <BrokerNode label="Sales Order Validation" topicKey="ORDER_VALIDATION"
                   count={ev.order_validation} sm width={OUT_BROKER_W}
                   tooltip="ORDER_VALIDATION — field-completeness outcome per order. Consumed by the Automated Assessment Factory." />
               </div>
-              <div style={{ height: RT_H + LGAP + MS_H, display: 'flex', alignItems: 'center' }}>
+              <div style={{ height: RT_H, display: 'flex', alignItems: 'center' }}>
                 <BrokerNode label="RT Risk Outcome" topicKey="RT_RISK_OUTCOME"
                   count={(ev.rt_risk_1_outcome || 0) + (ev.rt_risk_2_outcome || 0) + (ev.rt_risk_3_outcome || 0)} sm width={OUT_BROKER_W}
                   tooltip="RT_RISK_OUTCOME — unified topic. All risk engines (EU + Member State) publish here with an engine identifier. The Automated Assessment Factory subscribes and computes a consolidated risk score.">
@@ -1291,6 +1300,8 @@ function PipelineDiagram({ pipeline }) {
                     total={(ev.rt_risk_1_outcome || 0) + (ev.rt_risk_2_outcome || 0) + (ev.rt_risk_3_outcome || 0)} />
                 </BrokerNode>
               </div>
+              {/* Empty space at MS_H to preserve the column height */}
+              <div style={{ height: MS_H }} />
             </div>
 
             {/* Fan-in: 2 output brokers → Automated Assessment Factory */}
@@ -1319,43 +1330,64 @@ function PipelineDiagram({ pipeline }) {
               </BrokerNode>
             </div>
 
-            {/* Fan-out: Assessment Outcome → C&T Risk Management (top) + DB Store (bottom) */}
-            <FanOutSVG height={ROW1_H} targetYs={[yOV, yRT]} width={48} />
+            {/* ── Right side: balanced two-row layout ────────────── */}
+            {(() => {
+              // Right-side row heights — decoupled from the left-side zone heights
+              // so C&T and Exit Process get equal visual weight.
+              const midY   = (yOV + yRT) / 2           // horizontal axis of the main flow
+              const rRowH  = 140                        // each right-side row
+              const rGap   = 16
+              const rTotalH = rRowH * 2 + rGap
+              const rTopY  = midY - rTotalH / 2 + rRowH / 2
+              const rBotY  = midY + rTotalH / 2 - rRowH / 2
+              return (
+                <>
+                  {/* Fan-out: Assessment Outcome → C&T (top) + Exit Process (bottom) */}
+                  <FanOutSVG height={ROW1_H} targetYs={[rTopY, rBotY]} width={48} />
 
-            {/* Subscribers: C&T Risk Management (top) + Exit Process Factory (bottom) */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: LGAP }}>
-              <div style={{ height: OV_H, display: 'flex', alignItems: 'center' }}>
-                <div ref={ctRef}><FactoryNode icon="🏛️" label="C&T Risk Management" description="acts on investigate"
-                  width={210}
-                  tooltip="Custom & Tax Risk Management System — subscribes to Assessment Outcome (investigate route only). Opens cases in investigation.db and produces Investigation Outcome events on closure." /></div>
-              </div>
-              <div style={{ height: RT_H, display: 'flex', alignItems: 'center' }}>
-                <div ref={dbStoreRef}><FactoryNode icon="🚪" label="Exit Process Factory" description="emits CUSTOM_OUTCOME" sm
-                  tooltip="Exit Process Factory — subscribes to Assessment Outcome (release + retain routes) and Investigation Outcome. Emits a single terminal CUSTOM_OUTCOME event per completed order." /></div>
-              </div>
-            </div>
+                  {/* Subscribers: C&T Risk Management (top) + Exit Process Factory (bottom) */}
+                  <div style={{ height: ROW1_H, display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: rGap }}>
+                      <div style={{ height: rRowH, display: 'flex', alignItems: 'center' }}>
+                        <div ref={ctRef}><FactoryNode icon="🏛️" label="C&T Risk Management" description="acts on investigate"
+                          width={210}
+                          tooltip="Custom & Tax Risk Management System — subscribes to Assessment Outcome (investigate route only). Opens cases in investigation.db and produces Investigation Outcome events on closure." /></div>
+                      </div>
+                      <div style={{ height: rRowH, display: 'flex', alignItems: 'center' }}>
+                        <div ref={dbStoreRef}><FactoryNode icon="🚪" label="Exit Process Factory" description="emits CUSTOM_OUTCOME" sm
+                          tooltip="Exit Process Factory — subscribes to Assessment Outcome (release + retain routes) and Investigation Outcome. Emits a single terminal CUSTOM_OUTCOME event per completed order." /></div>
+                      </div>
+                    </div>
+                  </div>
 
-            {/* Arrows: subscribers → output */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: LGAP }}>
-              <div style={{ height: OV_H, display: 'flex', alignItems: 'center' }}><Arrow /></div>
-              <div style={{ height: RT_H, display: 'flex', alignItems: 'center' }}><Arrow /></div>
-            </div>
+                  {/* Arrows: subscribers → output */}
+                  <div style={{ height: ROW1_H, display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: rGap }}>
+                      <div style={{ height: rRowH, display: 'flex', alignItems: 'center' }}><Arrow /></div>
+                      <div style={{ height: rRowH, display: 'flex', alignItems: 'center' }}><Arrow /></div>
+                    </div>
+                  </div>
 
-            {/* Output: Investigation Outcome (top) + DB cylinder (bottom) */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: LGAP }}>
-              <div style={{ height: OV_H, display: 'flex', alignItems: 'center' }}>
-                <div ref={invOutcomeRef}><BrokerNode label="Investigation Outcome" topicKey="INVESTIGATION_OUTCOME"
-                  count={ev.investigation_outcome || 0} sm width={OUT_BROKER_W}
-                  tooltip="INVESTIGATION_OUTCOME — produced by the C&T Risk Management system for retain and investigate routes. Consumed by the DB Store Factory." /></div>
-              </div>
-              <div ref={dbHubRef} style={{ height: RT_H, display: 'flex', alignItems: 'center' }}>
-                <BrokerNode label="Custom Outcome" topicKey="CUSTOM_OUTCOME" sm width={OUT_BROKER_W}
-                  count={customTotal}
-                  tooltip={`Terminal CUSTOM_OUTCOME broker — ${customTotal} events. Status breakdown: automated_release ${customStatus.automated_release || 0}, custom_release ${customStatus.custom_release || 0}, custom_retain ${customStatus.custom_retain || 0}.`}>
-                  <CustomOutcomeBreakdown s={customStatus} />
-                </BrokerNode>
-              </div>
-            </div>
+                  {/* Output: Investigation Outcome (top) + Custom Outcome (bottom) */}
+                  <div style={{ height: ROW1_H, display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: rGap }}>
+                      <div style={{ height: rRowH, display: 'flex', alignItems: 'center' }}>
+                        <div ref={invOutcomeRef}><BrokerNode label="Investigation Outcome" topicKey="INVESTIGATION_OUTCOME"
+                          count={ev.investigation_outcome || 0} sm width={OUT_BROKER_W}
+                          tooltip="INVESTIGATION_OUTCOME — produced by the C&T Risk Management system on case closure. Consumed by the Exit Process Factory." /></div>
+                      </div>
+                      <div ref={dbHubRef} style={{ height: rRowH, display: 'flex', alignItems: 'center' }}>
+                        <BrokerNode label="Custom Outcome" topicKey="CUSTOM_OUTCOME" sm width={OUT_BROKER_W}
+                          count={customTotal}
+                          tooltip={`Terminal CUSTOM_OUTCOME broker — ${customTotal} events.`}>
+                          <CustomOutcomeBreakdown s={customStatus} />
+                        </BrokerNode>
+                      </div>
+                    </div>
+                  </div>
+                </>
+              )
+            })()}
 
             {/* SVG overlay: subscription arrows that loop back to earlier components */}
             {overlayPaths && (() => {
