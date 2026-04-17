@@ -810,7 +810,10 @@ async def _ct_risk_management_factory() -> None:
     factory's exit signal and fires only when an officer closes the case
     (see customs-action retainment/release endpoint).
     """
-    from lib.database import upsert_investigation_set, get_case_hydrated
+    from lib.database import (
+        upsert_investigation_set, get_case_hydrated,
+        find_similar_open_case, append_order_to_case,
+    )
     from lib import sales_order_statuses as SO_STATUS
     import uuid as _uuid
 
@@ -838,6 +841,7 @@ async def _ct_risk_management_factory() -> None:
         else:
             problem_type = "Risk Pattern"
 
+        # ── Build Sales_Order + Sales_Order_Risk rows (always created) ──
         so_row = {
             "Sales_Order_ID":           msg.get("Sales_Order_ID"),
             "Sales_Order_Business_Key": bk,
@@ -871,35 +875,52 @@ async def _ct_risk_management_factory() -> None:
             "Update_time":                 now_iso,
             "Updated_by":                  "system",
         }
-        soc_row = {
-            "Case_ID":                          case_id,
-            "Sales_Order_Business_Key":         bk,
-            "Status":                           STATUS.NEW,
-            "VAT_Problem_Type":                 problem_type,
-            "Recommended_Product_Value":        None,
-            "Recommended_VAT_Product_Category": None,
-            "Recommended_VAT_Rate":             None,
-            "Recommended_VAT_Fee":              None,
-            "AI_Analysis":                      None,
-            "AI_Confidence":                    None,
-            "VAT_Gap_Fee":                      None,
-            "Evaluation_by":                    None,
-            "Proposed_Action_Tax":              None,
-            "Proposed_Action_Customs":          None,
-            "Communication":                    "[]",
-            "Additional_Evidence":              None,
-            "Update_time":                      now_iso,
-            "Updated_by":                       "system",
-            # Frozen at insert; never bumped by officer actions. Drives the
-            # FIFO ordering on the Customs / Tax queues.
-            "Created_time":                     now_iso,
-        }
 
-        upsert_investigation_set(so_row, sor_row, soc_row)
+        # ── Check for a similar open case ────────────────────────────────
+        existing = find_similar_open_case(
+            seller      = msg.get("Seller_Name", ""),
+            destination = msg.get("Country_Destination", ""),
+            category    = msg.get("HS_Product_Category", ""),
+            description = msg.get("Product_Description", ""),
+        )
 
-        # Push hydrated case so frontends render without a follow-up fetch
-        hydrated = get_case_hydrated(case_id) or {"Case_ID": case_id}
-        _push_rg_case_sse({"event": "new_case", "case": hydrated})
+        if existing:
+            # ── Append to existing case ──────────────────────────────────
+            existing_case_id = existing["Case_ID"]
+            append_order_to_case(existing_case_id, so_row, sor_row)
+            hydrated = get_case_hydrated(existing_case_id)
+            _push_rg_case_sse({"event": "case_updated", "action": "tx_appended", "case": hydrated})
+        else:
+            # ── Create a new case ────────────────────────────────────────
+            case_id = f"CASE-{_uuid.uuid4().hex[:12].upper()}"
+            so_row["Case_ID"] = case_id
+
+            soc_row = {
+                "Case_ID":                          case_id,
+                "Sales_Order_Business_Key":         bk,
+                "Status":                           STATUS.NEW,
+                "VAT_Problem_Type":                 problem_type,
+                "Recommended_Product_Value":        None,
+                "Recommended_VAT_Product_Category": None,
+                "Recommended_VAT_Rate":             None,
+                "Recommended_VAT_Fee":              None,
+                "AI_Analysis":                      None,
+                "AI_Confidence":                    None,
+                "VAT_Gap_Fee":                      None,
+                "Evaluation_by":                    None,
+                "Proposed_Action_Tax":              None,
+                "Proposed_Action_Customs":          None,
+                "Communication":                    "[]",
+                "Additional_Evidence":              None,
+                "Update_time":                      now_iso,
+                "Updated_by":                       "system",
+                "Created_time":                     now_iso,
+            }
+
+            upsert_investigation_set(so_row, sor_row, soc_row)
+
+            hydrated = get_case_hydrated(case_id) or {"Case_ID": case_id}
+            _push_rg_case_sse({"event": "new_case", "case": hydrated})
 
 
 # ── (Revenue Guardian two-entity workflow removed — replaced by

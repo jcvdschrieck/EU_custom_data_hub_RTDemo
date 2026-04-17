@@ -294,12 +294,14 @@ CREATE TABLE IF NOT EXISTS Sales_Order (
     Country_Destination         TEXT,
     Status                      TEXT,
     Update_time                 TEXT,
-    Updated_by                  TEXT
+    Updated_by                  TEXT,
+    Case_ID                     TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_so_id     ON Sales_Order(Sales_Order_ID);
-CREATE INDEX IF NOT EXISTS idx_so_status ON Sales_Order(Status);
-CREATE INDEX IF NOT EXISTS idx_so_origin ON Sales_Order(Country_Origin);
-CREATE INDEX IF NOT EXISTS idx_so_dest   ON Sales_Order(Country_Destination);
+CREATE INDEX IF NOT EXISTS idx_so_id      ON Sales_Order(Sales_Order_ID);
+CREATE INDEX IF NOT EXISTS idx_so_status  ON Sales_Order(Status);
+CREATE INDEX IF NOT EXISTS idx_so_origin  ON Sales_Order(Country_Origin);
+CREATE INDEX IF NOT EXISTS idx_so_dest    ON Sales_Order(Country_Destination);
+CREATE INDEX IF NOT EXISTS idx_so_case_id ON Sales_Order(Case_ID);
 """
 
 _SALES_ORDER_RISK_DDL = """
@@ -452,13 +454,17 @@ def init_investigation_db() -> None:
     _init_ddl(INVESTIGATION_DB, _SALES_ORDER_DDL)
     _init_ddl(INVESTIGATION_DB, _SALES_ORDER_RISK_DDL)
     _init_ddl(INVESTIGATION_DB, _SALES_ORDER_CASE_DDL)
-    # Migrate older DBs: add Created_time column + back-fill from Update_time
+    # Migrate older DBs: add columns introduced after initial schema
     conn = _connect(INVESTIGATION_DB)
     with conn:
-        try:
-            conn.execute("ALTER TABLE Sales_Order_Case ADD COLUMN Created_time TEXT")
-        except sqlite3.OperationalError:
-            pass  # column already exists
+        for table, col, definition in [
+            ("Sales_Order_Case", "Created_time", "TEXT"),
+            ("Sales_Order",      "Case_ID",      "TEXT"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {definition}")
+            except sqlite3.OperationalError:
+                pass
         conn.execute("UPDATE Sales_Order_Case SET Created_time = Update_time WHERE Created_time IS NULL")
     conn.close()
 
@@ -1318,6 +1324,116 @@ def get_suspicion_types() -> list[dict]:
     return [dict(r) for r in rows]
 
 
+# ── Case grouping: similarity check + append ────────────────────────────────
+#
+# Similar transactions (exact seller + destination + category, fuzzy
+# description) are grouped into the same open case. Similarity is
+# assessed with Jaccard word overlap on the product description.
+
+DESCRIPTION_SIMILARITY_THRESHOLD = 0.4
+
+
+def _jaccard_words(a: str, b: str) -> float:
+    """Jaccard similarity on lowercased word sets."""
+    wa = set((a or "").lower().split())
+    wb = set((b or "").lower().split())
+    if not wa or not wb:
+        return 0.0
+    return len(wa & wb) / len(wa | wb)
+
+
+def find_similar_open_case(
+    seller: str, destination: str, category: str, description: str,
+) -> dict | None:
+    """Find an open (non-Closed) case whose primary or grouped orders
+    share the same seller + destination + category AND whose product
+    description passes the Jaccard similarity threshold.
+
+    Returns the hydrated case dict or None.
+    """
+    conn = _connect(INVESTIGATION_DB)
+    # Query all Sales_Orders linked to non-Closed cases that match
+    # the exact fields. Case_ID on Sales_Order is set at creation.
+    rows = conn.execute("""
+        SELECT DISTINCT o.Case_ID, o.Product_Description, c.Status
+        FROM Sales_Order o
+        JOIN Sales_Order_Case c ON o.Case_ID = c.Case_ID
+        WHERE o.Seller_Name          = ?
+          AND o.Country_Destination  = ?
+          AND o.HS_Product_Category  = ?
+          AND c.Status               != 'Closed'
+          AND o.Case_ID IS NOT NULL
+    """, (seller or "", destination or "", category or "")).fetchall()
+    conn.close()
+
+    best_case_id = None
+    best_sim     = 0.0
+    for r in rows:
+        sim = _jaccard_words(description, r["Product_Description"])
+        if sim >= DESCRIPTION_SIMILARITY_THRESHOLD and sim > best_sim:
+            best_sim     = sim
+            best_case_id = r["Case_ID"]
+
+    if best_case_id is None:
+        return None
+    return get_case_hydrated(best_case_id)
+
+
+def append_order_to_case(case_id: str, so_row: dict, sor_row: dict) -> None:
+    """Add a Sales_Order + Sales_Order_Risk to an existing case.
+    Sets Case_ID on the Sales_Order row. Single transaction."""
+    so_row["Case_ID"] = case_id
+    conn = _connect(INVESTIGATION_DB)
+    try:
+        with conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO Sales_Order (
+                    Sales_Order_ID, Sales_Order_Business_Key,
+                    HS_Product_Category, Product_Description, Product_Value,
+                    VAT_Rate, VAT_Fee, Seller_Name,
+                    Country_Origin, Country_Destination,
+                    Status, Update_time, Updated_by, Case_ID
+                ) VALUES (
+                    :Sales_Order_ID, :Sales_Order_Business_Key,
+                    :HS_Product_Category, :Product_Description, :Product_Value,
+                    :VAT_Rate, :VAT_Fee, :Seller_Name,
+                    :Country_Origin, :Country_Destination,
+                    :Status, :Update_time, :Updated_by, :Case_ID
+                )
+            """, so_row)
+            conn.execute("""
+                INSERT OR REPLACE INTO Sales_Order_Risk (
+                    Sales_Order_Risk_ID, Sales_Order_Business_Key,
+                    Risk_Type, Overall_Risk_Score, Overall_Risk_Level,
+                    Seller_Risk_Score, Country_Risk_Score,
+                    Product_Category_Risk_Score, Manufacturer_Risk_Score,
+                    Confidence_Score, Overall_Risk_Description,
+                    Proposed_Risk_Action, Risk_Comment,
+                    Evaluation_by, Update_time, Updated_by
+                ) VALUES (
+                    :Sales_Order_Risk_ID, :Sales_Order_Business_Key,
+                    :Risk_Type, :Overall_Risk_Score, :Overall_Risk_Level,
+                    :Seller_Risk_Score, :Country_Risk_Score,
+                    :Product_Category_Risk_Score, :Manufacturer_Risk_Score,
+                    :Confidence_Score, :Overall_Risk_Description,
+                    :Proposed_Risk_Action, :Risk_Comment,
+                    :Evaluation_by, :Update_time, :Updated_by
+                )
+            """, sor_row)
+    finally:
+        conn.close()
+
+
+def get_case_transaction_count(case_id: str) -> int:
+    """Count Sales_Order rows linked to a case."""
+    conn = _connect(INVESTIGATION_DB)
+    n = conn.execute(
+        "SELECT COUNT(*) FROM Sales_Order WHERE Case_ID = ?", (case_id,)
+    ).fetchone()[0]
+    conn.close()
+    return n
+
+
 def update_sales_order_status(business_key: str, status: str) -> bool:
     """Update Sales_Order.Status in investigation.db for a given business key."""
     conn = _connect(INVESTIGATION_DB)
@@ -1394,13 +1510,13 @@ def upsert_investigation_set(so_row: dict, sor_row: dict, soc_row: dict) -> None
                     HS_Product_Category, Product_Description, Product_Value,
                     VAT_Rate, VAT_Fee, Seller_Name,
                     Country_Origin, Country_Destination,
-                    Status, Update_time, Updated_by
+                    Status, Update_time, Updated_by, Case_ID
                 ) VALUES (
                     :Sales_Order_ID, :Sales_Order_Business_Key,
                     :HS_Product_Category, :Product_Description, :Product_Value,
                     :VAT_Rate, :VAT_Fee, :Seller_Name,
                     :Country_Origin, :Country_Destination,
-                    :Status, :Update_time, :Updated_by
+                    :Status, :Update_time, :Updated_by, :Case_ID
                 )
             """, so_row)
             conn.execute("""
@@ -1460,7 +1576,8 @@ _HYDRATED_CASE_SQL = """
         r.Seller_Risk_Score, r.Country_Risk_Score,
         r.Product_Category_Risk_Score, r.Manufacturer_Risk_Score,
         r.Confidence_Score, r.Proposed_Risk_Action,
-        r.Overall_Risk_Description
+        r.Overall_Risk_Description,
+        (SELECT COUNT(*) FROM Sales_Order s2 WHERE s2.Case_ID = c.Case_ID) AS transaction_count
     FROM Sales_Order_Case c
     LEFT JOIN Sales_Order      o ON c.Sales_Order_Business_Key = o.Sales_Order_Business_Key
     LEFT JOIN Sales_Order_Risk r ON c.Sales_Order_Business_Key = r.Sales_Order_Business_Key
