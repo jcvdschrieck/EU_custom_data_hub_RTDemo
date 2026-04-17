@@ -1047,16 +1047,23 @@ function PipelineDiagram({ pipeline }) {
       const ey = eRect.top + eRect.height / 2 - cRect.top
       const ctx = ctRect.left + ctRect.width / 2 - cRect.left
       const cty = ctRect.top - cRect.top
-      // DB Store + Investigation Outcome positions
-      let dbx = 0, dby = 0, ix = 0, iy = 0, hubRight = 0, hubBottom = 0
+      // Measured positions for overlay arrows
+      let dbx = 0, dby = 0, dbTop = 0
+      let ix = 0, iy = 0, iLeft = 0, iBottom = 0
+      let hubRight = 0, hubBottom = 0
+      let ctBottom = 0
       if (dbStore && invOut) {
         const dbRect = dbStore.getBoundingClientRect()
         const iRect = invOut.getBoundingClientRect()
-        dbx = dbRect.left - cRect.left
+        dbx = dbRect.left + dbRect.width / 2 - cRect.left
         dby = dbRect.top + dbRect.height / 2 - cRect.top
+        dbTop = dbRect.top - cRect.top
         ix = iRect.right - cRect.left
         iy = iRect.top + iRect.height / 2 - cRect.top
+        iLeft = iRect.left + iRect.width / 2 - cRect.left
+        iBottom = iRect.bottom - cRect.top
       }
+      ctBottom = ctRect.bottom - cRect.top
       const hub = dbHubRef.current
       if (hub) {
         const hRect = hub.getBoundingClientRect()
@@ -1064,7 +1071,7 @@ function PipelineDiagram({ pipeline }) {
         hubBottom = hRect.bottom - cRect.top + 8
       }
       const containerH = cRect.height
-      setOverlayPaths({ ex, ey, ctx, cty, dbx, dby, ix, iy, hubRight, hubBottom, containerH })
+      setOverlayPaths({ ex, ey, ctx, cty, dbx, dby, dbTop, ix, iy, iLeft, iBottom, ctBottom, hubRight, hubBottom, containerH })
     }
     update()
     const id = setInterval(update, 2000)
@@ -1412,19 +1419,26 @@ function PipelineDiagram({ pipeline }) {
                     Sales Order Event → C&amp;T Risk Management
                   </text>
 
-                  {/* 2. Investigation Outcome → DB Store Factory (routes AROUND the Data Hub cylinder) */}
-                  {overlayPaths.ix > 0 && overlayPaths.hubRight > 0 && (
-                    <>
-                      <polyline
-                        points={`${overlayPaths.ix + 4},${overlayPaths.iy} ${overlayPaths.hubRight + 10},${overlayPaths.iy} ${overlayPaths.hubRight + 10},${overlayPaths.hubBottom + 6} ${overlayPaths.dbx + 10},${overlayPaths.hubBottom + 6} ${overlayPaths.dbx + 10},${overlayPaths.dby + 16}`}
-                        stroke={grey} strokeWidth="1.5" fill="none" />
-                      <polygon points={`${overlayPaths.dbx + 6},${overlayPaths.dby + 18} ${overlayPaths.dbx + 14},${overlayPaths.dby + 18} ${overlayPaths.dbx + 10},${overlayPaths.dby + 12}`}
-                               fill={grey} />
-                      <text x={overlayPaths.hubRight + 14} y={(overlayPaths.iy + overlayPaths.hubBottom) / 2 + 3}
-                            fontSize="7" fill={grey} fontWeight="600" writingMode="tb">
-                        Inv Outcome → Exit Process
-                      </text>
-                    </>
+                  {/* 2. Investigation Outcome → Exit Process Factory
+                       Zigzag: down from Inv Outcome, left between C&T and Custom Outcome, down into Exit Process */}
+                  {overlayPaths.ix > 0 && overlayPaths.dbx > 0 && (
+                    (() => {
+                      const midY = (overlayPaths.ctBottom + overlayPaths.dbTop) / 2  // gap between the two rows
+                      const zigX = overlayPaths.iLeft                                 // X = center of Inv Outcome
+                      return (
+                        <>
+                          <polyline
+                            points={`${zigX},${overlayPaths.iBottom} ${zigX},${midY} ${overlayPaths.dbx},${midY} ${overlayPaths.dbx},${overlayPaths.dbTop}`}
+                            stroke={grey} strokeWidth="1.5" fill="none" />
+                          <polygon points={`${overlayPaths.dbx - 4},${overlayPaths.dbTop} ${overlayPaths.dbx + 4},${overlayPaths.dbTop} ${overlayPaths.dbx},${overlayPaths.dbTop + 6}`}
+                                   fill={grey} />
+                          <text x={(zigX + overlayPaths.dbx) / 2} y={midY - 4}
+                                textAnchor="middle" fontSize="7" fill={grey} fontWeight="600">
+                            Inv Outcome → Exit Process
+                          </text>
+                        </>
+                      )
+                    })()
                   )}
 
                   {/* 3. Sales Order Event → DB Store Factory (down from entry, right below all boxes, up into DB Store) */}
