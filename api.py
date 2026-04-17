@@ -808,7 +808,7 @@ async def _ct_risk_management_factory() -> None:
 
     Does NOT publish INVESTIGATION_OUTCOME at creation. That event is the
     factory's exit signal and fires only when an officer closes the case
-    (see customs-action retainment/release and final-decision endpoints).
+    (see customs-action retainment/release endpoint).
     """
     from lib.database import upsert_investigation_set, get_case_hydrated
     from lib import sales_order_statuses as SO_STATUS
@@ -1276,7 +1276,7 @@ def api_reference():
     """
     from lib.database import (
         get_vat_categories, get_risk_levels, get_eu_regions, get_suspicion_types,
-        get_sales_order_statuses,
+        get_sales_order_statuses, get_case_statuses,
     )
     return {
         "vat_categories":        get_vat_categories(),
@@ -1284,6 +1284,7 @@ def api_reference():
         "regions":               get_eu_regions(),
         "suspicion_types":       get_suspicion_types(),
         "sales_order_statuses":  get_sales_order_statuses(),
+        "case_statuses":         get_case_statuses(),
     }
 
 
@@ -1492,6 +1493,7 @@ async def api_rg_customs_action(case_id: str, body: dict):
         "tax_review":       STATUS.AI_INVESTIGATING,
         "retainment":       STATUS.CLOSED,
         "release":          STATUS.CLOSED,
+        "refused":          STATUS.CLOSED,     # officer refuses Tax recommendation
         "input_requested":  STATUS.REQUESTED_INPUT,
     }
     new_status = status_map.get(action)
@@ -1504,10 +1506,9 @@ async def api_rg_customs_action(case_id: str, body: dict):
         "Update_time": now_iso,
         "Updated_by":  officer,
     }
-    if action in ("retainment", "release"):
-        updates["Proposed_Action_Customs"] = "retain" if action == "retainment" else "release"
-        # Update the Sales_Order.Status in investigation.db in parallel
-        # with the case closure.
+    if action in ("retainment", "release", "refused"):
+        action_map = {"retainment": "retain", "release": "release", "refused": "refuse"}
+        updates["Proposed_Action_Customs"] = action_map[action]
         from lib.database import update_sales_order_status
         from lib import sales_order_statuses as SO_STATUS
         bk = case.get("Sales_Order_Business_Key")
@@ -1525,10 +1526,9 @@ async def api_rg_customs_action(case_id: str, body: dict):
     update_case(case_id, updates)
 
     _emit_case_updated_sse(case_id, action)
-    if action in ("retainment", "release"):
-        await _publish_investigation_outcome(
-            case_id, "retained" if action == "retainment" else "released"
-        )
+    if action in ("retainment", "release", "refused"):
+        outcome_map = {"retainment": "retained", "release": "released", "refused": "refused"}
+        await _publish_investigation_outcome(case_id, outcome_map[action])
     if action == "tax_review":
         await _enqueue_for_agent(case_id)
     return {"ok": True}
@@ -1582,45 +1582,6 @@ def api_rg_tax_action(case_id: str, body: dict):
     update_case(case_id, updates)
 
     _emit_case_updated_sse(case_id, action)
-    return {"ok": True}
-
-
-@app.post("/api/rg/cases/{case_id}/final-decision")
-async def api_rg_final_decision(case_id: str, body: dict):
-    """
-    Final investigation decision.
-    body: {decision: "released"|"retained"|"refused", officer?: str}
-    """
-    from lib.database import get_case_by_id, update_case
-
-    case = get_case_by_id(case_id)
-    if not case:
-        return JSONResponse(status_code=404, content={"detail": "Case not found"})
-
-    decision = body.get("decision", "")
-    officer = body.get("officer", "Senior Officer")
-    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
-
-    if decision not in ("released", "retained", "refused"):
-        return JSONResponse(status_code=400, content={"detail": f"Unknown decision: {decision}"})
-
-    updates: dict = {
-        "Status": STATUS.CLOSED,
-        "Proposed_Action_Customs": {"released": "release", "retained": "retain", "refused": "refuse"}[decision],
-        "Update_time": now_iso,
-        "Updated_by": officer,
-    }
-
-    comm = case.get("Communication", [])
-    if not isinstance(comm, list):
-        comm = []
-    comm.append({"date": now_iso, "from": officer, "action": f"Final decision: {decision}", "message": ""})
-    updates["Communication"] = comm
-
-    update_case(case_id, updates)
-
-    _emit_case_updated_sse(case_id, f"final_{decision}")
-    await _publish_investigation_outcome(case_id, decision)
     return {"ok": True}
 
 

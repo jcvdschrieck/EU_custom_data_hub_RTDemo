@@ -173,6 +173,24 @@ _SEED_SALES_ORDER_STATUSES = [
 ]
 
 
+_CASE_STATUSES_DDL = """
+CREATE TABLE IF NOT EXISTS case_statuses (
+    name        TEXT    PRIMARY KEY,
+    description TEXT,
+    sort_order  INTEGER NOT NULL DEFAULT 0
+);
+"""
+
+_SEED_CASE_STATUSES = [
+    ("New",                            "Set at case creation by the C&T factory",                       10),
+    ("Under Review by Customs",        "Customs officer has opened / is reviewing the case",            20),
+    ("AI Investigation in Progress",   "VAT Fraud Detection agent is analysing (Tax review requested)", 30),
+    ("Under Review by Tax",            "Tax officer is reviewing after AI analysis completes",          40),
+    ("Requested Input by Third Party", "Awaiting response from an external third party",                50),
+    ("Closed",                         "Terminal — officer recommended release or retainment",          60),
+]
+
+
 _SEED_VAT_CATEGORIES = [
     ("Educational Material", 9.0,  "Books, learning aids", 10),
     ("Consumer Electronics", 23.0, "Phones, audio, smart devices", 20),
@@ -422,6 +440,7 @@ def init_european_custom_db() -> None:
     _init_ddl(EUROPEAN_CUSTOM_DB, _SUSPICION_TYPES_DDL)
     _init_ddl(EUROPEAN_CUSTOM_DB, _ML_RISK_RULES_DDL)
     _init_ddl(EUROPEAN_CUSTOM_DB, _SALES_ORDER_STATUSES_DDL)
+    _init_ddl(EUROPEAN_CUSTOM_DB, _CASE_STATUSES_DDL)
     _seed_reference_tables()
     _seed_ml_risk_rules_from_xlsx()
 
@@ -1160,6 +1179,10 @@ def _seed_reference_tables() -> None:
             "INSERT OR IGNORE INTO sales_order_statuses (name, description, sort_order) VALUES (?, ?, ?)",
             _SEED_SALES_ORDER_STATUSES,
         )
+        conn.executemany(
+            "INSERT OR IGNORE INTO case_statuses (name, description, sort_order) VALUES (?, ?, ?)",
+            _SEED_CASE_STATUSES,
+        )
     conn.close()
 
 
@@ -1266,6 +1289,15 @@ def lookup_ml_risk_rule(seller: str, country_origin: str,
           vat_product_category or "", country_destination or "")).fetchone()
     conn.close()
     return dict(row) if row else None
+
+
+def get_case_statuses() -> list[dict]:
+    conn = _connect(EUROPEAN_CUSTOM_DB)
+    rows = conn.execute(
+        "SELECT name, description FROM case_statuses ORDER BY sort_order, name"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 def get_sales_order_statuses() -> list[dict]:
