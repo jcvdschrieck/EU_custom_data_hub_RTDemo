@@ -1100,12 +1100,12 @@ function PipelineDiagram({ pipeline }) {
                      + (customStatus.custom_release    || 0)
                      + (customStatus.custom_retain     || 0)
 
-  // Row 1: two processing zones + Investigation event broker below
-  const OV_H = 94, RT_H = 230, INV_H = 94, LGAP = 10
-  const ROW1_H = OV_H + LGAP + RT_H + LGAP + INV_H
+  // Row 1: three processing zones stacked
+  const OV_H = 94, RT_H = 230, MS_H = 110, LGAP = 10
+  const ROW1_H = OV_H + LGAP + RT_H + LGAP + MS_H
   const yOV = OV_H / 2
   const yRT = OV_H + LGAP + RT_H / 2
-  const yINV = OV_H + LGAP + RT_H + LGAP + INV_H / 2
+  const yMS = OV_H + LGAP + RT_H + LGAP + MS_H / 2
 
   // Zone width wraps the widest factory + fan-out + padding
   const ZONE_W = 280
@@ -1192,8 +1192,8 @@ function PipelineDiagram({ pipeline }) {
               </Zone>
             </div>
 
-            {/* FanOut: Entry → Sales Order Validation + Real-Time Risk Assessment */}
-            <FanOutSVG height={ROW1_H} targetYs={[yOV, yRT]} width={48} />
+            {/* FanOut: Entry → Sales Order Validation + RT Risk Assessment + MS Risk Monitors */}
+            <FanOutSVG height={ROW1_H} targetYs={[yOV, yRT, yMS]} width={48} />
 
             {/* Three parallel zones stacked — all at ZONE_W so Row 1 is visually aligned */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: LGAP }}>
@@ -1235,32 +1235,52 @@ function PipelineDiagram({ pipeline }) {
                 </Zone>
               </div>
 
-              {/* Goods Transport zone removed — flow eliminated */}
+              {/* Member State Risk Monitors — separate dashed zone */}
+              <div style={{ height: MS_H, display: 'flex', alignItems: 'center' }}>
+                <div style={{
+                  width: ZONE_W, height: '100%', boxSizing: 'border-box',
+                  border: '1px dashed #8fb8de', borderRadius: 6,
+                  padding: '6px 10px',
+                  background: '#f6f9fc',
+                }}>
+                  <div style={{
+                    fontSize: 9, fontWeight: 700, color: '#8fb8de',
+                    textTransform: 'uppercase', letterSpacing: '0.08em',
+                    textAlign: 'center', marginBottom: 4,
+                  }}>Member State Risk Monitors</div>
+                  <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: 'calc(100% - 24px)' }}>
+                    <FactoryNode icon="🇮🇪" label="IE Watchlist" description="1–5 s · Ireland only" sm width={RT_FACTORY_W}
+                      tooltip="RT Risk Assessment 3 — Ireland-specific watchlist. Subscribes to Sales Order Event but only processes IE-bound orders. Uniform 1–5 s latency simulating a remote server managed by the Irish authority. Publishes to the unified RT Risk Outcome broker." />
+                    <div style={{ width: 8 }} />
+                    <Arrow />
+                  </div>
+                </div>
+              </div>
 
             </div>
 
             {/* Arrows: zones → brokers */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: LGAP }}>
-              <div style={{ height: OV_H,  display: 'flex', alignItems: 'center' }}><Arrow /></div>
-              <div style={{ height: RT_H,  display: 'flex', alignItems: 'center' }}><Arrow /></div>
+              <div style={{ height: OV_H, display: 'flex', alignItems: 'center' }}><Arrow /></div>
+              <div style={{ height: RT_H, display: 'flex', alignItems: 'center' }}><Arrow /></div>
+              <div style={{ height: MS_H, display: 'flex', alignItems: 'center' }}><Arrow /></div>
             </div>
 
-            {/* Three output brokers — same width, same default blue */}
+            {/* Output brokers — OV validation + RT Risk Outcome (spanning RT + MS zones) */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: LGAP }}>
               <div style={{ height: OV_H, display: 'flex', alignItems: 'center' }}>
                 <BrokerNode label="Sales Order Validation" topicKey="ORDER_VALIDATION"
                   count={ev.order_validation} sm width={OUT_BROKER_W}
                   tooltip="ORDER_VALIDATION — field-completeness outcome per order. Consumed by the Automated Assessment Factory." />
               </div>
-              <div style={{ height: RT_H, display: 'flex', alignItems: 'center' }}>
+              <div style={{ height: RT_H + LGAP + MS_H, display: 'flex', alignItems: 'center' }}>
                 <BrokerNode label="RT Risk Outcome" topicKey="RT_RISK_OUTCOME"
-                  count={(ev.rt_risk_1_outcome || 0) + (ev.rt_risk_2_outcome || 0)} sm width={OUT_BROKER_W}
-                  tooltip="RT_RISK_OUTCOME — unified topic. Both risk engines publish here with an engine identifier. The Automated Assessment Factory subscribes and computes a consolidated score (flagged/total) with confidence.">
-                  <FlaggedBadge flagged={(rf.rt_risk_1_flagged || 0) + (rf.rt_risk_2_flagged || 0)}
-                    total={(ev.rt_risk_1_outcome || 0) + (ev.rt_risk_2_outcome || 0)} />
+                  count={(ev.rt_risk_1_outcome || 0) + (ev.rt_risk_2_outcome || 0) + (ev.rt_risk_3_outcome || 0)} sm width={OUT_BROKER_W}
+                  tooltip="RT_RISK_OUTCOME — unified topic. All risk engines (EU + Member State) publish here with an engine identifier. The Automated Assessment Factory subscribes and computes a consolidated risk score.">
+                  <FlaggedBadge flagged={(rf.rt_risk_1_flagged || 0) + (rf.rt_risk_2_flagged || 0) + (rf.rt_risk_3_flagged || 0)}
+                    total={(ev.rt_risk_1_outcome || 0) + (ev.rt_risk_2_outcome || 0) + (ev.rt_risk_3_outcome || 0)} />
                 </BrokerNode>
               </div>
-              {/* Goods Arrival Notification broker removed */}
             </div>
 
             {/* Fan-in: 2 output brokers → Automated Assessment Factory */}
