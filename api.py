@@ -323,17 +323,17 @@ async def _RT_risk_monitoring_1_factory() -> None:
         expire_old_alarms(tx["transaction_date"][:19])
 
         await broker.publish(RT_RISK_OUTCOME, {
-            "engine":   "vat_ratio",
-            "tx":       tx,
-            "risk":     risk,
-            "flagged":  flagged,
-            "alarm_id": alarm_id,
-            "alarm":    new_alarm or next(
+            "engine":     "vat_ratio",
+            "order_id":   tx["transaction_id"],
+            "risk":       risk,
+            "applicable": True,
+            "alarm_id":   alarm_id,
+            "alarm":      new_alarm or next(
                 (a for a in _live_alarms if a.get("id") == alarm_id), {}
             ) if flagged else None,
         })
         # Legacy counter
-        await broker.publish(RT_RISK_1_OUTCOME, {"tx": tx, "risk": risk, "flagged": flagged})
+        await broker.publish(RT_RISK_1_OUTCOME, {"order_id": tx["transaction_id"], "risk": risk, "flagged": flagged})
 
 
 # ── RT Risk Monitoring 2 Factory (ML watchlist — 4-tuple + per-dim weights) ──
@@ -378,20 +378,20 @@ async def _RT_risk_monitoring_2_factory() -> None:
             risk    = 0.0
             flagged = False
             payload: dict = {
-                "engine":  "watchlist",
-                "tx":      tx,
-                "risk":    risk,
-                "flagged": flagged,
-                "reason":  "clear",
+                "engine":     "watchlist",
+                "order_id":   tx["transaction_id"],
+                "risk":       risk,
+                "applicable": True,
+                "reason":     "clear",
             }
         else:
             risk    = float(rule.get("risk", 0.0) or 0.0)
             flagged = risk >= ML_RISK_FLAG_THRESHOLD
             payload = {
                 "engine":        "watchlist",
-                "tx":            tx,
+                "order_id":      tx["transaction_id"],
                 "risk":          risk,
-                "flagged":       flagged,
+                "applicable":    True,
                 "reason":        "ml_watchlist_match" if flagged else "ml_watchlist_low_risk",
                 "description":   rule.get("description"),
                 # Per-dimension weighted sub-scores — propagated into
@@ -405,7 +405,7 @@ async def _RT_risk_monitoring_2_factory() -> None:
 
         await broker.publish(RT_RISK_OUTCOME, payload)
         # Legacy counter
-        await broker.publish(RT_RISK_2_OUTCOME, {"tx": tx, "risk": risk, "flagged": flagged})
+        await broker.publish(RT_RISK_2_OUTCOME, {"order_id": tx["transaction_id"], "risk": risk, "flagged": flagged})
 
 
 # ── RT Risk Monitoring 3 Factory (Ireland-specific watchlist) ───────────────
@@ -443,28 +443,30 @@ async def _RT_risk_monitoring_3_factory() -> None:
     while True:
         tx = await q.get()
         if (tx.get("buyer_country") or "").upper() != "IE":
-            continue   # not applicable — third-party server is not invoked
+            await broker.publish(RT_RISK_OUTCOME, {
+                "engine":     "ireland_watchlist",
+                "order_id":   tx["transaction_id"],
+                "risk":       0.0,
+                "applicable": False,
+                "reason":     "not_applicable",
+            })
+            continue
 
         async def _process(tx=tx):
-            # Run each IE evaluation in its own task so a slow remote
-            # response doesn't block the next event.
             await asyncio.sleep(_random.uniform(1.0, 5.0))
             seller_id      = tx.get("seller_id", "")
             seller_country = (tx.get("seller_country") or "").upper()
             matched = (seller_id, seller_country) in IE_WATCHLIST
             risk    = 1.0 if matched else 0.0
-            flagged = risk >= 0.5
             await broker.publish(RT_RISK_OUTCOME, {
-                "engine":  "ireland_watchlist",
-                "tx":      tx,
-                "risk":    risk,
-                "flagged": flagged,
-                "reason":  "ie_watchlist_match" if flagged else "clear",
+                "engine":     "ireland_watchlist",
+                "order_id":   tx["transaction_id"],
+                "risk":       risk,
+                "applicable": True,
+                "reason":     "ie_watchlist_match" if risk >= 0.5 else "clear",
             })
-            # Legacy counter
-            await broker.publish(RT_RISK_3_OUTCOME, {"tx": tx, "risk": risk, "flagged": flagged})
+            await broker.publish(RT_RISK_3_OUTCOME, {"order_id": tx["transaction_id"], "risk": risk, "flagged": risk >= 0.5})
 
-        # Fire-and-forget so the engine can pick up the next event immediately.
         asyncio.create_task(_process())
 
 
@@ -523,13 +525,13 @@ async def _RT_risk_monitoring_4_factory() -> None:
         flagged = risk >= 0.5
 
         await broker.publish(RT_RISK_OUTCOME, {
-            "engine":  "description_vagueness",
-            "tx":      tx,
-            "risk":    risk,
-            "flagged": flagged,
-            "reason":  "vague_description" if flagged else "clear",
+            "engine":     "description_vagueness",
+            "order_id":   tx["transaction_id"],
+            "risk":       risk,
+            "applicable": True,
+            "reason":     "vague_description" if risk >= 0.5 else "clear",
         })
-        await broker.publish(RT_RISK_4_OUTCOME, {"tx": tx, "risk": risk, "flagged": flagged})
+        await broker.publish(RT_RISK_4_OUTCOME, {"order_id": tx["transaction_id"], "risk": risk, "flagged": flagged})
 
 
 # ── (RT Consolidation Factory removed — its logic is now inside
@@ -641,20 +643,30 @@ async def _release_factory() -> None:
     def _compute_score(entry: dict) -> tuple[float, float, str]:
         """Return (score, confidence, route).
 
-        Score is the average of per-engine `risk` values (each in [0, 1]),
-        not a flag count. Engines that output a binary risk contribute
-        exactly 0.0 or 1.0; engines that output a continuous score (e.g.
-        the ML watchlist) contribute their raw value.
+        Score is the average of per-engine `risk` values for applicable
+        engines only. Non-applicable engines (e.g. IE watchlist for a
+        non-IE transaction) are excluded from both numerator and denominator.
+
+        Confidence = applicable engines received / total applicable engines
+        expected. An engine that self-reports applicable=False counts toward
+        "received" (we know its status) but not toward the score or the
+        expected count.
         """
         outcomes = entry["risk_outcomes"]
-        n_received = len(outcomes)
-        confidence = n_received / TOTAL_RISK_ENGINES if TOTAL_RISK_ENGINES > 0 else 0
 
-        if n_received == 0:
-            score = 0.5   # no outcomes → 50% (uncertain)
+        applicable = {eng: o for eng, o in outcomes.items()
+                      if o.get("applicable", True)}
+        n_applicable = len(applicable)
+        n_not_applicable = sum(1 for o in outcomes.values()
+                               if not o.get("applicable", True))
+        n_expected = TOTAL_RISK_ENGINES - n_not_applicable
+        confidence = n_applicable / n_expected if n_expected > 0 else 0
+
+        if n_applicable == 0:
+            score = 0.5
         else:
-            risks = [float(o.get("risk", 0.0) or 0.0) for o in outcomes.values()]
-            score = sum(risks) / n_received
+            risks = [float(o.get("risk", 0.0) or 0.0) for o in applicable.values()]
+            score = sum(risks) / n_applicable
 
         if score > THRESHOLD_RETAIN:
             route = "red"
@@ -682,109 +694,45 @@ async def _release_factory() -> None:
 
         score, confidence, route = _compute_score(entry)
         outcomes = entry["risk_outcomes"]
-
-        # Collect alarm info
-        alarm_id = None
-        alarm = None
-        for o in outcomes.values():
-            if o.get("alarm_id"):
-                alarm_id = o["alarm_id"]
-                alarm = o.get("alarm")
-                break
-
-        # Get tx data
-        tx = None
-        for o in outcomes.values():
-            tx = o.get("tx")
-            if tx:
-                break
-        if tx is None and entry["validation"]:
-            tx = entry["validation"]["tx"]
-        if tx is None:
-            _buffer.pop(tx_id, None)
-            return
-
         val = entry["validation"]
         import uuid
         now_iso = datetime.now(timezone.utc).isoformat()
 
-        # Uniformized field names matching the data model
-        so_bk = f"{tx['transaction_id']}-001"  # business key
+        so_bk = f"{tx_id}-001"  # business key
         risk_id = f"RISK-{uuid.uuid4().hex[:12].upper()}"
 
-        # Per-dimension scores come from the ML watchlist engine (engine 2)
-        # when it has a rule hit. The Manufacturer_Risk_Score column is
-        # repurposed to store the Country-of-Destination weight (frontend
-        # label relabels accordingly).
-        ml = outcomes.get("watchlist", {}) or {}
+        route_label = {"red": "retain", "amber": "investigate", "green": "release"}[route]
 
-        def _pct(v):
-            """Rule weights are 0-1; store as 0-100 to match Overall_Risk_Score scale."""
-            return round(float(v) * 100, 1) if v is not None else None
+        # Build per-engine outcome dict: engine_name → outcome fields
+        # (strip order_id since it's already at the top level)
+        engine_outcomes = {}
+        for eng, o in outcomes.items():
+            entry_out = {k: v for k, v in o.items() if k not in ("order_id",)}
+            engine_outcomes[eng] = entry_out
 
-        risk_payload = {
-            # Data model fields
-            "Sales_Order_Risk_ID":         risk_id,
+        payload = {
+            "order_id":                    tx_id,
+            "Sales_Order_ID":              tx_id,
             "Sales_Order_Business_Key":    so_bk,
-            "Sales_Order_ID":              tx["transaction_id"],
+            "route":                       route_label,
+            "validated":                   val["validated"],
+            "validation_errors":           val["validation_errors"],
+            # Risk assessment fields
+            "Sales_Order_Risk_ID":         risk_id,
             "Risk_Type":                   "VAT",
-            "Overall_Risk_Score":          round(score * 100, 1),
+            "Overall_Risk_Score":          round(score, 4),
             "Overall_Risk_Level":          route,
             "Confidence_Score":            round(confidence, 2),
-            "Proposed_Risk_Action":        {"red": "retain", "amber": "investigate", "green": "release"}[route],
-            # Dimensional scores from the ML rule (None when no rule hit)
-            "Seller_Risk_Score":           _pct(ml.get("seller_risk")),
-            "Country_Risk_Score":          _pct(ml.get("country_risk")),
-            "Product_Category_Risk_Score": _pct(ml.get("product_category_risk")),
-            "Manufacturer_Risk_Score":     _pct(ml.get("destination_risk")),
-            "Overall_Risk_Description":    ml.get("description"),
-            "Risk_Comment":                None,
-            "Evaluation_by":               None,
+            "Proposed_Risk_Action":        route_label,
+            "engine_outcomes":             engine_outcomes,
             "Update_time":                 now_iso,
-            "Updated_by":                  None,
-            # Internal fields for downstream processing
-            "engines":      {eng: o.get("flagged", False)
-                             for eng, o in outcomes.items()},
-            "alarm_id":     alarm_id,
-            "alarm":        alarm,
-            # Legacy fields
-            "risk_score":   score,
-            "risk_route":   route,
-            "confidence":   round(confidence, 2),
         }
 
         # Legacy RT_SCORE event for pipeline counter compatibility
         await broker.publish(RT_SCORE, {
-            "tx": tx,
-            "risk_score": route,
-            "risk_1_flagged": outcomes.get("vat_ratio", {}).get("flagged", False),
-            "risk_2_flagged": outcomes.get("watchlist", {}).get("flagged", False),
-            "alarm_id": alarm_id,
-            "alarm": alarm,
+            "order_id":      tx_id,
+            "risk_score":    route,
         })
-
-        # Route label for the payload
-        route_label = {"red": "retain", "amber": "investigate", "green": "release"}[route]
-        payload = {
-            "tx": tx,
-            "route": route_label,
-            "validated": val["validated"],
-            "validation_errors": val["validation_errors"],
-            # Uniformized Sales_Order fields
-            "Sales_Order_ID":           tx["transaction_id"],
-            "Sales_Order_Business_Key": so_bk,
-            "HS_Product_Category":      tx.get("item_category"),
-            "Product_Description":      tx.get("item_description"),
-            "Product_Value":            tx.get("value"),
-            "VAT_Rate":                 tx.get("vat_rate"),
-            "VAT_Fee":                  tx.get("vat_amount"),
-            "Seller_Name":              tx.get("seller_name"),
-            "Country_Origin":           tx.get("seller_country"),
-            "Country_Destination":      tx.get("buyer_country"),
-            "Status":                   route_label,
-            "Update_time":              now_iso,
-            **risk_payload,
-        }
 
         await broker.publish(ASSESSMENT_OUTCOME, payload)
 
@@ -827,7 +775,7 @@ async def _release_factory() -> None:
         q = broker.subscribe(RT_RISK_OUTCOME)
         while True:
             item = await q.get()
-            tx_id = item["tx"]["transaction_id"]
+            tx_id = item["order_id"]
             entry = _get(tx_id)
             if entry["routed"]:
                 continue   # late arrival — discard
@@ -881,110 +829,127 @@ async def _ct_risk_management_factory() -> None:
     from lib import sales_order_statuses as SO_STATUS
     import uuid as _uuid
 
-    q = broker.subscribe(ASSESSMENT_OUTCOME)
-    while True:
-        msg = await q.get()
-        route = msg.get("route")
-        # Only investigation cases require human review. Automated retain
-        # decisions are now finalised directly by the Exit Process Factory.
-        if route != "investigate":
-            continue
+    # Buffer transactions from SALES_ORDER_EVENT by order_id so that when
+    # an ASSESSMENT_OUTCOME arrives we can look up the original tx data.
+    _tx_buffer: dict[str, dict] = {}
 
-        now_iso = datetime.now(timezone.utc).isoformat()
-        bk = msg.get("Sales_Order_Business_Key", "")
-        case_id = f"CASE-{_uuid.uuid4().hex[:12].upper()}"
+    async def _drain_tx() -> None:
+        q = broker.subscribe(SALES_ORDER_EVENT)
+        while True:
+            tx = await q.get()
+            _tx_buffer[tx["transaction_id"]] = tx
 
-        # Derive VAT problem type from risk engine flags
-        engines = msg.get("engines", {}) or {}
-        if engines.get("vat_ratio") and engines.get("watchlist"):
-            problem_type = "VAT Rate Deviation + Watchlist Match"
-        elif engines.get("vat_ratio"):
-            problem_type = "VAT Rate Deviation"
-        elif engines.get("watchlist"):
-            problem_type = "Watchlist Match"
-        else:
-            problem_type = "Risk Pattern"
+    async def _drain_assessment() -> None:
+        q = broker.subscribe(ASSESSMENT_OUTCOME)
+        while True:
+            msg = await q.get()
+            route = msg.get("route")
+            if route != "investigate":
+                # Clean up the tx buffer for non-investigate routes
+                _tx_buffer.pop(msg.get("order_id", ""), None)
+                continue
 
-        # ── Build Sales_Order + Sales_Order_Risk rows (always created) ──
-        so_row = {
-            "Sales_Order_ID":           msg.get("Sales_Order_ID"),
-            "Sales_Order_Business_Key": bk,
-            "HS_Product_Category":      msg.get("HS_Product_Category"),
-            "Product_Description":      msg.get("Product_Description"),
-            "Product_Value":            msg.get("Product_Value"),
-            "VAT_Rate":                 msg.get("VAT_Rate"),
-            "VAT_Fee":                  msg.get("VAT_Fee"),
-            "Seller_Name":              msg.get("Seller_Name"),
-            "Country_Origin":           msg.get("Country_Origin"),
-            "Country_Destination":      msg.get("Country_Destination"),
-            "Status":                   SO_STATUS.UNDER_INVESTIGATION,
-            "Update_time":              now_iso,
-            "Updated_by":               "system",
-        }
-        sor_row = {
-            "Sales_Order_Risk_ID":         msg.get("Sales_Order_Risk_ID"),
-            "Sales_Order_Business_Key":    bk,
-            "Risk_Type":                   msg.get("Risk_Type", "VAT"),
-            "Overall_Risk_Score":          msg.get("Overall_Risk_Score"),
-            "Overall_Risk_Level":          msg.get("Overall_Risk_Level"),
-            "Seller_Risk_Score":           msg.get("Seller_Risk_Score"),
-            "Country_Risk_Score":          msg.get("Country_Risk_Score"),
-            "Product_Category_Risk_Score": msg.get("Product_Category_Risk_Score"),
-            "Manufacturer_Risk_Score":     msg.get("Manufacturer_Risk_Score"),
-            "Confidence_Score":            msg.get("Confidence_Score"),
-            "Overall_Risk_Description":    msg.get("Overall_Risk_Description"),
-            "Proposed_Risk_Action":        msg.get("Proposed_Risk_Action"),
-            "Risk_Comment":                msg.get("Risk_Comment"),
-            "Evaluation_by":               msg.get("Evaluation_by"),
-            "Update_time":                 now_iso,
-            "Updated_by":                  "system",
-        }
+            order_id = msg.get("order_id", "")
+            tx = _tx_buffer.pop(order_id, None) or {}
 
-        # ── Check for a similar open case ────────────────────────────────
-        existing = find_similar_open_case(
-            seller      = msg.get("Seller_Name", ""),
-            destination = msg.get("Country_Destination", ""),
-            category    = msg.get("HS_Product_Category", ""),
-            description = msg.get("Product_Description", ""),
-        )
+            now_iso = datetime.now(timezone.utc).isoformat()
+            bk = msg.get("Sales_Order_Business_Key", "")
 
-        if existing:
-            # ── Append to existing case ──────────────────────────────────
-            existing_case_id = existing["Case_ID"]
-            append_order_to_case(existing_case_id, so_row, sor_row)
-            hydrated = get_case_hydrated(existing_case_id)
-            _push_rg_case_sse({"event": "case_updated", "action": "tx_appended", "case": hydrated})
-        else:
-            # ── Create a new case ────────────────────────────────────────
-            case_id = f"CASE-{_uuid.uuid4().hex[:12].upper()}"
-            so_row["Case_ID"] = case_id
+            # Derive VAT problem type from engine outcomes
+            eo = msg.get("engine_outcomes", {}) or {}
+            vat_flagged = eo.get("vat_ratio", {}).get("risk", 0) >= 0.5
+            wl_flagged  = eo.get("watchlist", {}).get("risk", 0) >= 0.5
+            if vat_flagged and wl_flagged:
+                problem_type = "VAT Rate Deviation + Watchlist Match"
+            elif vat_flagged:
+                problem_type = "VAT Rate Deviation"
+            elif wl_flagged:
+                problem_type = "Watchlist Match"
+            else:
+                problem_type = "Risk Pattern"
 
-            soc_row = {
-                "Case_ID":                          case_id,
-                "Sales_Order_Business_Key":         bk,
-                "Status":                           STATUS.NEW,
-                "VAT_Problem_Type":                 problem_type,
-                "Recommended_Product_Value":        None,
-                "Recommended_VAT_Product_Category": None,
-                "Recommended_VAT_Rate":             None,
-                "Recommended_VAT_Fee":              None,
-                "AI_Analysis":                      None,
-                "AI_Confidence":                    None,
-                "VAT_Gap_Fee":                      None,
-                "Evaluation_by":                    None,
-                "Proposed_Action_Tax":              None,
-                "Proposed_Action_Customs":          None,
-                "Communication":                    "[]",
-                "Additional_Evidence":              None,
-                "Update_time":                      now_iso,
-                "Updated_by":                       "system",
-                "Created_time":                     now_iso,
+            # Extract per-dimension scores from the ML watchlist engine
+            ml = eo.get("watchlist", {})
+            def _pct(v):
+                return round(float(v) * 100, 1) if v is not None else None
+
+            # ── Build Sales_Order row from the buffered tx ──
+            so_row = {
+                "Sales_Order_ID":           order_id,
+                "Sales_Order_Business_Key": bk,
+                "HS_Product_Category":      tx.get("item_category"),
+                "Product_Description":      tx.get("item_description"),
+                "Product_Value":            tx.get("value"),
+                "VAT_Rate":                 tx.get("vat_rate"),
+                "VAT_Fee":                  tx.get("vat_amount"),
+                "Seller_Name":              tx.get("seller_name"),
+                "Country_Origin":           tx.get("seller_country"),
+                "Country_Destination":      tx.get("buyer_country"),
+                "Status":                   SO_STATUS.UNDER_INVESTIGATION,
+                "Update_time":              now_iso,
+                "Updated_by":               "system",
+            }
+            sor_row = {
+                "Sales_Order_Risk_ID":         msg.get("Sales_Order_Risk_ID"),
+                "Sales_Order_Business_Key":    bk,
+                "Risk_Type":                   msg.get("Risk_Type", "VAT"),
+                "Overall_Risk_Score":          msg.get("Overall_Risk_Score"),
+                "Overall_Risk_Level":          msg.get("Overall_Risk_Level"),
+                "Seller_Risk_Score":           _pct(ml.get("seller_risk")),
+                "Country_Risk_Score":          _pct(ml.get("country_risk")),
+                "Product_Category_Risk_Score": _pct(ml.get("product_category_risk")),
+                "Manufacturer_Risk_Score":     _pct(ml.get("destination_risk")),
+                "Confidence_Score":            msg.get("Confidence_Score"),
+                "Overall_Risk_Description":    ml.get("description"),
+                "Proposed_Risk_Action":        msg.get("Proposed_Risk_Action"),
+                "Update_time":                 now_iso,
+                "Updated_by":                  "system",
             }
 
-            upsert_investigation_set(so_row, sor_row, soc_row)
+            existing = find_similar_open_case(
+                seller      = tx.get("seller_name", ""),
+                destination = tx.get("buyer_country", ""),
+                category    = tx.get("item_category", ""),
+                description = tx.get("item_description", ""),
+            )
 
-            hydrated = get_case_hydrated(case_id) or {"Case_ID": case_id}
-            _push_rg_case_sse({"event": "new_case", "case": hydrated})
+            if existing:
+                existing_case_id = existing["Case_ID"]
+                append_order_to_case(existing_case_id, so_row, sor_row)
+                hydrated = get_case_hydrated(existing_case_id)
+                _push_rg_case_sse({"event": "case_updated", "action": "tx_appended", "case": hydrated})
+            else:
+                case_id = f"CASE-{_uuid.uuid4().hex[:12].upper()}"
+                so_row["Case_ID"] = case_id
+
+                soc_row = {
+                    "Case_ID":                          case_id,
+                    "Sales_Order_Business_Key":         bk,
+                    "Status":                           STATUS.NEW,
+                    "VAT_Problem_Type":                 problem_type,
+                    "Recommended_Product_Value":        None,
+                    "Recommended_VAT_Product_Category": None,
+                    "Recommended_VAT_Rate":             None,
+                    "Recommended_VAT_Fee":              None,
+                    "AI_Analysis":                      None,
+                    "AI_Confidence":                    None,
+                    "VAT_Gap_Fee":                      None,
+                    "Evaluation_by":                    None,
+                    "Proposed_Action_Tax":              None,
+                    "Proposed_Action_Customs":          None,
+                    "Communication":                    "[]",
+                    "Additional_Evidence":              None,
+                    "Update_time":                      now_iso,
+                    "Updated_by":                       "system",
+                    "Created_time":                     now_iso,
+                }
+
+                upsert_investigation_set(so_row, sor_row, soc_row)
+
+                hydrated = get_case_hydrated(case_id) or {"Case_ID": case_id}
+                _push_rg_case_sse({"event": "new_case", "case": hydrated})
+
+    await asyncio.gather(_drain_tx(), _drain_assessment())
 
 
 # ── (Revenue Guardian two-entity workflow removed — replaced by
@@ -1024,12 +989,9 @@ async def _db_store_worker() -> None:
             msg = await q.get()
             route = msg.get("route")
             if route == "release":
-                order_id = msg.get("Sales_Order_ID") or msg.get("Sales_Order_Business_Key", "")
-                await _emit(order_id, "automated_release")
+                await _emit(msg.get("order_id", ""), "automated_release")
             elif route == "retain":
-                # Automated retain: no human review needed — finalise here.
-                order_id = msg.get("Sales_Order_ID") or msg.get("Sales_Order_Business_Key", "")
-                await _emit(order_id, "automated_retain")
+                await _emit(msg.get("order_id", ""), "automated_retain")
 
     async def _drain_investigation() -> None:
         q = broker.subscribe(INVESTIGATION_OUTCOME)

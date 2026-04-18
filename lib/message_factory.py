@@ -47,6 +47,8 @@ _TOPIC_SALES_ORDER    = "sales_order_event"
 _TOPIC_RT_RISK_1      = "rt_risk_1_outcome"
 _TOPIC_RT_RISK_2      = "rt_risk_2_outcome"
 _TOPIC_RT_RISK_3      = "rt_risk_3_outcome"
+_TOPIC_RT_RISK_4      = "rt_risk_4_outcome"
+_TOPIC_ASSESSMENT     = "assessment_outcome"
 _TOPIC_RT_SCORE       = "rt_score"
 _TOPIC_ORDER_VAL      = "order_validation"
 _TOPIC_ARRIVAL        = "arrival_notification"
@@ -307,6 +309,19 @@ def build_file_payload(topic: str, message: dict) -> dict:
             "risk":    message.get("risk"),
             "flagged": message.get("flagged"),
             "reason":  message.get("reason"),
+        }
+    elif topic == _TOPIC_RT_RISK_4:
+        outcome = {
+            "risk":    message.get("risk"),
+            "flagged": message.get("flagged"),
+            "reason":  message.get("reason"),
+        }
+    elif topic == _TOPIC_ASSESSMENT:
+        outcome = {
+            "route":              message.get("route"),
+            "Overall_Risk_Score": message.get("Overall_Risk_Score"),
+            "Confidence_Score":   message.get("Confidence_Score"),
+            "engine_outcomes":    message.get("engine_outcomes", {}),
         }
     elif topic == _TOPIC_RT_SCORE:
         outcome = {
