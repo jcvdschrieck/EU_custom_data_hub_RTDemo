@@ -349,11 +349,28 @@ CREATE TABLE IF NOT EXISTS Sales_Order_Case (
     Additional_Evidence              TEXT,
     Update_time                      TEXT,
     Updated_by                       TEXT,
-    Created_time                     TEXT
+    Created_time                     TEXT,
+    -- Per-engine risk scores (0-1 average across all orders in the case)
+    Engine_VAT_Ratio                 REAL DEFAULT 0,
+    Engine_ML_Watchlist              REAL DEFAULT 0,
+    Engine_IE_Seller_Watchlist       REAL DEFAULT 0,
+    Engine_Description_Vagueness     REAL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_soc_bk      ON Sales_Order_Case(Sales_Order_Business_Key);
 CREATE INDEX IF NOT EXISTS idx_soc_status  ON Sales_Order_Case(Status);
 CREATE INDEX IF NOT EXISTS idx_soc_created ON Sales_Order_Case(Created_time);
+
+CREATE TABLE IF NOT EXISTS risk_engine_signals (
+    field_name    TEXT PRIMARY KEY,
+    engine_key    TEXT NOT NULL,
+    display_name  TEXT NOT NULL,
+    description   TEXT
+);
+INSERT OR IGNORE INTO risk_engine_signals VALUES
+    ('Engine_VAT_Ratio',             'vat_ratio',              'VAT Ratio Deviation',        'Statistical deviation in VAT/value ratio vs 8-week baseline'),
+    ('Engine_ML_Watchlist',          'watchlist',              'VAT Misclassification Risk',  'ML-based watchlist matching on seller × origin × category × destination'),
+    ('Engine_IE_Seller_Watchlist',   'ireland_watchlist',      'Seller Risk',                 'Ireland-specific seller watchlist for IE-destined goods'),
+    ('Engine_Description_Vagueness', 'description_vagueness',  'Description Vagueness',       'NLP-based detection of vague or generic product descriptions');
 """
 
 
@@ -458,8 +475,12 @@ def init_investigation_db() -> None:
     conn = _connect(INVESTIGATION_DB)
     with conn:
         for table, col, definition in [
-            ("Sales_Order_Case", "Created_time", "TEXT"),
-            ("Sales_Order",      "Case_ID",      "TEXT"),
+            ("Sales_Order_Case", "Created_time",              "TEXT"),
+            ("Sales_Order",      "Case_ID",                   "TEXT"),
+            ("Sales_Order_Case", "Engine_VAT_Ratio",          "REAL DEFAULT 0"),
+            ("Sales_Order_Case", "Engine_ML_Watchlist",       "REAL DEFAULT 0"),
+            ("Sales_Order_Case", "Engine_IE_Seller_Watchlist", "REAL DEFAULT 0"),
+            ("Sales_Order_Case", "Engine_Description_Vagueness", "REAL DEFAULT 0"),
         ]:
             try:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {definition}")
@@ -1424,6 +1445,33 @@ def append_order_to_case(case_id: str, so_row: dict, sor_row: dict) -> None:
         conn.close()
 
 
+def update_case_engine_scores(case_id: str, engine_scores: dict) -> None:
+    """Update the per-engine risk scores on a case. Called on case creation
+    and when re-averaging after a new order is appended.
+    engine_scores: {Engine_VAT_Ratio, Engine_ML_Watchlist, ...}"""
+    conn = _connect(INVESTIGATION_DB)
+    with conn:
+        conn.execute("""
+            UPDATE Sales_Order_Case SET
+                Engine_VAT_Ratio             = :Engine_VAT_Ratio,
+                Engine_ML_Watchlist           = :Engine_ML_Watchlist,
+                Engine_IE_Seller_Watchlist    = :Engine_IE_Seller_Watchlist,
+                Engine_Description_Vagueness  = :Engine_Description_Vagueness,
+                Update_time                   = :Update_time
+            WHERE Case_ID = :Case_ID
+        """, {**engine_scores, "Case_ID": case_id,
+              "Update_time": datetime.now(timezone.utc).isoformat()})
+    conn.close()
+
+
+def get_risk_engine_signals() -> list[dict]:
+    """Return the reference table mapping field names to display names."""
+    conn = _connect(INVESTIGATION_DB)
+    rows = conn.execute("SELECT * FROM risk_engine_signals").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 def get_case_transaction_count(case_id: str) -> int:
     """Count Sales_Order rows linked to a case."""
     conn = _connect(INVESTIGATION_DB)
@@ -1547,7 +1595,9 @@ def upsert_investigation_set(so_row: dict, sor_row: dict, soc_row: dict) -> None
                     VAT_Gap_Fee, Evaluation_by,
                     Proposed_Action_Tax, Proposed_Action_Customs,
                     Communication, Additional_Evidence,
-                    Update_time, Updated_by, Created_time
+                    Update_time, Updated_by, Created_time,
+                    Engine_VAT_Ratio, Engine_ML_Watchlist,
+                    Engine_IE_Seller_Watchlist, Engine_Description_Vagueness
                 ) VALUES (
                     :Case_ID, :Sales_Order_Business_Key, :Status,
                     :VAT_Problem_Type, :Recommended_Product_Value,
@@ -1556,7 +1606,9 @@ def upsert_investigation_set(so_row: dict, sor_row: dict, soc_row: dict) -> None
                     :VAT_Gap_Fee, :Evaluation_by,
                     :Proposed_Action_Tax, :Proposed_Action_Customs,
                     :Communication, :Additional_Evidence,
-                    :Update_time, :Updated_by, :Created_time
+                    :Update_time, :Updated_by, :Created_time,
+                    :Engine_VAT_Ratio, :Engine_ML_Watchlist,
+                    :Engine_IE_Seller_Watchlist, :Engine_Description_Vagueness
                 )
             """, soc_row)
     finally:

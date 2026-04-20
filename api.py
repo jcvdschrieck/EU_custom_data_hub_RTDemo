@@ -825,6 +825,7 @@ async def _ct_risk_management_factory() -> None:
     from lib.database import (
         upsert_investigation_set, get_case_hydrated,
         find_similar_open_case, append_order_to_case,
+        update_case_engine_scores, get_case_transaction_count,
     )
     from lib import sales_order_statuses as SO_STATUS
     import uuid as _uuid
@@ -853,8 +854,16 @@ async def _ct_risk_management_factory() -> None:
                 now_iso = datetime.now(timezone.utc).isoformat()
                 bk = msg.get("Sales_Order_Business_Key", "")
 
-                # Derive VAT problem type from engine outcomes
+                # Extract per-engine risk scores (0-1)
                 eo = msg.get("engine_outcomes", {}) or {}
+                eng_scores = {
+                    "Engine_VAT_Ratio":             float(eo.get("vat_ratio", {}).get("risk", 0) or 0),
+                    "Engine_ML_Watchlist":           float(eo.get("watchlist", {}).get("risk", 0) or 0),
+                    "Engine_IE_Seller_Watchlist":    float(eo.get("ireland_watchlist", {}).get("risk", 0) or 0),
+                    "Engine_Description_Vagueness":  float(eo.get("description_vagueness", {}).get("risk", 0) or 0),
+                }
+
+                # Derive VAT problem type from engine outcomes
                 vat_flagged = eo.get("vat_ratio", {}).get("risk", 0) >= 0.5
                 wl_flagged  = eo.get("watchlist", {}).get("risk", 0) >= 0.5
                 if vat_flagged and wl_flagged:
@@ -914,6 +923,16 @@ async def _ct_risk_management_factory() -> None:
                 if existing:
                     existing_case_id = existing["Case_ID"]
                     append_order_to_case(existing_case_id, so_row, sor_row)
+                    # Recompute average engine scores across all orders
+                    n = get_case_transaction_count(existing_case_id)
+                    old = get_case_hydrated(existing_case_id) or {}
+                    avg = {}
+                    for field in ("Engine_VAT_Ratio", "Engine_ML_Watchlist",
+                                  "Engine_IE_Seller_Watchlist", "Engine_Description_Vagueness"):
+                        old_val = float(old.get(field) or 0)
+                        new_val = eng_scores[field]
+                        avg[field] = ((old_val * (n - 1)) + new_val) / n if n > 0 else new_val
+                    update_case_engine_scores(existing_case_id, avg)
                     hydrated = get_case_hydrated(existing_case_id)
                     _push_rg_case_sse({"event": "case_updated", "action": "tx_appended", "case": hydrated})
                 else:
@@ -939,6 +958,7 @@ async def _ct_risk_management_factory() -> None:
                         "Update_time":                      now_iso,
                         "Updated_by":                       "system",
                         "Created_time":                     now_iso,
+                        **eng_scores,
                     }
                     upsert_investigation_set(so_row, sor_row, soc_row)
                     hydrated = get_case_hydrated(case_id) or {"Case_ID": case_id}
@@ -1329,7 +1349,7 @@ def api_reference():
     """
     from lib.database import (
         get_vat_categories, get_risk_levels, get_eu_regions, get_suspicion_types,
-        get_sales_order_statuses, get_case_statuses,
+        get_sales_order_statuses, get_case_statuses, get_risk_engine_signals,
     )
     return {
         "vat_categories":        get_vat_categories(),
@@ -1338,6 +1358,7 @@ def api_reference():
         "suspicion_types":       get_suspicion_types(),
         "sales_order_statuses":  get_sales_order_statuses(),
         "case_statuses":         get_case_statuses(),
+        "risk_engine_signals":   get_risk_engine_signals(),
     }
 
 
