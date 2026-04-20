@@ -1044,6 +1044,12 @@ async def lifespan(app: FastAPI):
     # has nothing to replay after a restart.
     reset_simulation_db()
 
+    # Pre-load the vagueness NLP model in a thread so it doesn't block
+    # the event loop when the first transaction arrives at Engine 4.
+    import concurrent.futures
+    _model_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    _model_pool.submit(_get_vagueness_model)
+
     asyncio.create_task(simulation_loop(_fire_transactions))
     asyncio.create_task(_RT_risk_monitoring_1_factory())
     asyncio.create_task(_RT_risk_monitoring_2_factory())
