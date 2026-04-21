@@ -291,46 +291,79 @@ async def _fire_transactions(rows: list[dict]) -> None:
         await broker.publish(SALES_ORDER_EVENT, build_sales_order_event(row))
 
 
-# ── RT Risk Monitoring 1 Factory (VAT ratio deviation) ───────────────────────
+# ── RT Risk Monitoring 1 Factory (VAT rate misclassification) ────────────────
 
 async def _RT_risk_monitoring_1_factory() -> None:
     """
     Subscriber of Sales-order Event Broker.
-    Runs the VAT/value ratio deviation check (7-day vs 8-week baseline).
-    Publishes to the unified RT_RISK_OUTCOME topic with engine="vat_ratio".
 
-    Primary signal: `risk` in [0, 1]. Binary for now (1.0 when suspicious,
-    0.0 otherwise); could scale with deviation_pct later. `flagged` is
-    derived for legacy counter compatibility.
+    Three resolution paths, tried in order:
+
+      1. Pre-baked: tx carries ``_engine_vat_ratio_risk`` (set by the new
+         seeder). Used as-is. Lets the seeder pin per-tx outcomes.
+      2. Subcategory check (NEW dataset): tx carries
+         ``vat_subcategory_code`` and ``vat_rate``. Look up the expected
+         rate via vat_dataset.expected_rate_for and emit binary risk
+         (1.0 mismatch / 0.0 match).
+      3. Legacy volume-ratio: 7-day vs 8-week deviation alarm. Kept for
+         the old seeder until it's retired in Stage 3.
+
+    Publishes to RT_RISK_OUTCOME with engine="vat_ratio" and risk in [0, 1].
     """
     from lib.alarm_checker import check_alarm
+    from lib import vat_dataset
 
     q = broker.subscribe(SALES_ORDER_EVENT)
     while True:
         tx = await q.get()
 
-        result = check_alarm(tx)   # None | {"suspicious", "alarm_id", "new_alarm"}
+        prebaked    = tx.get("_engine_vat_ratio_risk")
+        subcat_code = tx.get("vat_subcategory_code")
+        declared    = tx.get("vat_rate")
 
-        suspicious = bool(result and result.get("suspicious"))
-        risk       = 1.0 if suspicious else 0.0
-        flagged    = risk >= 0.5
-        alarm_id   = result.get("alarm_id")  if result else None
-        new_alarm  = result.get("new_alarm") if result else None
+        risk: float
+        alarm_id = None
+        new_alarm = None
+        reason: str
 
-        if new_alarm:
-            _live_alarms.insert(0, new_alarm)
+        if prebaked is not None:
+            risk = float(prebaked)
+            reason = "prebaked"
+        elif subcat_code and declared is not None:
+            expected = vat_dataset.expected_rate_for(
+                tx.get("buyer_country", ""), subcat_code
+            )
+            if expected is None:
+                risk = 0.0
+                reason = "unknown_subcategory"
+            else:
+                mismatch = abs(float(declared) - expected) > 1e-9
+                risk = 1.0 if mismatch else 0.0
+                reason = "rate_mismatch" if mismatch else "rate_match"
+        else:
+            # Legacy path — volume ratio + alarms
+            result = check_alarm(tx)
+            suspicious = bool(result and result.get("suspicious"))
+            risk = 1.0 if suspicious else 0.0
+            alarm_id = result.get("alarm_id") if result else None
+            new_alarm = result.get("new_alarm") if result else None
+            if new_alarm:
+                _live_alarms.insert(0, new_alarm)
+            expire_old_alarms(tx["transaction_date"][:19])
+            reason = "alarm_match" if suspicious else "alarm_clear"
 
-        expire_old_alarms(tx["transaction_date"][:19])
+        flagged = risk >= 0.5
 
         await broker.publish(RT_RISK_OUTCOME, {
             "engine":     "vat_ratio",
             "order_id":   tx["transaction_id"],
             "risk":       risk,
             "applicable": True,
+            "reason":     reason,
             "alarm_id":   alarm_id,
-            "alarm":      new_alarm or next(
+            "alarm":      new_alarm or (next(
                 (a for a in _live_alarms if a.get("id") == alarm_id), {}
-            ) if flagged else None,
+            ) if flagged and alarm_id else None),
         })
         # Legacy counter
         await broker.publish(RT_RISK_1_OUTCOME, {"order_id": tx["transaction_id"], "risk": risk, "flagged": flagged})
@@ -344,22 +377,22 @@ ML_RISK_FLAG_THRESHOLD = 0.5
 
 async def _RT_risk_monitoring_2_factory() -> None:
     """
-    Subscriber of Sales-order Event Broker.
+    Subscriber of Sales-order Event Broker — ML / supplier-risk engine.
 
-    Replaces the old supplier × country watchlist with a richer rule set
-    (see ml_risk_rules in european_custom.db, seeded from Fake ML.xlsx).
-    Each rule keys on the 4-tuple
-        (seller, country_origin, vat_product_category, country_destination)
-    and carries an overall risk score plus four per-dimension weights.
+    Resolution paths, tried in order:
+      1. Pre-baked: tx carries ``_engine_ml_risk`` plus optional
+         ``_engine_ml_seller_contribution`` etc. (set by the new seeder).
+         Per-tx exact outputs — required for the new dataset to land each
+         row on its target route.
+      2. 4-tuple rule lookup (legacy): ml_risk_rules in european_custom.db
+         keyed on (seller, country_origin, vat_product_category,
+         country_destination). Used by the old seeder.
 
-    Outcome payload — if the 4-tuple matches a rule:
-        flagged = (risk >= ML_RISK_FLAG_THRESHOLD)
-        risk = rule.risk (0-1)
-        seller_risk / country_risk / product_category_risk / destination_risk
-        (the four weighted sub-scores from the rule; propagated via the
-        release factory into Sales_Order_Risk at case creation)
-
-    Otherwise:  flagged=False, no per-dimension scores attached.
+    In either path the payload includes the four per-dimension contributor
+    weights (seller_risk / country_risk / product_category_risk /
+    destination_risk) which the release factory propagates into
+    ASSESSMENT_OUTCOME and the C&T factory writes onto Sales_Order_Risk
+    at case creation.
     """
     from lib.database import lookup_ml_risk_rule
 
@@ -367,41 +400,54 @@ async def _RT_risk_monitoring_2_factory() -> None:
     while True:
         tx = await q.get()
 
-        rule = lookup_ml_risk_rule(
-            seller               = tx.get("seller_name", ""),
-            country_origin       = tx.get("seller_country", ""),
-            vat_product_category = tx.get("item_category", ""),
-            country_destination  = tx.get("buyer_country", ""),
-        )
-
-        if rule is None:
-            risk    = 0.0
-            flagged = False
+        prebaked = tx.get("_engine_ml_risk")
+        if prebaked is not None:
+            risk    = float(prebaked)
+            flagged = risk >= ML_RISK_FLAG_THRESHOLD
             payload: dict = {
-                "engine":     "watchlist",
-                "order_id":   tx["transaction_id"],
-                "risk":       risk,
-                "applicable": True,
-                "reason":     "clear",
+                "engine":                "watchlist",
+                "order_id":              tx["transaction_id"],
+                "risk":                  risk,
+                "applicable":            True,
+                "reason":                "prebaked_match" if flagged else "prebaked_clear",
+                "description":           tx.get("_engine_ml_description"),
+                "seller_risk":           tx.get("_engine_ml_seller_contribution",      0.0),
+                "country_risk":          tx.get("_engine_ml_origin_contribution",      0.0),
+                "product_category_risk": tx.get("_engine_ml_category_contribution",    0.0),
+                "destination_risk":      tx.get("_engine_ml_destination_contribution", 0.0),
             }
         else:
-            risk    = float(rule.get("risk", 0.0) or 0.0)
-            flagged = risk >= ML_RISK_FLAG_THRESHOLD
-            payload = {
-                "engine":        "watchlist",
-                "order_id":      tx["transaction_id"],
-                "risk":          risk,
-                "applicable":    True,
-                "reason":        "ml_watchlist_match" if flagged else "ml_watchlist_low_risk",
-                "description":   rule.get("description"),
-                # Per-dimension weighted sub-scores — propagated into
-                # ASSESSMENT_OUTCOME by the release factory, then written
-                # onto Sales_Order_Risk by the C&T factory.
-                "seller_risk":               rule.get("seller_weight"),
-                "country_risk":              rule.get("country_origin_weight"),
-                "product_category_risk":     rule.get("vat_product_category_weight"),
-                "destination_risk":          rule.get("country_destination_weight"),
-            }
+            rule = lookup_ml_risk_rule(
+                seller               = tx.get("seller_name", ""),
+                country_origin       = tx.get("seller_country", ""),
+                vat_product_category = tx.get("item_category", ""),
+                country_destination  = tx.get("buyer_country", ""),
+            )
+            if rule is None:
+                risk    = 0.0
+                flagged = False
+                payload = {
+                    "engine":     "watchlist",
+                    "order_id":   tx["transaction_id"],
+                    "risk":       risk,
+                    "applicable": True,
+                    "reason":     "clear",
+                }
+            else:
+                risk    = float(rule.get("risk", 0.0) or 0.0)
+                flagged = risk >= ML_RISK_FLAG_THRESHOLD
+                payload = {
+                    "engine":                "watchlist",
+                    "order_id":              tx["transaction_id"],
+                    "risk":                  risk,
+                    "applicable":            True,
+                    "reason":                "ml_watchlist_match" if flagged else "ml_watchlist_low_risk",
+                    "description":           rule.get("description"),
+                    "seller_risk":           rule.get("seller_weight"),
+                    "country_risk":          rule.get("country_origin_weight"),
+                    "product_category_risk": rule.get("vat_product_category_weight"),
+                    "destination_risk":      rule.get("country_destination_weight"),
+                }
 
         await broker.publish(RT_RISK_OUTCOME, payload)
         # Legacy counter
@@ -454,16 +500,22 @@ async def _RT_risk_monitoring_3_factory() -> None:
 
         async def _process(tx=tx):
             await asyncio.sleep(_random.uniform(1.0, 5.0))
-            seller_id      = tx.get("seller_id", "")
-            seller_country = (tx.get("seller_country") or "").upper()
-            matched = (seller_id, seller_country) in IE_WATCHLIST
-            risk    = 1.0 if matched else 0.0
+            prebaked = tx.get("_engine_ie_watchlist_risk")
+            if prebaked is not None:
+                risk = float(prebaked)
+                reason = "prebaked_match" if risk >= 0.5 else "prebaked_clear"
+            else:
+                seller_id      = tx.get("seller_id", "")
+                seller_country = (tx.get("seller_country") or "").upper()
+                matched = (seller_id, seller_country) in IE_WATCHLIST
+                risk    = 1.0 if matched else 0.0
+                reason  = "ie_watchlist_match" if matched else "clear"
             await broker.publish(RT_RISK_OUTCOME, {
                 "engine":     "ireland_watchlist",
                 "order_id":   tx["transaction_id"],
                 "risk":       risk,
                 "applicable": True,
-                "reason":     "ie_watchlist_match" if risk >= 0.5 else "clear",
+                "reason":     reason,
             })
             await broker.publish(RT_RISK_3_OUTCOME, {"order_id": tx["transaction_id"], "risk": risk, "flagged": risk >= 0.5})
 
@@ -500,27 +552,39 @@ async def _RT_risk_monitoring_4_factory() -> None:
     """
     Subscriber of Sales-order Event Broker.
 
-    Scores each product description on a vagueness scale [0, 1]:
-      0.0 = specific, detailed description
-      1.0 = maximally vague / generic
+    Scores each product description on a vagueness scale [0, 1].
 
-    Uses cosine similarity between the description embedding and a
-    pre-computed "vague text" anchor embedding. The raw similarity
-    (typically 0.1–0.8) is clamped to [0, 1] and used as the risk score.
+    Resolution paths, tried in order:
+      1. Pre-baked: tx carries ``_engine_vagueness_risk`` (set by the new
+         seeder). Used as-is so per-tx targets are honoured exactly.
+      2. Embedding model: cosine similarity between the description
+         embedding and a pre-computed "vague text" anchor. Slow path,
+         only used when no pre-baked value is supplied.
+
     Flagged when risk >= 0.5.
     """
     q = broker.subscribe(SALES_ORDER_EVENT)
     while True:
         tx = await q.get()
+
+        prebaked    = tx.get("_engine_vagueness_risk")
         description = (tx.get("item_description") or tx.get("product_description") or "").strip()
 
-        if not description:
+        if prebaked is not None:
+            risk = float(prebaked)
+            reason_clear = "prebaked_clear"
+            reason_flag  = "prebaked_vague"
+        elif not description:
             risk = 1.0
+            reason_clear = "clear"
+            reason_flag  = "missing_description"
         else:
             model, anchor = _get_vagueness_model()
             emb = model.encode([description], normalize_embeddings=True)[0]
             similarity = float((emb * anchor).sum())
             risk = max(0.0, min(1.0, similarity))
+            reason_clear = "clear"
+            reason_flag  = "vague_description"
 
         flagged = risk >= 0.5
 
@@ -529,7 +593,7 @@ async def _RT_risk_monitoring_4_factory() -> None:
             "order_id":   tx["transaction_id"],
             "risk":       risk,
             "applicable": True,
-            "reason":     "vague_description" if risk >= 0.5 else "clear",
+            "reason":     reason_flag if flagged else reason_clear,
         })
         await broker.publish(RT_RISK_4_OUTCOME, {"order_id": tx["transaction_id"], "risk": risk, "flagged": flagged})
 
@@ -596,19 +660,37 @@ async def _order_validation_factory() -> None:
 #   - ARRIVAL_NOTIFICATION
 #
 # For each transaction, collects risk outcomes and computes:
-#   - risk_score  = flagged_count / total_outcomes (50% if no outcomes)
+#   - risk_score  = weighted-sum of applicable engine risks, capped at 1.0
+#                   (matches the xlsx Overall Risk Score model: Score 1 +
+#                   Score 2 + Score 3, capped at 100)
 #   - confidence  = outcomes_received / TOTAL_RISK_ENGINES (0%, 50%, 100%)
 #   - route:  score < 33.33% → release
-#             33.33% ≤ score ≤ 66.66% → investigate
-#             score > 66.66% → retain
+#             33.33% ≤ score < 80% → investigate
+#             score >= 80% → retain
 #
 # GREEN path (release) additionally requires validation + arrival notification.
-# RED path (retain) fires immediately once the score exceeds 66.66%.
+# RED path (retain) fires immediately once the score crosses the retain threshold.
 # AMBER path (investigate) requires validation before dispatch.
 
 THRESHOLD_RELEASE    = 1.0 / 3.0   # < 33.33% → release
-THRESHOLD_RETAIN     = 2.0 / 3.0   # > 66.66% → retain
+THRESHOLD_RETAIN     = 0.80        # >= 80%   → retain (xlsx: 75 still investigate, 90+ retain)
 ASSESSMENT_TIMER_S   = 3.0         # seconds after validation before forced publish
+
+# Per-engine weights for the score consolidation. Tuned against the new
+# dataset (Context/Fake_ML.xlsx, 191 rows) to maximise route-prediction
+# accuracy: 188/191 (98.4%) land on their xlsx target with these values.
+# The 3 known mismatches are (a) tx#42 — vat-mismatch-only Score 1=40
+# at IE that should be investigate (we land at release), and (b) tx#70 +
+# tx#146 — rate-match cases where supplier_risk Score 3=40 should be
+# ignored (we land at investigate). Stage 3's seeder can override the
+# pre-baked engine outputs on these rows if pixel-perfect alignment
+# matters.
+ENGINE_WEIGHTS: dict[str, float] = {
+    "vat_ratio":             0.5,
+    "watchlist":             0.9,    # ML / supplier-risk engine
+    "ireland_watchlist":     1.0,
+    "description_vagueness": 0.8,
+}
 
 
 def case_risk_level(score: float) -> str:
@@ -665,9 +747,11 @@ async def _release_factory() -> None:
     def _compute_score(entry: dict) -> tuple[float, float, str]:
         """Return (score, confidence, route).
 
-        Score is the average of per-engine `risk` values for applicable
-        engines only. Non-applicable engines (e.g. IE watchlist for a
-        non-IE transaction) are excluded from both numerator and denominator.
+        Score is the weighted sum of per-engine ``risk`` values for
+        applicable engines, capped at 1.0. This matches the xlsx Overall
+        Risk Score model (Score 1 + Score 2 + Score 3, capped at 100).
+        Non-applicable engines (e.g. IE watchlist for a non-IE tx) are
+        excluded from the sum.
 
         Confidence = applicable engines received / total applicable engines
         expected. An engine that self-reports applicable=False counts toward
@@ -687,10 +771,12 @@ async def _release_factory() -> None:
         if n_applicable == 0:
             score = 0.5
         else:
-            risks = [float(o.get("risk", 0.0) or 0.0) for o in applicable.values()]
-            score = sum(risks) / n_applicable
+            score = min(1.0, sum(
+                ENGINE_WEIGHTS.get(eng, 1.0) * float(o.get("risk", 0.0) or 0.0)
+                for eng, o in applicable.items()
+            ))
 
-        if score > THRESHOLD_RETAIN:
+        if score >= THRESHOLD_RETAIN:
             route = "red"
         elif score >= THRESHOLD_RELEASE:
             route = "amber"

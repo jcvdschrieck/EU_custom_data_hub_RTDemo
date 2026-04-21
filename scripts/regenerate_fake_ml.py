@@ -51,12 +51,14 @@ def main() -> None:
         ml_risk   = float(r["Score 3"]) / 100.0
         vague     = float(r["Score 2"]) / 100.0
 
-        # vat_ratio engine target: binary — 1 if declared != recommended.
-        # Magnitude of mismatch is captured by the rate values themselves;
-        # the engine outputs in 0..1, so a graded variant could be added
-        # (e.g. abs(decl - rec) / max_gap) but binary keeps Stage-1 labels
-        # unambiguous.
-        vat_ratio = 1.0 if abs(decl_rate - rec_rate) > 1e-9 else 0.0
+        # vat_ratio engine target = Score 1 / 100, gated by actual rate
+        # mismatch. The xlsx zeroes out Score 1's contribution to the
+        # Overall Risk Score whenever declared_rate == recommended_rate
+        # (categories may differ, but if no revenue is at stake, the
+        # vat_ratio engine should not fire). Without this gate, ~13 rows
+        # would be mis-routed.
+        rate_mismatch = abs(decl_rate - rec_rate) > 1e-9
+        vat_ratio = (float(r["Score 1"]) / 100.0) if rate_mismatch else 0.0
 
         # ML risk attribution. The xlsx encodes supplier risk only via
         # Score 3 — i.e. "the seller looked suspicious." We attribute the

@@ -26,11 +26,19 @@ from lib import vat_dataset as vd  # noqa: E402
 
 
 THRESHOLD_RELEASE = 1.0 / 3.0
-THRESHOLD_RETAIN  = 2.0 / 3.0
+THRESHOLD_RETAIN  = 0.80
+
+# Mirrors api.py ENGINE_WEIGHTS — keep in sync.
+ENGINE_WEIGHTS = {
+    "vat_ratio":             0.5,
+    "ml":                    0.9,
+    "vagueness":             0.8,
+    "ireland_watchlist":     1.0,
+}
 
 
 def _route_from_score(score: float) -> str:
-    if score > THRESHOLD_RETAIN:
+    if score >= THRESHOLD_RETAIN:
         return "retain"
     if score >= THRESHOLD_RELEASE:
         return "investigate"
@@ -82,18 +90,19 @@ def main() -> None:
         failures.append("VAT_CATEGORIES and SUBCATEGORY_BY_CODE diverge")
 
     # ── Check 4: per-tx engine outputs reproduce expected route ─────────────
+    # Mirrors api._compute_score: weighted sum of applicable engines, capped
+    # at 1.0. Weights tuned for max accuracy against the xlsx target labels.
     route_mismatches: list[str] = []
     for _, r in fml.iterrows():
-        is_ie = r["destination"] == "IE"
-        engine_risks = [
-            float(r["expected_vat_ratio_risk"]),
-            float(r["expected_ml_risk"]),
-            float(r["expected_vagueness_risk"]),
-        ]
-        if is_ie:
-            # ie_watchlist is currently empty → contributes 0 (applicable but clear)
-            engine_risks.append(0.0)
-        score = sum(engine_risks) / len(engine_risks)
+        weighted = (
+            ENGINE_WEIGHTS["vat_ratio"] * float(r["expected_vat_ratio_risk"]) +
+            ENGINE_WEIGHTS["ml"]        * float(r["expected_ml_risk"]) +
+            ENGINE_WEIGHTS["vagueness"] * float(r["expected_vagueness_risk"])
+        )
+        if r["destination"] == "IE":
+            # ie_watchlist is empty in the new dataset → contributes 0
+            weighted += ENGINE_WEIGHTS["ireland_watchlist"] * 0.0
+        score = min(1.0, weighted)
         predicted = _route_from_score(score)
         expected  = r["expected_route"]
         if predicted != expected:
@@ -104,7 +113,7 @@ def main() -> None:
 
     # ── Report ──────────────────────────────────────────────────────────────
     print("=" * 72)
-    print("Stage 1 reference-data smoke test")
+    print("Reference-data + scoring smoke test")
     print("=" * 72)
 
     if failures:
@@ -114,17 +123,19 @@ def main() -> None:
     else:
         print("\n✓ Hard checks: rate lookups, sellers, taxonomy consistency — all pass.")
 
-    print(f"\nRoute prediction (mean-of-applicable-engines, current 0.333/0.667 thresholds):")
-    print(f"  matches:   {len(fml) - len(route_mismatches)}/{len(fml)}")
+    print(f"\nRoute prediction (weighted sum of engines, thresholds {THRESHOLD_RELEASE:.3f}/{THRESHOLD_RETAIN:.2f}):")
+    print(f"  weights: vat_ratio={ENGINE_WEIGHTS['vat_ratio']}  ml={ENGINE_WEIGHTS['ml']}  "
+          f"vagueness={ENGINE_WEIGHTS['vagueness']}  ireland_watchlist={ENGINE_WEIGHTS['ireland_watchlist']}")
+    print(f"  matches:    {len(fml) - len(route_mismatches)}/{len(fml)}")
     print(f"  mismatches: {len(route_mismatches)}")
     if route_mismatches:
-        print("\n  First 30 mismatches:")
-        for m in route_mismatches[:30]:
+        print()
+        for m in route_mismatches:
             print(f"   {m}")
         print()
-        print("  These need Stage-2 attention: either engine weighting, threshold")
-        print("  tuning, or richer per-engine target values to land each tx on its")
-        print("  intended route.")
+        print("  Known residual mismatches — diagnosed in api.py ENGINE_WEIGHTS")
+        print("  comment. Stage 3's seeder can override per-tx engine outputs on")
+        print("  these rows if pixel-perfect alignment matters.")
     else:
         print("\n  ✓ All 191 tx land on their target route from the precomputed signals.")
 
