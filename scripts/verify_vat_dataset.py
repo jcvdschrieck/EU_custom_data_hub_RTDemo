@@ -90,17 +90,25 @@ def main() -> None:
         failures.append("VAT_CATEGORIES and SUBCATEGORY_BY_CODE diverge")
 
     # ── Check 4: per-tx engine outputs reproduce expected route ─────────────
-    # Mirrors api._compute_score: weighted sum of applicable engines, capped
-    # at 1.0. Weights tuned for max accuracy against the xlsx target labels.
+    # Mirrors api._compute_score: weighted sum capped at 1.0, with the
+    # vat_ratio floor (raw risk >= 0.30 → floored to at least investigate).
+    VAT_RATIO_FLOOR_TRIGGER = 0.30
+    VAT_RATIO_FLOOR         = THRESHOLD_RELEASE + 1e-3
     route_mismatches: list[str] = []
     for _, r in fml.iterrows():
+        vat_raw      = float(r["expected_vat_ratio_risk"])
+        vat_weighted = ENGINE_WEIGHTS["vat_ratio"] * vat_raw
+        vat_contrib  = (
+            VAT_RATIO_FLOOR
+            if vat_raw >= VAT_RATIO_FLOOR_TRIGGER and vat_weighted < VAT_RATIO_FLOOR
+            else vat_weighted
+        )
         weighted = (
-            ENGINE_WEIGHTS["vat_ratio"] * float(r["expected_vat_ratio_risk"]) +
-            ENGINE_WEIGHTS["ml"]        * float(r["expected_ml_risk"]) +
-            ENGINE_WEIGHTS["vagueness"] * float(r["expected_vagueness_risk"])
+            vat_contrib
+            + ENGINE_WEIGHTS["ml"]        * float(r["expected_ml_risk"])
+            + ENGINE_WEIGHTS["vagueness"] * float(r["expected_vagueness_risk"])
         )
         if r["destination"] == "IE":
-            # ie_watchlist is empty in the new dataset → contributes 0
             weighted += ENGINE_WEIGHTS["ireland_watchlist"] * 0.0
         score = min(1.0, weighted)
         predicted = _route_from_score(score)

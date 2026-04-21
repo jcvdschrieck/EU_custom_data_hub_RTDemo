@@ -677,14 +677,15 @@ THRESHOLD_RETAIN     = 0.80        # >= 80%   → retain (xlsx: 75 still investi
 ASSESSMENT_TIMER_S   = 3.0         # seconds after validation before forced publish
 
 # Per-engine weights for the score consolidation. Tuned against the new
-# dataset (Context/Fake_ML.xlsx, 191 rows) to maximise route-prediction
-# accuracy: 188/191 (98.4%) land on their xlsx target with these values.
-# The 3 known mismatches are (a) tx#42 — vat-mismatch-only Score 1=40
-# at IE that should be investigate (we land at release), and (b) tx#70 +
-# tx#146 — rate-match cases where supplier_risk Score 3=40 should be
-# ignored (we land at investigate). Stage 3's seeder can override the
-# pre-baked engine outputs on these rows if pixel-perfect alignment
-# matters.
+# dataset (Context/Fake_ML.xlsx, 191 rows): 189/191 (99.0%) land on their
+# xlsx target with these values + the vat_ratio floor in _compute_score.
+# Both residual mismatches (tx#70 → FR, tx#146 → NL) are rate-match
+# cases where supplier_risk Score 3=40 alone makes us emit Investigate
+# while xlsx says Release. Both have non-IE destinations so they are
+# filtered out at the frontend (see customsandtaxriskmanagemensystem
+# backendCaseStore IE filter) and don't affect the demo. Stage 3's
+# seeder can override the pre-baked engine outputs on these rows if
+# pixel-perfect alignment matters.
 ENGINE_WEIGHTS: dict[str, float] = {
     "vat_ratio":             0.5,
     "watchlist":             0.9,    # ML / supplier-risk engine
@@ -753,6 +754,18 @@ async def _release_factory() -> None:
         Non-applicable engines (e.g. IE watchlist for a non-IE tx) are
         excluded from the sum.
 
+        vat_ratio floor: if the vat_ratio engine reports raw risk >=
+        VAT_RATIO_FLOOR_TRIGGER (xlsx-internal cut between Score 1=25
+        which xlsx releases and Score 1>=37.5 which xlsx investigates),
+        its weighted contribution is floored at THRESHOLD_RELEASE + ε
+        so the tx lands at least in Investigate. Policy stance: a
+        rate mismatch above this severity deserves an investigation
+        regardless of weight. Without this floor tx#42 (IE, S1=40
+        alone) would mis-route to Release and disappear from the C&T
+        queue. The trigger threshold (0.30) is below all "real"
+        Score 1 values (37.5..75) and above the xlsx's release tier
+        (Score 1=25), so no rate-match release row is affected.
+
         Confidence = applicable engines received / total applicable engines
         expected. An engine that self-reports applicable=False counts toward
         "received" (we know its status) but not toward the score or the
@@ -771,10 +784,19 @@ async def _release_factory() -> None:
         if n_applicable == 0:
             score = 0.5
         else:
-            score = min(1.0, sum(
-                ENGINE_WEIGHTS.get(eng, 1.0) * float(o.get("risk", 0.0) or 0.0)
-                for eng, o in applicable.items()
-            ))
+            VAT_RATIO_FLOOR_TRIGGER = 0.30                 # raw risk threshold to engage floor
+            VAT_RATIO_FLOOR         = THRESHOLD_RELEASE + 1e-3  # floored contribution value
+
+            def _contrib(eng: str, o: dict) -> float:
+                raw = float(o.get("risk", 0.0) or 0.0)
+                weighted = ENGINE_WEIGHTS.get(eng, 1.0) * raw
+                if (eng == "vat_ratio"
+                        and raw >= VAT_RATIO_FLOOR_TRIGGER
+                        and weighted < VAT_RATIO_FLOOR):
+                    return VAT_RATIO_FLOOR
+                return weighted
+
+            score = min(1.0, sum(_contrib(eng, o) for eng, o in applicable.items()))
 
         if score >= THRESHOLD_RETAIN:
             route = "red"
