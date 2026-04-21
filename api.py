@@ -1492,6 +1492,28 @@ def _emit_case_updated_sse(case_id: str, action: str) -> None:
     _push_rg_case_sse({"event": "case_updated", "action": action, "case": case})
 
 
+@app.get("/api/rg/cases/{case_id}/previous")
+def api_rg_previous_cases(case_id: str, limit: int = Query(20, ge=1, le=50)):
+    """Previous closed cases from the same seller."""
+    from lib.database import get_case_hydrated, get_previous_cases
+    case = get_case_hydrated(case_id)
+    if not case:
+        return {"items": []}
+    seller = case.get("Seller_Name", "")
+    return {"items": get_previous_cases(seller, exclude_case_id=case_id, limit=limit)}
+
+
+@app.get("/api/rg/cases/{case_id}/correlated")
+def api_rg_correlated_cases(case_id: str, limit: int = Query(20, ge=1, le=50)):
+    """Open cases with the same declared category (for correlation)."""
+    from lib.database import get_case_hydrated, get_correlated_cases
+    case = get_case_hydrated(case_id)
+    if not case:
+        return {"items": []}
+    category = case.get("HS_Product_Category", "")
+    return {"items": get_correlated_cases(category, exclude_case_id=case_id, limit=limit)}
+
+
 # ── VAT Fraud Detection agent: queue + worker ───────────────────────────────
 
 async def _enqueue_for_agent(case_id: str) -> None:

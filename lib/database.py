@@ -1372,6 +1372,47 @@ def _jaccard_words(a: str, b: str) -> float:
     return len(wa & wb) / len(wa | wb)
 
 
+def get_previous_cases(seller: str, exclude_case_id: str = "",
+                       limit: int = 20) -> list[dict]:
+    """Return closed cases from the same seller (case history)."""
+    conn = _connect(INVESTIGATION_DB)
+    rows = conn.execute("""
+        SELECT c.Case_ID, c.Status, c.VAT_Problem_Type,
+               c.Overall_Case_Risk_Score, c.Overall_Case_Risk_Level,
+               c.Created_time, c.Update_time,
+               o.Seller_Name, o.Country_Origin, o.Country_Destination,
+               o.HS_Product_Category, o.Product_Description,
+               (SELECT COUNT(*) FROM Sales_Order s2 WHERE s2.Case_ID = c.Case_ID) AS order_count,
+               c.Proposed_Action_Customs
+        FROM Sales_Order_Case c
+        LEFT JOIN Sales_Order o ON c.Sales_Order_Business_Key = o.Sales_Order_Business_Key
+        WHERE o.Seller_Name = ? AND c.Case_ID != ? AND c.Status = 'Closed'
+        ORDER BY c.Update_time DESC LIMIT ?
+    """, (seller, exclude_case_id, limit)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_correlated_cases(category: str, exclude_case_id: str = "",
+                         limit: int = 20) -> list[dict]:
+    """Return open cases with the same declared category (for correlation)."""
+    conn = _connect(INVESTIGATION_DB)
+    rows = conn.execute("""
+        SELECT c.Case_ID, c.Status, c.VAT_Problem_Type,
+               c.Overall_Case_Risk_Score, c.Overall_Case_Risk_Level,
+               c.Created_time,
+               o.Seller_Name, o.Country_Origin, o.Country_Destination,
+               o.HS_Product_Category, o.Product_Description,
+               (SELECT COUNT(*) FROM Sales_Order s2 WHERE s2.Case_ID = c.Case_ID) AS order_count
+        FROM Sales_Order_Case c
+        LEFT JOIN Sales_Order o ON c.Sales_Order_Business_Key = o.Sales_Order_Business_Key
+        WHERE o.HS_Product_Category = ? AND c.Case_ID != ? AND c.Status != 'Closed'
+        ORDER BY c.Overall_Case_Risk_Score DESC LIMIT ?
+    """, (category, exclude_case_id, limit)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 def find_similar_open_case(
     seller: str, destination: str, category: str, description: str,
 ) -> dict | None:
