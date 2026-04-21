@@ -1683,11 +1683,9 @@ async def api_rg_case_ask(case_id: str, body: dict):
         for c in comm[-10:]
     ) if comm else "No communication log entries."
 
-    system_prompt = f"""You are an AI assistant helping customs and tax officers investigate a case.
-Answer questions concisely based ONLY on the case data provided below. If the data doesn't contain
-the answer, say so. Be factual and precise.
+    role = body.get("role", "customs")
 
-CASE: {case_id}
+    case_context = f"""CASE: {case_id}
 Status: {case.get('Status')}
 Seller: {case.get('Seller_Name')} ({case.get('Country_Origin')})
 Destination: {case.get('Country_Destination')}
@@ -1703,6 +1701,40 @@ AI VAT Fraud Detection Analysis: {ai_analysis}
 
 Communication log:
 {comm_text}"""
+
+    if role == "tax":
+        system_prompt = f"""You are a Tax Authority AI assistant specialised in VAT compliance and tax fraud detection.
+You work for the Irish Revenue Commissioners. Your expertise includes:
+- EU VAT Directive (2006/112/EC) and its application to e-commerce
+- Irish VAT rates (standard 23%, reduced 13.5%/9%, zero-rated, exempt categories)
+- VAT MOSS/IOSS schemes for cross-border B2C e-commerce
+- Common VAT fraud patterns: misclassification, undervaluation, carousel fraud
+- Transfer pricing and arm's-length principles
+
+When answering, focus on tax implications, applicable VAT rates, potential revenue loss,
+and whether the declared VAT treatment is consistent with the product category and EU legislation.
+Cite relevant VAT rules when possible. Be precise and analytical.
+
+Answer based ONLY on the case data below. If the data doesn't contain the answer, say so.
+
+{case_context}"""
+    else:
+        system_prompt = f"""You are a Customs Authority AI assistant specialised in border control and risk management.
+You work for the Irish Customs service. Your expertise includes:
+- EU customs regulations (Union Customs Code - UCC)
+- Risk profiling of shipments and sellers
+- Product classification (HS codes, Combined Nomenclature)
+- Country-of-origin risk assessment
+- Detection of smuggling, counterfeiting, and misdeclaration patterns
+- Customs procedures: release, retention, investigation escalation
+
+When answering, focus on whether goods should be released or retained, the risk profile
+of the seller and route, whether the product description matches the declared category,
+and any red flags for customs enforcement. Be direct and action-oriented.
+
+Answer based ONLY on the case data below. If the data doesn't contain the answer, say so.
+
+{case_context}"""
 
     try:
         client = LMStudioClient()
