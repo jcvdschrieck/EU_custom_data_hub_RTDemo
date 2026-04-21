@@ -74,19 +74,19 @@ CREATE INDEX IF NOT EXISTS idx_alarm_expires ON alarms(expires_at);
 _AGENT_LOG_DDL = """
 CREATE TABLE IF NOT EXISTS agent_log (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    transaction_id    TEXT    NOT NULL,
-    seller_name       TEXT    NOT NULL,
-    buyer_country     TEXT    NOT NULL,
-    item_description  TEXT    NOT NULL,
-    item_category     TEXT    NOT NULL,
-    value             REAL    NOT NULL,
-    vat_rate          REAL    NOT NULL,
-    correct_vat_rate  REAL    NOT NULL,
-    verdict           TEXT    NOT NULL,
-    reasoning         TEXT    NOT NULL,
+    transaction_id    TEXT,
+    seller_name       TEXT,
+    buyer_country     TEXT,
+    item_description  TEXT,
+    item_category     TEXT,
+    value             REAL,
+    vat_rate          REAL,
+    correct_vat_rate  REAL,
+    verdict           TEXT,
+    reasoning         TEXT,
     legislation_refs  TEXT,
-    sent_to_ireland   INTEGER NOT NULL DEFAULT 0,
-    processed_at      TEXT    NOT NULL
+    sent_to_ireland   INTEGER DEFAULT 0,
+    processed_at      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_agent_log_tx ON agent_log(transaction_id);
 """
@@ -959,21 +959,25 @@ def historical_transaction_count() -> int:
 
 def insert_agent_log(entry: dict) -> None:
     conn = _connect(EUROPEAN_CUSTOM_DB)
-    with conn:
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO agent_log
-            (transaction_id, seller_name, buyer_country, item_description,
-             item_category, value, vat_rate, correct_vat_rate,
-             verdict, reasoning, legislation_refs, sent_to_ireland, processed_at)
-            VALUES
-            (:transaction_id, :seller_name, :buyer_country, :item_description,
-             :item_category, :value, :vat_rate, :correct_vat_rate,
-             :verdict, :reasoning, :legislation_refs, :sent_to_ireland, :processed_at)
-            """,
-            entry,
-        )
-    conn.close()
+    try:
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO agent_log
+                (transaction_id, seller_name, buyer_country, item_description,
+                 item_category, value, vat_rate, correct_vat_rate,
+                 verdict, reasoning, legislation_refs, sent_to_ireland, processed_at)
+                VALUES
+                (:transaction_id, :seller_name, :buyer_country, :item_description,
+                 :item_category, :value, :vat_rate, :correct_vat_rate,
+                 :verdict, :reasoning, :legislation_refs, :sent_to_ireland, :processed_at)
+                """,
+                entry,
+            )
+    except Exception as e:
+        print(f"  [agent_log] INSERT failed: {e}")
+    finally:
+        conn.close()
 
 
 def get_agent_log(limit: int = 100) -> list[dict]:
