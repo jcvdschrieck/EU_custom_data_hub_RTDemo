@@ -71,37 +71,63 @@ LM_STUDIO_MODEL: str = (
 LM_STUDIO_SLOTS: int = int(os.environ.get("LM_STUDIO_SLOTS", "1"))
 
 
-# ── Global semaphore ─────────────────────────────────────────────────────────
-# Lazily initialised so it binds to the running event loop.
+# ── Priority queue for LM Studio access ──────────────────────────────────────
+# Lower number = higher priority. Interactive assistant gets priority over
+# batch agent so officers don't wait behind background analysis.
 
-_sem: asyncio.Semaphore | None = None
+PRIORITY_INTERACTIVE = 0   # AI case assistant (officer is waiting)
+PRIORITY_AGENT       = 10  # VAT fraud detection agent (background)
+
+_pq: asyncio.PriorityQueue | None = None
+_busy = False
+_waiters = 0
 
 
-def _get_sem() -> asyncio.Semaphore:
-    global _sem
-    if _sem is None:
-        _sem = asyncio.Semaphore(LM_STUDIO_SLOTS)
-    return _sem
+def _get_pq() -> asyncio.PriorityQueue:
+    global _pq
+    if _pq is None:
+        _pq = asyncio.PriorityQueue()
+    return _pq
 
 
 @asynccontextmanager
-async def acquire_slot():
-    """Acquire the shared LM Studio inference slot. Use around any call that
-    hits LM Studio — including legacy subprocess agents — so all callers
-    queue against the same semaphore."""
-    sem = _get_sem()
-    async with sem:
+async def acquire_slot(priority: int = PRIORITY_AGENT):
+    """Acquire the shared LM Studio inference slot with priority.
+
+    Lower priority number = served first. Interactive requests
+    (PRIORITY_INTERACTIVE=0) jump ahead of background agent work
+    (PRIORITY_AGENT=10) in the queue.
+
+    Only one caller runs at a time (LM Studio serialises internally).
+    """
+    global _busy, _waiters
+    pq = _get_pq()
+
+    if _busy:
+        # Someone is using the slot — wait in the priority queue
+        _waiters += 1
+        event = asyncio.Event()
+        await pq.put((priority, id(event), event))
+        await event.wait()
+        _waiters -= 1
+
+    _busy = True
+    try:
         yield
+    finally:
+        _busy = False
+        # Wake the highest-priority waiter (lowest number)
+        if not pq.empty():
+            _, _, next_event = await pq.get()
+            next_event.set()
 
 
 def slot_status() -> dict:
-    """Snapshot the semaphore for observability endpoints."""
-    sem = _get_sem()
-    # asyncio.Semaphore.locked()/_value are stable enough for telemetry.
+    """Snapshot for observability endpoints."""
     return {
         "slots_total":     LM_STUDIO_SLOTS,
-        "slots_available": getattr(sem, "_value", None),
-        "locked":          sem.locked(),
+        "busy":            _busy,
+        "waiters":         _waiters,
     }
 
 
@@ -131,16 +157,18 @@ class LMStudioClient:
         *,
         model: str | None = None,
         temperature: float = 0.0,
+        priority: int = PRIORITY_AGENT,
         **kwargs,
     ) -> str:
-        """Send a chat completion. Returns the assistant content string."""
+        """Send a chat completion. Returns the assistant content string.
+        Lower priority number = served first (interactive before batch)."""
         body = {
             "model":       model or self.default_model,
             "messages":    messages,
             "temperature": temperature,
             **kwargs,
         }
-        async with acquire_slot():
+        async with acquire_slot(priority=priority):
             r = await self._http.post("/chat/completions", json=body)
             r.raise_for_status()
             data = r.json()

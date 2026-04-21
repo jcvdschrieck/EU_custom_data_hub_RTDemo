@@ -1653,7 +1653,7 @@ async def _agent_worker() -> None:
 async def api_rg_case_ask(case_id: str, body: dict):
     """AI assistant: answer a question about a case using LM Studio."""
     from lib.database import get_case_hydrated, get_case_orders
-    from lib.llm_client import LMStudioClient
+    from lib.llm_client import LMStudioClient, PRIORITY_INTERACTIVE
 
     case = get_case_hydrated(case_id)
     if not case:
@@ -1709,7 +1709,7 @@ Communication log:
         answer = await client.chat([
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": question},
-        ], temperature=0.3, max_tokens=300)
+        ], temperature=0.3, max_tokens=300, priority=PRIORITY_INTERACTIVE)
         await client.aclose()
         return {"answer": answer}
     except Exception as e:
