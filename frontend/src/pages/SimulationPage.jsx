@@ -969,12 +969,12 @@ function KpiStrip({ pipeline }) {
   const retained = (ev.retain_event      || 0)
                  + (ev.agent_retain_event || 0)
 
-  // Investigated: investigations the agent has completed (produced a verdict for)
-  const investigated = (ev.agent_retain_event  || 0)
-                     + (ev.agent_release_event || 0)
+  // Investigated: officer decisions that completed an investigation
+  // (custom_release + custom_retain from the Exit Process Factory)
+  const co = pipeline?.custom_outcome_status || {}
+  const investigated = (co.custom_release || 0) + (co.custom_retain || 0)
 
-  // Under investigation: cumulative amber-routed minus completed = currently in-flight
-  // (in the Tax queue or being processed by the VAT Fraud Detection Agent)
+  // Under investigation: amber-routed minus completed = currently in-flight
   const underInvestigation = Math.max(
     0,
     (ev.investigate_event || 0) - investigated
@@ -1003,6 +1003,7 @@ function KpiStrip({ pipeline }) {
             background: t.color + '10', border: `1.5px solid ${t.color}55`,
             borderRadius: 'var(--radius)', padding: '10px 14px',
             cursor: 'help',
+            display: 'flex', flexDirection: 'column', justifyContent: 'flex-end',
           }}>
             <div style={{
               fontSize: 10, color: t.color, fontWeight: 700,
