@@ -15,6 +15,11 @@ data/*.db-wal
 # boot (lib/database.reset_simulation_db) so running a sim does not
 # leave a persistent diff against the committed baseline.
 !data/simulation.db
+# Historical closed cases (IE) — curated past-investigation reference
+# data. Regenerate with `python -m lib.historical_seeder` or
+# `python seed_databases.py`. Tracked so fresh clones have a
+# "Previous cases" panel populated out of the box.
+!data/historical_cases.db
 frontend/node_modules/
 frontend/dist/
 data/events/

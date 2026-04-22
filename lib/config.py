@@ -12,6 +12,11 @@ INVESTIGATION_DB   = DATA_DIR / "investigation.db"
 # at simulation start when the latter is empty. Built by
 # scripts/build_seed_cases.py.
 SEED_CASES_DB      = DATA_DIR / "seed_cases.db"
+# Historical closed cases — the "past investigations" surface that powers
+# the Previous Cases / retPct-based recommendations in the C&T UI. Same
+# 3-table schema as investigation.db; all cases have Status = 'Closed'
+# and Country_Destination = 'IE'. Built by lib.historical_seeder.
+HISTORICAL_CASES_DB = DATA_DIR / "historical_cases.db"
 
 API_PORT     = 8505
 API_BASE_URL = f"http://localhost:{API_PORT}"

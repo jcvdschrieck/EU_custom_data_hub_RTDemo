@@ -1190,12 +1190,14 @@ async def _db_store_worker() -> None:
 async def lifespan(app: FastAPI):
     from lib.database import (
         init_european_custom_db, init_simulation_db, init_investigation_db,
+        init_historical_cases_db,
         reset_simulation_db, reset_cases,
     )
     from lib.event_store import flush_events
     init_european_custom_db()
     init_simulation_db()
     init_investigation_db()
+    init_historical_cases_db()
     # Auto-reset on every boot. Without this, a previous run's state
     # survives across restarts and shows up in the frontend:
     #   - fired=1 on every tx → simulation_loop has nothing to replay
@@ -1627,13 +1629,19 @@ def api_rg_previous_cases(case_id: str, limit: int = Query(20, ge=1, le=50)):
 
 @app.get("/api/rg/cases/{case_id}/correlated")
 def api_rg_correlated_cases(case_id: str, limit: int = Query(20, ge=1, le=50)):
-    """Open cases with the same declared category (for correlation)."""
+    """Open cases with the same (seller, declared category, destination)
+    — tightened correlation key per Rules in App.pptx slide 1."""
     from lib.database import get_case_hydrated, get_correlated_cases
     case = get_case_hydrated(case_id)
     if not case:
         return {"items": []}
-    category = case.get("HS_Product_Category", "")
-    return {"items": get_correlated_cases(category, exclude_case_id=case_id, limit=limit)}
+    return {"items": get_correlated_cases(
+        seller=case.get("Seller_Name", ""),
+        category=case.get("HS_Product_Category", ""),
+        destination=case.get("Country_Destination", ""),
+        exclude_case_id=case_id,
+        limit=limit,
+    )}
 
 
 # ── VAT Fraud Detection agent: queue + worker ───────────────────────────────

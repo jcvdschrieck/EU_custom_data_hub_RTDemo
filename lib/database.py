@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from lib.config import EUROPEAN_CUSTOM_DB, SIMULATION_DB, INVESTIGATION_DB, SEED_CASES_DB
+from lib.config import EUROPEAN_CUSTOM_DB, SIMULATION_DB, INVESTIGATION_DB, SEED_CASES_DB, HISTORICAL_CASES_DB
 
 # ── Schema ────────────────────────────────────────────────────────────────────
 
@@ -490,6 +490,15 @@ def init_european_custom_db() -> None:
     _init_ddl(EUROPEAN_CUSTOM_DB, _CASE_STATUSES_DDL)
     _seed_reference_tables()
     _seed_ml_risk_rules_from_xlsx()
+
+
+def init_historical_cases_db() -> None:
+    """Create the 3-table case dataset in historical_cases.db — same
+    shape as investigation.db. Holds PAST closed cases (IE destination)
+    used as the source for /api/rg/cases/{id}/previous."""
+    _init_ddl(HISTORICAL_CASES_DB, _SALES_ORDER_DDL)
+    _init_ddl(HISTORICAL_CASES_DB, _SALES_ORDER_RISK_DDL)
+    _init_ddl(HISTORICAL_CASES_DB, _SALES_ORDER_CASE_DDL)
 
 
 def init_investigation_db() -> None:
@@ -1422,8 +1431,14 @@ def _jaccard_words(a: str, b: str) -> float:
 
 def get_previous_cases(seller: str, exclude_case_id: str = "",
                        limit: int = 20) -> list[dict]:
-    """Return closed cases from the same seller (case history)."""
-    conn = _connect(INVESTIGATION_DB)
+    """Return past CLOSED cases from the same seller.
+
+    Reads from historical_cases.db (populated once by
+    lib.historical_seeder). That DB is independent of investigation.db
+    — the point of "previous cases" is to expose curated past
+    investigations, not just the cases the current sim happens to
+    have closed."""
+    conn = _connect(HISTORICAL_CASES_DB)
     rows = conn.execute("""
         SELECT c.Case_ID, c.Status, c.VAT_Problem_Type,
                c.Overall_Case_Risk_Score, c.Overall_Case_Risk_Level,
@@ -1431,7 +1446,8 @@ def get_previous_cases(seller: str, exclude_case_id: str = "",
                o.Seller_Name, o.Country_Origin, o.Country_Destination,
                o.HS_Product_Category, o.Product_Description,
                (SELECT COUNT(*) FROM Sales_Order s2 WHERE s2.Case_ID = c.Case_ID) AS order_count,
-               c.Proposed_Action_Customs
+               c.Proposed_Action_Customs,
+               c.Proposed_Action_Tax
         FROM Sales_Order_Case c
         LEFT JOIN Sales_Order o ON c.Sales_Order_Business_Key = o.Sales_Order_Business_Key
         WHERE o.Seller_Name = ? AND c.Case_ID != ? AND c.Status = 'Closed'
@@ -1441,9 +1457,14 @@ def get_previous_cases(seller: str, exclude_case_id: str = "",
     return [dict(r) for r in rows]
 
 
-def get_correlated_cases(category: str, exclude_case_id: str = "",
-                         limit: int = 20) -> list[dict]:
-    """Return open cases with the same declared category (for correlation)."""
+def get_correlated_cases(seller: str, category: str, destination: str,
+                         exclude_case_id: str = "", limit: int = 20) -> list[dict]:
+    """Return OPEN cases matching (seller, declared category, destination).
+
+    Tightened correlation key per slide 1 of Rules in App.pptx: a case
+    is "correlated" with the current one if it shares the same seller,
+    same declared product category, AND same destination — and is still
+    under investigation (not closed). Previously keyed on category only."""
     conn = _connect(INVESTIGATION_DB)
     rows = conn.execute("""
         SELECT c.Case_ID, c.Status, c.VAT_Problem_Type,
@@ -1454,9 +1475,12 @@ def get_correlated_cases(category: str, exclude_case_id: str = "",
                (SELECT COUNT(*) FROM Sales_Order s2 WHERE s2.Case_ID = c.Case_ID) AS order_count
         FROM Sales_Order_Case c
         LEFT JOIN Sales_Order o ON c.Sales_Order_Business_Key = o.Sales_Order_Business_Key
-        WHERE o.HS_Product_Category = ? AND c.Case_ID != ? AND c.Status != 'Closed'
+        WHERE o.Seller_Name         = ?
+          AND o.HS_Product_Category = ?
+          AND o.Country_Destination = ?
+          AND c.Case_ID != ? AND c.Status != 'Closed'
         ORDER BY c.Overall_Case_Risk_Score DESC LIMIT ?
-    """, (category, exclude_case_id, limit)).fetchall()
+    """, (seller, category, destination, exclude_case_id, limit)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
