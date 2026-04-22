@@ -179,7 +179,12 @@ curl http://localhost:1234/v1/models
 
 > **Without LM Studio running**, the Tax officer can still run the agent — every analysis just returns an `uncertain` verdict with no legislation references.
 
-> **RAG context** — the vector store (`data/chroma_db/`) and legislation documents are not included in the repository. Without them the agent uses only its base LLM reasoning, no retrieval-augmented citations.
+> **RAG context** — the vector store (`vat_fraud_detection/data/chroma_db/`) is not committed (~18 MB) and **must be built once** before the VAT Fraud Detection Agent can cite real Irish legislation:
+> ```bash
+> cd vat_fraud_detection
+> python build_knowledge_base.py --minilm-only
+> ```
+> This fetches the sources listed in `ireland_vat_demo_dataset/reference_pack_ireland_vat_sources.pdf` (VAT Consolidation Act 2010, Revenue Tax & Duty Manuals, etc.), chunks and embeds them into ChromaDB. Takes ~5 minutes on a first run. Re-runs are idempotent (skip already-indexed chunks). Without this step the agent falls back to ungrounded reasoning and often refuses to cite legislation for the case's destination country.
 
 ### 5. Seed the databases
 
