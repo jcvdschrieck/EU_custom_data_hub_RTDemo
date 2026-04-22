@@ -75,3 +75,42 @@ This means a new supplier with no history would get `confidence < 100%`
 instead of a false "clean" signal, giving downstream consumers (C&T
 Risk Management, DB Store) a more honest picture of the assessment
 quality.
+
+
+---
+
+## Recommended-action when no historical cases exist
+
+**Where:** customsandtaxriskmanagemensystem `src/pages/CaseReview.tsx`
+— the case-open `useEffect` that computes the prefilled action and the
+"AI Suggested Action" block in the right column.
+
+**Rule source:** Context/Rules in App.pptx, slide 1 — row 4 (Customs).
+
+**Situation:** the Customs rule buckets the prefilled action on
+`retPct = retained / total_prev_cases`:
+  - `> 75 %`  → Recommend Retainment
+  - `25 – 75 %` → Submit for Tax Review
+  - `< 25 %`  → Recommend Release
+
+When `total_prev_cases = 0` (new seller, no prior investigations), the
+arithmetic treats `retPct = 0`, which falls into the `< 25 %` bucket
+and emits **Recommend Release**. The rule itself doesn't say how to
+handle empty history.
+
+**Current implementation:** pure rule-fidelity — we emit "Recommend
+Release" on empty history. The earlier defensive approach (blank
+prefill or fall back to backend `aiSuggestedAction`) was reverted to
+keep the code aligned with the pptx verbatim.
+
+**Open design question for review:** does a "0 prev cases → Recommend
+Release" outcome make intuitive sense to the officer? Two alternatives
+worth discussing:
+  1. Explicit "insufficient history — no recommendation" prefill that
+     forces the officer to choose.
+  2. Keep Release but annotate the sentence: "No prior cases for this
+     seller — default recommendation applies."
+
+Not blocking; list here so the choice surfaces in the next rules
+review.
+
