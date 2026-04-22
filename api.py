@@ -1188,15 +1188,29 @@ async def _db_store_worker() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    from lib.database import init_european_custom_db, init_simulation_db, init_investigation_db, reset_simulation_db
+    from lib.database import (
+        init_european_custom_db, init_simulation_db, init_investigation_db,
+        reset_simulation_db, reset_cases,
+    )
+    from lib.event_store import flush_events
     init_european_custom_db()
     init_simulation_db()
     init_investigation_db()
-    # Auto-reset: clear the fired flags so the simulation is always
-    # ready to run on startup. Without this, a previous completed run
-    # leaves all transactions marked fired=1 and the simulation loop
-    # has nothing to replay after a restart.
+    # Auto-reset on every boot. Without this, a previous run's state
+    # survives across restarts and shows up in the frontend:
+    #   - fired=1 on every tx → simulation_loop has nothing to replay
+    #   - cases in investigation.db → frontend lists stale cases
+    #   - alarms in european_custom.db → alarm chip lights up from
+    #     last run's pipeline activity
+    #   - pending broker events in event_store → replay emits ghost
+    #     outcomes on first real tx.
+    # Mirrors the data-layer half of POST /api/simulation/reset; the
+    # in-memory state (live_queue, SSE subscribers, in-flight factory
+    # tasks) is already empty at boot so we don't need to drain it.
     reset_simulation_db()
+    reset_cases()
+    reset_alarms()
+    flush_events()
 
     # Pre-load the vagueness NLP model in a thread so it doesn't block
     # the event loop when the first transaction arrives at Engine 4.
