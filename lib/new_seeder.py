@@ -98,6 +98,22 @@ def _category_code(parent_category: str) -> str:
     return "".join(w[0].upper() for w in parent_category.split() if w[0].isalpha())[:3]
 
 
+_GENERIC_POOL: dict[str, list[str]] = {
+    # Deliberately vague phrases used for a minority of cluster siblings
+    # so each case carries a mix of specific and generic descriptions.
+    # Jaccard anchoring is still carried by the six cluster-tagged
+    # markers appended to the description, not by these phrases.
+    "ELECTRONICS & ACCESSORIES":            ["Miscellaneous electronics goods"],
+    "CLOTHING & TEXTILES":                  ["Assorted clothing items"],
+    "COSMETICS & PERSONAL CARE":            ["Mixed cosmetics products"],
+    "TOYS":                                 ["Various toys assorted"],
+    "FOOD PRODUCTS":                        ["Assorted food items"],
+    "FOOD SUPPLEMENTS & VITAMINS":          ["Mixed supplement products"],
+    "BOOKS, PUBLICATIONS & DIGITAL CONTENT":["Assorted publications stock"],
+    "SPORTS & LEISURE / DIGITAL SERVICES":  ["Mixed sports leisure items"],
+}
+
+
 _PRODUCT_POOL: dict[str, list[str]] = {
     "ELECTRONICS & ACCESSORIES": [
         "Bluetooth wireless earbuds",
@@ -205,6 +221,24 @@ def _pick_product_phrase(rng: random.Random, parent_category: str,
     pool = _PRODUCT_POOL.get(parent_category) or ["imported goods assorted"]
     jitter = rng.randrange(len(pool))
     return pool[(member_idx + jitter) % len(pool)]
+
+
+def _pick_generic_phrase(rng: random.Random, parent_category: str) -> str:
+    """Return a deliberately generic product phrase for 'vague variant'
+    tx. These sit alongside the specific product tx in the same case,
+    giving officers a mix of specific and vague descriptions to review.
+    """
+    pool = _GENERIC_POOL.get(parent_category) or ["Mixed imported goods"]
+    return rng.choice(pool)
+
+
+# Within each investigate cluster a configurable fraction of siblings are
+# converted to "vague variants": generic description, high vagueness score,
+# low VAT and ML signals. They stay in the investigate route (per-tx score
+# ~0.4–0.6) so they remain visible in the case rather than flipping to
+# retain.
+_VAGUE_VARIANT_FRACTION_MIN = 0.15
+_VAGUE_VARIANT_FRACTION_MAX = 0.25
 
 
 # ── Seeding ─────────────────────────────────────────────────────────────────
@@ -368,10 +402,26 @@ def seed_simulation_db_from_xlsx() -> int:
             for sibling_idx in range(siblings_needed)
         ]
 
+        # Pick the subset of synthetic siblings that will be rendered as
+        # "vague variants". xlsx rows (sibling_idx == 0) always keep their
+        # true declared/recommended engine outputs — the vague variants
+        # only replace synthetic siblings.
+        sibling_positions = [
+            i for i, (_, s_idx) in enumerate(cluster_members) if s_idx > 0
+        ]
+        fraction = rng.uniform(_VAGUE_VARIANT_FRACTION_MIN, _VAGUE_VARIANT_FRACTION_MAX)
+        vague_count = int(round(len(sibling_positions) * fraction))
+        vague_positions = set(rng.sample(sibling_positions, vague_count)) if vague_count else set()
+
         for member_idx, (rec, sibling_idx) in enumerate(cluster_members):
             xrow     = rec["data"]
             orig_idx = rec["orig_idx"]
-            phrase   = _pick_product_phrase(rng, parent_cat, member_idx)
+            is_vague_variant = member_idx in vague_positions
+
+            if is_vague_variant:
+                phrase = _pick_generic_phrase(rng, parent_cat)
+            else:
+                phrase = _pick_product_phrase(rng, parent_cat, member_idx)
             description = f"{phrase} unit {member_idx + 1:03d} — {markers}"
 
             row = _build_tx_row(
@@ -386,6 +436,22 @@ def seed_simulation_db_from_xlsx() -> int:
                 description=description,
                 fake_ml_row=fml_by_idx[orig_idx],
             )
+            if is_vague_variant:
+                # Vague variants carry a clean invoice (no rate issue, no
+                # supplier risk) but a high vagueness score. Their per-tx
+                # score lands around 0.45–0.55 — investigate, never retain.
+                row["engine_vat_ratio_risk"]              = 0.0
+                row["engine_ml_risk"]                     = round(rng.uniform(0.0, 0.05), 3)
+                row["engine_ml_seller_contribution"]      = 0.0
+                row["engine_ml_origin_contribution"]      = 0.0
+                row["engine_ml_category_contribution"]    = 0.0
+                row["engine_ml_destination_contribution"] = 0.0
+                row["engine_vagueness_risk"]              = round(rng.uniform(0.55, 0.70), 3)
+                # Rate and category still match the cluster (declared
+                # matches recommended, since this variant is "just" vague).
+                row["vat_rate"]         = row["correct_vat_rate"]
+                row["vat_amount"]       = round(row["value"] * row["vat_rate"], 2)
+                row["has_error"]        = 0
             rows.append(row)
 
     # ── Pass 2: release + retain rows (per-row amplification, no clusters) ──
