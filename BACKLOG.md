@@ -114,3 +114,56 @@ worth discussing:
 Not blocking; list here so the choice surfaces in the next rules
 review.
 
+---
+
+## Per-order VAT Fraud Detection agent verdicts (batched invoice)
+
+**Where:** `api.py::_build_agent_tx`, `api.py::_agent_worker`,
+`vat_fraud_detection/_analyse_tx.py`, `vat_fraud_detection/lib/analyser.py`.
+
+**Current implementation:** the agent runs **once per case** on a
+single synthesized transaction built from the case's primary order
+(seller, declared category, declared rate, product description). The
+analyser returns exactly one `line_verdicts[0]` with one
+`expected_rate` and one `verdict`. `_agent_worker` then applies that
+single expected_rate to every linked order to compute a case-level
+`VAT_Gap_Fee` as `sum(order.Product_Value × expected_rate −
+order.VAT_Fee)`.
+
+This is coherent today because orders within a case share seller,
+category, and declared rate by construction (they're clustered by
+`lib/database.py::find_similar_open_case` on those fields + description
+Jaccard ≥ 0.4), so extrapolating a single rate across all orders is
+faithful to what the agent observed.
+
+**Limitation:** the verdict is a binary case-level signal. If the
+primary order's verdict is `uncertain`, no gap is recorded even if the
+other orders might have yielded definitive verdicts had they been
+evaluated individually. The opposite also holds — a definitive verdict
+on one order extrapolates to all, even if a hypothetical per-order run
+would have flagged some as uncertain.
+
+**Proposed improvement — batched invoice:**
+1. Change `_build_agent_tx` to return a batched `Invoice` payload with
+   all orders of the case as `LineItem`s (the analyser loops over
+   `invoice.line_items` already; `_analyse_tx.py` builds a
+   1-item invoice today but the downstream path supports N).
+2. Teach `_agent_worker` to consume `line_verdicts` order-by-order:
+   compute the gap only over orders whose verdict is definitive
+   (`correct` / `incorrect` / `suspicious`), skip `uncertain` orders,
+   and surface the uncertain count in the analysis text.
+3. Decide the case-level `Recommended_VAT_Rate`: most-common
+   definitive rate, with a note if verdicts disagree.
+4. Persist the per-order verdicts (new column or structured entry in
+   `Communication`) so the detail view can show the mix.
+
+**Cost trade-off:** one batched subprocess call per case instead of
+one-per-order — roughly the same wall-clock cost as today (RAG
+retrieval dominates; N LineItems share the retrieval step), but with
+correct semantics for the "9 definitive + 1 uncertain" scenario.
+
+**When this matters:** the moment the sim produces cases whose linked
+orders disagree on declared rate or product category (e.g. if
+`find_similar_open_case`'s Jaccard threshold is lowered, or if
+multiple sub-clusters merge into one case).
+

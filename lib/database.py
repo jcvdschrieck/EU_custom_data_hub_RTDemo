@@ -357,7 +357,11 @@ CREATE TABLE IF NOT EXISTS Sales_Order_Case (
     Engine_VAT_Ratio                 REAL DEFAULT 0,
     Engine_ML_Watchlist              REAL DEFAULT 0,
     Engine_IE_Seller_Watchlist       REAL DEFAULT 0,
-    Engine_Description_Vagueness     REAL DEFAULT 0
+    Engine_Description_Vagueness     REAL DEFAULT 0,
+    -- VAT Fraud Detection agent output persisted for the Tax view.
+    -- Legislation refs are stored as a JSON array so the frontend can
+    -- render each reference with its source, section, url, page.
+    AI_Legislation_Refs              TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_soc_bk      ON Sales_Order_Case(Sales_Order_Business_Key);
 CREATE INDEX IF NOT EXISTS idx_soc_status  ON Sales_Order_Case(Status);
@@ -520,6 +524,7 @@ def init_investigation_db() -> None:
             ("Sales_Order_Case", "Engine_ML_Watchlist",       "REAL DEFAULT 0"),
             ("Sales_Order_Case", "Engine_IE_Seller_Watchlist", "REAL DEFAULT 0"),
             ("Sales_Order_Case", "Engine_Description_Vagueness", "REAL DEFAULT 0"),
+            ("Sales_Order_Case", "AI_Legislation_Refs",         "TEXT"),
         ]:
             try:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {definition}")
@@ -1429,30 +1434,48 @@ def _jaccard_words(a: str, b: str) -> float:
     return len(wa & wb) / len(wa | wb)
 
 
-def get_previous_cases(seller: str, exclude_case_id: str = "",
+def get_previous_cases(seller: str, category: str = "", destination: str = "",
+                       exclude_case_id: str = "",
                        limit: int = 20) -> list[dict]:
-    """Return past CLOSED cases from the same seller.
+    """Return past CLOSED cases keyed on (seller, category, destination).
 
     Reads from historical_cases.db (populated once by
     lib.historical_seeder). That DB is independent of investigation.db
     — the point of "previous cases" is to expose curated past
     investigations, not just the cases the current sim happens to
-    have closed."""
+    have closed.
+
+    Slide 1 row 3 of Rules in App.pptx defines the historical-case key
+    as Same seller / Same category / Similar description / Same
+    destination. We enforce the first three SQL-side; description
+    similarity is applied by the caller via the AI Analysis rule engine.
+    When category / destination are omitted we fall back to seller only
+    (used by legacy callers that haven't been migrated yet)."""
     conn = _connect(HISTORICAL_CASES_DB)
-    rows = conn.execute("""
-        SELECT c.Case_ID, c.Status, c.VAT_Problem_Type,
-               c.Overall_Case_Risk_Score, c.Overall_Case_Risk_Level,
-               c.Created_time, c.Update_time,
-               o.Seller_Name, o.Country_Origin, o.Country_Destination,
-               o.HS_Product_Category, o.Product_Description,
-               (SELECT COUNT(*) FROM Sales_Order s2 WHERE s2.Case_ID = c.Case_ID) AS order_count,
-               c.Proposed_Action_Customs,
-               c.Proposed_Action_Tax
-        FROM Sales_Order_Case c
-        LEFT JOIN Sales_Order o ON c.Sales_Order_Business_Key = o.Sales_Order_Business_Key
-        WHERE o.Seller_Name = ? AND c.Case_ID != ? AND c.Status = 'Closed'
-        ORDER BY c.Update_time DESC LIMIT ?
-    """, (seller, exclude_case_id, limit)).fetchall()
+    where = ["o.Seller_Name = ?", "c.Case_ID != ?", "c.Status = 'Closed'"]
+    params: list = [seller, exclude_case_id]
+    if category:
+        where.append("o.HS_Product_Category = ?")
+        params.append(category)
+    if destination:
+        where.append("o.Country_Destination = ?")
+        params.append(destination)
+    params.append(limit)
+    sql = (
+        "SELECT c.Case_ID, c.Status, c.VAT_Problem_Type, "
+        "       c.Overall_Case_Risk_Score, c.Overall_Case_Risk_Level, "
+        "       c.Created_time, c.Update_time, "
+        "       o.Seller_Name, o.Country_Origin, o.Country_Destination, "
+        "       o.HS_Product_Category, o.Product_Description, "
+        "       (SELECT COUNT(*) FROM Sales_Order s2 WHERE s2.Case_ID = c.Case_ID) AS order_count, "
+        "       c.Proposed_Action_Customs, "
+        "       c.Proposed_Action_Tax "
+        "FROM Sales_Order_Case c "
+        "LEFT JOIN Sales_Order o ON c.Sales_Order_Business_Key = o.Sales_Order_Business_Key "
+        "WHERE " + " AND ".join(where) + " "
+        "ORDER BY c.Update_time DESC LIMIT ?"
+    )
+    rows = conn.execute(sql, tuple(params)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
@@ -1771,6 +1794,14 @@ def _hydrate_row(r) -> dict:
         d["Communication"] = _json.loads(d["Communication"]) if d.get("Communication") else []
     except Exception:
         d["Communication"] = []
+    # AI_Legislation_Refs is persisted as a JSON-encoded list of objects
+    # (source, section, url, page, paragraph). Parse back to a list so
+    # the frontend can render items without re-parsing JSON client-side.
+    try:
+        d["AI_Legislation_Refs"] = (_json.loads(d["AI_Legislation_Refs"])
+                                    if d.get("AI_Legislation_Refs") else [])
+    except Exception:
+        d["AI_Legislation_Refs"] = []
     return d
 
 
@@ -1814,7 +1845,243 @@ def _hydrate_with_orders(r, conn) -> dict:
         d["orders"] = [dict(o) for o in orders]
     else:
         d["orders"] = []
+    # Slide 1 customs + tax recommendations — same rules applied in
+    # list and detail views on both authorities.
+    cust_rec, cust_analysis = _compute_customs_recommendation(d)
+    d["AI_Suggested_Customs_Action"] = cust_rec
+    d["AI_Customs_Analysis"]         = cust_analysis
+    tax_rec, tax_analysis = _compute_tax_recommendation(d)
+    d["AI_Suggested_Tax_Action"] = tax_rec
+    d["AI_Tax_Analysis"]         = tax_analysis
     return d
+
+
+# Slide 1 row 4 of Rules in App.pptx — customs recommendation rule.
+# Single source of truth: the API returns these fields on every hydrated
+# case so the frontend list view and detail view display the same value.
+_SLIDE1_VAGUENESS_TRIGGER = 0.5
+
+# Engine-score thresholds used to decide whether to call out a signal
+# as "confirming" the recommendation in the plain-text rationale. Kept
+# consistent with the frontend risk-signal panel (CaseReview.tsx), where
+# 0.3 / 0.4 / 0.5 are the visual cut-offs for each engine.
+_SIGNAL_THRESHOLDS = {
+    "vat_ratio":   0.30,
+    "ml":          0.40,
+    "ie_seller":   0.01,     # treated as on/off — any > 0 value = match
+    "vagueness":   0.50,
+}
+
+
+def _confirming_signals_text(case: dict, retain_leaning: bool) -> str:
+    """Return a sentence listing engine signals that confirm the
+    recommendation, or an empty string if none apply.
+
+    The recommendation is driven by the historical pattern (slide 1 rule),
+    but the officer also sees the current-case engine scores. Surfacing
+    the signals that point the same way makes the rationale feel complete
+    rather than dismissing the live engine readings. Contradicting
+    signals are deliberately not surfaced — that would confuse the
+    recommendation with a counter-argument.
+    """
+    vat_ratio = float(case.get("Engine_VAT_Ratio") or 0.0)
+    ml        = float(case.get("Engine_ML_Watchlist") or 0.0)
+    ie_seller = float(case.get("Engine_IE_Seller_Watchlist") or 0.0)
+    vague     = float(case.get("Engine_Description_Vagueness") or 0.0)
+
+    if retain_leaning:
+        signals: list[str] = []
+        if vat_ratio >= _SIGNAL_THRESHOLDS["vat_ratio"]:
+            signals.append(
+                f"a VAT rate anomaly picked up by the ratio monitor "
+                f"({vat_ratio*100:.0f}/100)")
+        if ml >= _SIGNAL_THRESHOLDS["ml"]:
+            signals.append(
+                f"a supplier-level risk pattern on the ML model "
+                f"({ml*100:.0f}/100)")
+        if ie_seller > _SIGNAL_THRESHOLDS["ie_seller"]:
+            signals.append(
+                f"a hit on the Ireland-seller watchlist "
+                f"({ie_seller*100:.0f}/100)")
+        if vague >= _SIGNAL_THRESHOLDS["vagueness"]:
+            signals.append(
+                f"unusually vague product descriptions "
+                f"({vague*100:.0f}/100)")
+        if not signals:
+            return ""
+        if len(signals) == 1:
+            return f" This is also supported by {signals[0]}."
+        joined = "; ".join(signals[:-1]) + f"; and {signals[-1]}"
+        return f" This is also supported by {joined}."
+    else:
+        # Release-leaning: only confirm when every engine reads quiet.
+        all_quiet = (
+            vat_ratio < _SIGNAL_THRESHOLDS["vat_ratio"]
+            and ml        < _SIGNAL_THRESHOLDS["ml"]
+            and ie_seller <= _SIGNAL_THRESHOLDS["ie_seller"]
+            and vague     < _SIGNAL_THRESHOLDS["vagueness"]
+        )
+        if not all_quiet:
+            return ""
+        return (" The current-case risk engines also read clean (no VAT "
+                "rate anomaly, no supplier-level ML flag, no Ireland-"
+                "seller watchlist match, and clear product descriptions).")
+
+def _compute_customs_recommendation(case: dict) -> tuple[str, str]:
+    """Compute the customs recommendation + plain-text rationale.
+
+    Logic (business framing in the rationale; documented formally in
+    Context/Rules in App.pptx slide 1 row 4):
+      1. If the descriptions on this case are too vague to judge the
+         nature of the goods, we can neither safely retain nor release
+         → recommend requesting clarification from a third party.
+      2. Otherwise, look at how past closed cases from the same seller
+         on the same declared category going to the same destination
+         were resolved:
+           ≥ 75 % retained   → the pattern is a retain; recommend
+                               retaining for inspection.
+           ≤ 25 % retained   → the pattern is a release; recommend
+                               releasing.
+           in-between        → the pattern is mixed; submit to Tax for
+                               a second opinion.
+    """
+    seller      = case.get("Seller_Name") or ""
+    category    = case.get("HS_Product_Category") or ""
+    destination = case.get("Country_Destination") or ""
+    vague       = float(case.get("Engine_Description_Vagueness") or 0.0)
+    case_id     = case.get("Case_ID") or ""
+
+    if vague >= _SLIDE1_VAGUENESS_TRIGGER:
+        base = (f"Product descriptions on this case are unusually vague "
+                f"(vagueness score {vague*100:.0f}/100). Without a clear "
+                "understanding of what the goods actually are, neither "
+                "retaining nor releasing is reliable — the recommendation "
+                "is to ask a third party for clarification before taking "
+                "a decision.")
+        return ("Request Input from Third Party",
+                base + _confirming_signals_text(case, retain_leaning=True))
+
+    prev = get_previous_cases(seller=seller, category=category,
+                              destination=destination,
+                              exclude_case_id=case_id, limit=50)
+    total    = len(prev)
+    retained = sum(1 for p in prev
+                   if (p.get("Proposed_Action_Customs") or "").lower() == "retain")
+    retPct = (retained / total) if total else 0.0
+
+    if total == 0:
+        base = (f"No past closed cases are on record for seller "
+                f"\"{seller}\" on {category} going to {destination}. "
+                "With no historical pattern to justify holding the goods, "
+                "the default recommendation is to release.")
+        return ("Recommend Release",
+                base + _confirming_signals_text(case, retain_leaning=False))
+    if retPct > 0.75:
+        base = (f"{retained} of the {total} past closed cases for seller "
+                f"\"{seller}\" on {category} going to {destination} ended "
+                f"in retention ({retPct*100:.0f}%). The historical pattern "
+                "strongly points to retainment — the goods should be held "
+                "for further inspection.")
+        return ("Recommend Retainment",
+                base + _confirming_signals_text(case, retain_leaning=True))
+    if retPct < 0.25:
+        base = (f"Only {retained} of the {total} past closed cases for "
+                f"seller \"{seller}\" on {category} going to {destination} "
+                f"ended in retention ({retPct*100:.0f}%). The historical "
+                "pattern indicates low risk on this kind of shipment — "
+                "the recommendation is to release.")
+        return ("Recommend Release",
+                base + _confirming_signals_text(case, retain_leaning=False))
+    base = (f"{retained} of the {total} past closed cases for seller "
+            f"\"{seller}\" on {category} going to {destination} ended in "
+            f"retention ({retPct*100:.0f}%). The history is inconclusive, "
+            "so a Tax Authority review is recommended before deciding.")
+    return ("Submit for Tax Review",
+            base + _confirming_signals_text(case, retain_leaning=True))
+
+
+# Slide 1 row 5 of Rules in App.pptx — tax recommendation rule.
+_SLIDE1_VAT_GAP_TOLERANCE = 1.0   # euros
+
+def _compute_tax_recommendation(case: dict) -> tuple[str, str]:
+    """Compute the tax recommendation + plain-text rationale.
+
+    Logic (business framing in the rationale; documented formally in
+    Context/Rules in App.pptx slide 1 row 5):
+      1. If the total VAT gap on the case is below €1, there is no
+         material tax exposure → no/limited risk.
+      2. Otherwise, look at how past closed cases from the same seller
+         on the same declared category going to the same destination
+         were resolved:
+           ≥ 75 % retained → the pattern backs the gap; confirm risk.
+           in-between or no history → evidence is not strong enough on
+                                      its own; request third-party input.
+
+    Gap is taken from the stored VAT_Gap_Fee if the AI agent has
+    populated it; otherwise derived from Recommended_VAT_Rate × orders
+    as a fallback (see _agent_worker for when VAT_Gap_Fee is set).
+    """
+    seller      = case.get("Seller_Name") or ""
+    category    = case.get("HS_Product_Category") or ""
+    destination = case.get("Country_Destination") or ""
+    case_id     = case.get("Case_ID") or ""
+
+    stored_gap = case.get("VAT_Gap_Fee")
+    if stored_gap is None:
+        # Fallback: derive from orders × recommended rate.
+        rec_rate = case.get("Recommended_VAT_Rate")
+        orders   = case.get("orders") or []
+        if rec_rate is None or not orders:
+            gap = 0.0
+        else:
+            gap = sum((o.get("Product_Value") or 0.0) * rec_rate - (o.get("VAT_Fee") or 0.0)
+                      for o in orders)
+    else:
+        gap = float(stored_gap)
+    abs_gap = abs(gap)
+
+    if abs_gap < _SLIDE1_VAT_GAP_TOLERANCE:
+        base = (f"The total VAT gap across the orders in this case is "
+                f"€{abs_gap:.2f}, which is below the €"
+                f"{_SLIDE1_VAT_GAP_TOLERANCE:.0f} materiality threshold. "
+                "No meaningful tax exposure has been detected on this "
+                "case.")
+        return ("No/Limited Risk",
+                base + _confirming_signals_text(case, retain_leaning=False))
+
+    prev = get_previous_cases(seller=seller, category=category,
+                              destination=destination,
+                              exclude_case_id=case_id, limit=50)
+    total    = len(prev)
+    retained = sum(1 for p in prev
+                   if (p.get("Proposed_Action_Customs") or "").lower() == "retain")
+    retPct = (retained / total) if total else 0.0
+
+    if retPct > 0.75:
+        base = (f"A VAT gap of €{abs_gap:.2f} has been calculated on this "
+                f"case. {retained} of the {total} past closed cases for "
+                f"seller \"{seller}\" on {category} going to {destination} "
+                f"ended in retention ({retPct*100:.0f}%). The historical "
+                "pattern backs the gap detected on this case — the tax "
+                "risk is confirmed.")
+        return ("Confirm Risk",
+                base + _confirming_signals_text(case, retain_leaning=True))
+    if total == 0:
+        base = (f"A VAT gap of €{abs_gap:.2f} has been calculated on this "
+                f"case, but there are no past closed cases on record for "
+                f"seller \"{seller}\" on {category} going to {destination} "
+                "to reinforce or contradict the finding. Third-party input "
+                "is recommended before concluding.")
+        return ("Request Input from Third Party",
+                base + _confirming_signals_text(case, retain_leaning=True))
+    base = (f"A VAT gap of €{abs_gap:.2f} has been calculated on this "
+            f"case, but only {retained} of the {total} past closed cases "
+            f"for seller \"{seller}\" on {category} going to {destination} "
+            f"ended in retention ({retPct*100:.0f}%). The historical "
+            "pattern is not strong enough on its own — third-party input "
+            "is recommended before concluding.")
+    return ("Request Input from Third Party",
+            base + _confirming_signals_text(case, retain_leaning=True))
 
 
 def get_all_cases_hydrated(status: str | None = None, limit: int = 200) -> list[dict]:

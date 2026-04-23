@@ -1618,13 +1618,23 @@ def _emit_case_updated_sse(case_id: str, action: str) -> None:
 
 @app.get("/api/rg/cases/{case_id}/previous")
 def api_rg_previous_cases(case_id: str, limit: int = Query(20, ge=1, le=50)):
-    """Previous closed cases from the same seller."""
+    """Past closed cases matching (seller, declared category, destination).
+
+    Slide 1 row 3 of Rules in App.pptx defines a historical case as
+    same-seller / same-category / similar-description / same-destination.
+    Description similarity is evaluated client-side by the rule engine
+    that drives the recommended Customs action."""
     from lib.database import get_case_hydrated, get_previous_cases
     case = get_case_hydrated(case_id)
     if not case:
         return {"items": []}
-    seller = case.get("Seller_Name", "")
-    return {"items": get_previous_cases(seller, exclude_case_id=case_id, limit=limit)}
+    return {"items": get_previous_cases(
+        seller      = case.get("Seller_Name", ""),
+        category    = case.get("HS_Product_Category", ""),
+        destination = case.get("Country_Destination", ""),
+        exclude_case_id = case_id,
+        limit       = limit,
+    )}
 
 
 @app.get("/api/rg/cases/{case_id}/correlated")
@@ -1663,7 +1673,23 @@ async def _enqueue_for_agent(case_id: str) -> None:
 
 
 def _build_agent_tx(case: dict) -> dict:
-    """Shape the case as the tx dict the analyser expects."""
+    """Shape the case as the tx dict the analyser expects.
+
+    The agent sees a SINGLE synthesized transaction per case — the
+    case's primary order (first linked Sales_Order). The analyser
+    returns one verdict and one `expected_rate`; _agent_worker then
+    extrapolates that rate to every linked order to compute the
+    case-level VAT gap.
+
+    This is faithful today because orders inside one case share
+    seller, declared category, declared rate, and a similar description
+    by construction (find_similar_open_case groups them on those
+    fields + Jaccard ≥ 0.4), so one verdict validly covers all orders.
+
+    If that invariant ever weakens (lower Jaccard, manual multi-cluster
+    merge, …), move to a batched invoice — see BACKLOG.md entry
+    "Per-order VAT Fraud Detection agent verdicts (batched invoice)".
+    """
     return {
         "transaction_id":   case.get("Sales_Order_ID") or case.get("Sales_Order_Business_Key"),
         "seller_name":      case.get("Seller_Name"),
@@ -1730,6 +1756,48 @@ async def _agent_worker() -> None:
             reasoning = result.get("reasoning", "")
             now_iso   = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
 
+            # The analyser reports the VAT rate it believes should have
+            # applied (per-line `expected_rate`). Today the agent sees
+            # one synthetic line per case (see _build_agent_tx), so we
+            # take the first verdict and apply its expected_rate to
+            # every linked order on the case to derive a case-level
+            # VAT gap: sum over orders of value × (expected − declared).
+            #
+            # Consequence: the `uncertain` verdict is case-wide. If the
+            # primary order's verdict is uncertain, no gap is recorded
+            # even when other orders might have yielded definitive
+            # verdicts individually. That's acceptable as long as orders
+            # in a case are homogeneous by construction (same seller,
+            # category, declared rate) — which the C&T factory enforces
+            # via find_similar_open_case. The full per-order evaluation
+            # path is logged in BACKLOG.md under "Per-order VAT Fraud
+            # Detection agent verdicts (batched invoice)".
+            expected_rate: float | None = None
+            line_verdicts = result.get("line_verdicts") or []
+            # Only trust the analyser's rate when its verdict is
+            # definitive. An `uncertain` top-level verdict means the
+            # agent could not reach a confident conclusion — we leave
+            # VAT_Gap_Fee as NULL rather than persist a tentative gap
+            # the officer would read as authoritative.
+            if verdict != "uncertain" and line_verdicts:
+                er = line_verdicts[0].get("expected_rate")
+                try:
+                    expected_rate = float(er) if er is not None else None
+                except (TypeError, ValueError):
+                    expected_rate = None
+
+            case_vat_gap: float | None = None
+            if expected_rate is not None:
+                from lib.database import get_case_orders
+                orders = get_case_orders(case_id) or []
+                total_gap = 0.0
+                for o in orders:
+                    value        = float(o.get("Product_Value") or 0.0)
+                    declared_vat = float(o.get("VAT_Fee") or 0.0)
+                    expected_vat = value * expected_rate
+                    total_gap   += expected_vat - declared_vat
+                case_vat_gap = round(total_gap, 2)
+
             comm = case.get("Communication", []) or []
             comm.append({
                 "date":    now_iso,
@@ -1737,13 +1805,27 @@ async def _agent_worker() -> None:
                 "action":  f"verdict: {verdict}",
                 "message": reasoning,
             })
-            update_case(case_id, {
+            # Legislation refs surface in the Tax VAT Assessment panel,
+            # so they are persisted on the case (JSON-serialised) rather
+            # than kept only in the agent_log audit table.
+            legislation_refs_raw = result.get("legislation_refs") if isinstance(result, dict) else None
+            legislation_refs_json = (_json.dumps(legislation_refs_raw)
+                                     if isinstance(legislation_refs_raw, list)
+                                     else None)
+
+            case_updates: dict = {
                 "Status":        STATUS.UNDER_REVIEW_BY_TAX,
                 "AI_Analysis":   f"[{verdict}] {reasoning}",
                 "Update_time":   now_iso,
                 "Updated_by":    "VAT Fraud Detection Agent",
                 "Communication": comm,
-            })
+            }
+            if legislation_refs_json is not None:
+                case_updates["AI_Legislation_Refs"] = legislation_refs_json
+            if expected_rate is not None:
+                case_updates["Recommended_VAT_Rate"] = expected_rate
+                case_updates["VAT_Gap_Fee"]          = case_vat_gap
+            update_case(case_id, case_updates)
             _emit_case_updated_sse(case_id, "ai_complete")
             insert_agent_log({
                 "transaction_id": case_id,
@@ -1753,7 +1835,7 @@ async def _agent_worker() -> None:
                 "item_category": tx.get("item_category"),
                 "value": tx.get("value"),
                 "vat_rate": tx.get("vat_rate"),
-                "correct_vat_rate": None,
+                "correct_vat_rate": expected_rate,
                 "verdict": verdict,
                 "reasoning": reasoning,
                 "legislation_refs": _json.dumps(result.get("legislation_refs", [])) if isinstance(result, dict) else "[]",
@@ -1779,9 +1861,65 @@ async def _agent_worker() -> None:
             _agent_queue.task_done()
 
 
+# Role → allowed action proposals emitted by the agentic chat.
+# The LLM is instructed to use these exact backend ids. The frontend
+# applies them via the existing /customs-action and /tax-action
+# endpoints, so no new write path is introduced here — the chat is a
+# thin proposal layer on top of what officers can already click.
+_AGENTIC_TAX_ACTIONS = {
+    "risk_confirmed":   "Confirm Risk (case returns to Customs with tax verdict)",
+    "no_limited_risk":  "No/Limited Risk (case returns to Customs with tax verdict)",
+    "input_requested":  "Request Input from Third Party",
+}
+_AGENTIC_CUSTOMS_ACTIONS = {
+    "retainment":       "Recommend Retainment (closes case)",
+    "release":          "Recommend Release (closes case)",
+    "tax_review":       "Submit for Tax Review (triggers VAT Fraud Detection agent)",
+    "input_requested":  "Request Input from Third Party",
+}
+
+
+def _parse_agent_proposal(raw: str, allowed: dict) -> tuple[str, dict | None]:
+    """Split an LLM response into (visible_text, proposal_dict_or_none).
+
+    The LLM is instructed to emit a fenced block like
+
+        <<PROPOSE>>
+        {"action": "risk_confirmed", "comment": "..."}
+        <<END>>
+
+    when it wants the officer to apply an action. We strip the fence
+    from the text shown to the user and return the parsed proposal
+    separately so the frontend can render an Apply/Cancel card. If the
+    fence is missing or malformed, or the action isn't in *allowed*,
+    the proposal is dropped and the raw text is returned unchanged.
+    """
+    import re, json as _json
+    m = re.search(r"<<PROPOSE>>\s*(\{.*?\})\s*<<END>>", raw, flags=re.DOTALL)
+    if not m:
+        return raw.strip(), None
+    try:
+        data = _json.loads(m.group(1))
+    except Exception:
+        return raw.strip(), None
+    action = data.get("action")
+    comment = (data.get("comment") or "").strip()
+    if not isinstance(action, str) or action not in allowed:
+        return raw.strip(), None
+    cleaned = (raw[:m.start()] + raw[m.end():]).strip()
+    return cleaned, {"action": action, "comment": comment}
+
+
 @app.post("/api/rg/cases/{case_id}/ask")
 async def api_rg_case_ask(case_id: str, body: dict):
-    """AI assistant: answer a question about a case using LM Studio."""
+    """AI assistant: answer a question about a case using LM Studio.
+
+    Returns ``{"answer": str, "proposal": {action, comment}|None}``.
+    The proposal is optional — set when the LLM is confident the
+    officer just asked to apply an action. The frontend renders it as
+    an Apply/Cancel card and fires the existing customs/tax-action
+    endpoint on Apply. No write happens server-side in this endpoint.
+    """
     from lib.database import get_case_hydrated, get_case_orders
     from lib.llm_client import LMStudioClient, PRIORITY_INTERACTIVE
 
@@ -1832,6 +1970,39 @@ AI VAT Fraud Detection Analysis: {ai_analysis}
 Communication log:
 {comm_text}"""
 
+    allowed_actions = _AGENTIC_TAX_ACTIONS if role == "tax" else _AGENTIC_CUSTOMS_ACTIONS
+    actions_block = "\n".join(f'  - "{k}": {v}' for k, v in allowed_actions.items())
+
+    # Tool-calling contract — the LLM is told to emit a JSON fence ONLY
+    # when the officer has explicitly asked to apply/submit/execute an
+    # action. A card appears in the UI for the officer to confirm; no
+    # write happens until they press Apply.
+    agentic_block = f"""
+You can propose an action for the officer to apply. Only propose when the
+officer's latest message is an explicit instruction to act (e.g. "proceed",
+"apply the recommendation", "submit", "go ahead", "do it"). Do NOT propose
+on general Q&A.
+
+Allowed actions for this role:
+{actions_block}
+
+When you want to propose an action, include in your reply — at the END
+of the message, after your explanation — a single JSON block wrapped in
+the exact fences shown below, with no additional text around it:
+
+<<PROPOSE>>
+{{"action": "<one of the ids above>", "comment": "<short note to attach>"}}
+<<END>>
+
+The comment should be a concise 1–2 sentence summary justifying the
+action, suitable to post in the case activity log.
+
+Before the fence, write a plain-English sentence telling the officer
+what you are about to apply and ask them to confirm by clicking Apply.
+If the officer is just asking questions, answer normally and do NOT
+emit the fence.
+"""
+
     if role == "tax":
         system_prompt = f"""You are a Tax Authority AI assistant specialised in VAT compliance and tax fraud detection.
 You work for the Irish Revenue Commissioners. Your expertise includes:
@@ -1846,6 +2017,7 @@ and whether the declared VAT treatment is consistent with the product category a
 Cite relevant VAT rules when possible. Be precise and analytical.
 
 Answer based ONLY on the case data below. If the data doesn't contain the answer, say so.
+{agentic_block}
 
 {case_context}"""
     else:
@@ -1863,6 +2035,7 @@ of the seller and route, whether the product description matches the declared ca
 and any red flags for customs enforcement. Be direct and action-oriented.
 
 Answer based ONLY on the case data below. If the data doesn't contain the answer, say so.
+{agentic_block}
 
 {case_context}"""
 
@@ -1879,13 +2052,14 @@ Answer based ONLY on the case data below. If the data doesn't contain the answer
 
     try:
         client = LMStudioClient()
-        answer = await client.chat([
+        raw_answer = await client.chat([
             {"role": "user", "content": user_turn},
-        ], temperature=0.3, max_tokens=300, priority=PRIORITY_INTERACTIVE)
+        ], temperature=0.3, max_tokens=500, priority=PRIORITY_INTERACTIVE)
         await client.aclose()
-        return {"answer": answer}
+        answer, proposal = _parse_agent_proposal(raw_answer, allowed_actions)
+        return {"answer": answer, "proposal": proposal}
     except Exception as e:
-        return {"answer": f"Unable to reach AI assistant: {e}"}
+        return {"answer": f"Unable to reach AI assistant: {e}", "proposal": None}
 
 
 @app.get("/api/rg/agent/queue")
@@ -2161,42 +2335,120 @@ def sim_speed(payload: SpeedPayload):
 
 
 @app.post("/api/simulation/reset")
-def sim_reset():
+async def sim_reset():
     from lib.event_store import flush_events
     from lib.seeder import seed_european_custom_db
     from lib.alarm_checker import bootstrap_scenario_alarm
+    from lib.broker import broker as _b
+
+    # 1) Freeze the sim clock and cancel any still-sleeping factory tasks
+    #    (Order Validation, Arrival Notification, manual agent runs). They
+    #    cancel cleanly from `asyncio.sleep(...)`; anything mid-publish
+    #    completes that single call.
     state.reset()
+    for t in list(_inflight_factory_tasks):
+        if not t.done():
+            t.cancel()
+    _inflight_factory_tasks.clear()
+
+    # 2) Wait for the pipeline to settle before flushing the events dir.
+    #    A subscriber coroutine may already hold a dequeued message and be
+    #    about to publish downstream, which re-fills another queue AND
+    #    writes an event file (write_event() runs synchronously at the
+    #    start of broker.publish()). So loop: drain subscriber queues,
+    #    yield the event loop so in-flight coroutines can run, and stop
+    #    only when drain returns 0 for several consecutive iterations —
+    #    i.e. nothing is flowing anymore. Hard cap of 2 s keeps reset
+    #    responsive even if something's stuck.
+    total_drained = 0
+    idle_streak = 0
+    for _ in range(40):
+        drained = _b.drain_all()
+        total_drained += drained
+        await asyncio.sleep(0.05)
+        idle_streak = idle_streak + 1 if drained == 0 else 0
+        if idle_streak >= 3:
+            break
+    if total_drained:
+        print(f"  [reset] drained {total_drained} stale messages from broker queues")
+
     reset_simulation_db()
     reset_alarms()          # removes March+ rows, keeps Sep–Feb history
     from lib.database import reset_cases
     reset_cases()           # clear investigation cases
     _push_rg_case_sse({"event": "cases_reset"})  # notify C&T Risk Management System clients
+
+    # 4) Flush the events directory last — everything upstream is now
+    #    quiesced and cannot race against the rmtree.
     flush_events()
-    from lib.broker import broker as _b
-    drained = _b.drain_all()
-    if drained:
-        print(f"  [reset] drained {drained} stale messages from broker queues")
+
     # Re-seed historical data if it was wiped (e.g. first run or manual DB delete)
     if historical_transaction_count() == 0:
         seed_european_custom_db()
     bootstrap_scenario_alarm()   # pre-seed SUP001→IE alarm from day 1
     _live_queue.clear()
     _live_alarms.clear()
-    # Cancel every in-flight delayed factory task (Order Validation, Arrival
-    # Notification, manual agent runs) so no residual events fire after the
-    # reset has emptied the pipeline. Tasks already in the middle of an
-    # `await broker.publish(...)` will still complete that single publish,
-    # but anything still inside `asyncio.sleep(...)` cancels cleanly.
-    for t in list(_inflight_factory_tasks):
-        if not t.done():
-            t.cancel()
-    _inflight_factory_tasks.clear()
+
+    # 5) Drain each sim-state SSE queue and push a fresh snapshot so a
+    #    frame the broadcaster queued just before the reset cannot arrive
+    #    at the client *after* the reset and re-populate the pipeline UI.
+    try:
+        fresh_snapshot = _json.dumps(_compute_sim_state_snapshot())
+    except Exception:
+        fresh_snapshot = None
+    for sq in list(_sim_state_sse):
+        while not sq.empty():
+            try:
+                sq.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        if fresh_snapshot is not None:
+            try:
+                sq.put_nowait(fresh_snapshot)
+            except asyncio.QueueFull:
+                pass
+
     for sse_q in list(_sse_queues):
         try:
             sse_q.put_nowait("__reset__")
         except asyncio.QueueFull:
             pass
     _push_rg_case_sse({"event": "reset"})
+
+    # 6) Background sweep: if the reset fires mid-pipeline (tight race where
+    #    tail-end transactions from a just-finished sim are still being
+    #    processed), a few event files may land on disk after the primary
+    #    flush_events() above. Drain + flush again over the next ~4 s to
+    #    mop them up and push a refreshed snapshot to SSE clients.
+    #
+    #    CRITICAL: bail out the moment a new sim has started — otherwise
+    #    the sweep would wipe the new sim's in-flight events and produce
+    #    the 73/2026 fired-tx corruption the demo hit. state.running flips
+    #    to True on /start, and state.fired_count becomes >0 once any
+    #    event fires, so either signal terminates the sweep.
+    async def _followup_flush():
+        for _ in range(4):
+            await asyncio.sleep(1.0)
+            if state.running or state.fired_count > 0:
+                return
+            _b.drain_all()
+            flush_events()
+        try:
+            snap = _json.dumps(_compute_sim_state_snapshot())
+        except Exception:
+            return
+        for sq in list(_sim_state_sse):
+            while not sq.empty():
+                try:
+                    sq.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+            try:
+                sq.put_nowait(snap)
+            except asyncio.QueueFull:
+                pass
+    asyncio.create_task(_followup_flush())
+
     return {"ok": True, "status": state.to_dict()}
 
 
