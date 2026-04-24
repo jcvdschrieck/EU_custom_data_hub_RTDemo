@@ -44,7 +44,10 @@ if (-not (Have python)) {
     # winget updates the machine PATH; this process needs a refresh.
     $env:Path = [System.Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path', 'User')
 }
-$pyVer = (& python -c "import sys; print('%d.%d' % sys.version_info[:2])").Trim()
+# Outer quotes MUST be single — PowerShell parses `%` inside double-quoted
+# strings as the ForEach-Object operator and trips over `%d.%d %` in the
+# Python format expression. Single-quoted strings are literal.
+$pyVer = (& python -c 'import sys; print("%d.%d" % sys.version_info[:2])').Trim()
 $pyMajor, $pyMinor = $pyVer.Split('.') | ForEach-Object { [int]$_ }
 if ($pyMajor -lt 3 -or ($pyMajor -eq 3 -and $pyMinor -lt 11)) {
     Write-Error "Python $pyVer is too old (need 3.11+)."
@@ -112,7 +115,8 @@ LM_STUDIO_MODEL=$($config.LM_STUDIO_MODEL)
 # out when huggingface_hub >= 1.7 tries to reach hub.hf.co on every
 # SentenceTransformer() init.
 Write-Host "==> Warming the Hugging Face embedder cache (~90 MB, one-off)"
-& $venvPython -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+# Single-quoted so PowerShell doesn't try to interpolate anything.
+& $venvPython -c 'from sentence_transformers import SentenceTransformer; SentenceTransformer("all-MiniLM-L6-v2")'
 
 # ── Seed databases ──────────────────────────────────────────────────────
 Write-Host "==> Seeding databases"
