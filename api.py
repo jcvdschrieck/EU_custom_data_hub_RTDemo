@@ -694,26 +694,25 @@ ENGINE_WEIGHTS: dict[str, float] = {
 }
 
 
+# Case-level Medium/High cut within the Amber band.
+# 0.65 was picked to give roughly 4:1 Medium:High across the full
+# 21-case xlsx dataset. The legacy intra-band Low tier is dropped:
+# every amber case that's not yet close to auto-retention is simply
+# Medium, and High is reserved for the last ~15 points before retain.
+CASE_HIGH_THRESHOLD = 0.65
+
+
 def case_risk_level(score: float) -> str:
-    """Compute Low/Medium/High for a case-level risk score.
+    """Compute Medium/High for a case-level risk score.
 
     Only investigate-routed transactions (score in [THRESHOLD_RELEASE,
-    THRESHOLD_RETAIN]) become cases. The Low/Medium/High classification
-    maps the score within that interval using the same 1/3 and 2/3
-    percentile boundaries, so the labels adapt if the thresholds change.
+    THRESHOLD_RETAIN]) become cases — there is no Low tier inside the
+    Amber band any more.
 
-      Low:    score < THRESHOLD_RELEASE + interval × 1/3
-      Medium: score < THRESHOLD_RELEASE + interval × 2/3
-      High:   score >= THRESHOLD_RELEASE + interval × 2/3
+      Medium: score < CASE_HIGH_THRESHOLD
+      High:   score >= CASE_HIGH_THRESHOLD
     """
-    interval = THRESHOLD_RETAIN - THRESHOLD_RELEASE
-    low_high_boundary = THRESHOLD_RELEASE + interval * (1.0 / 3.0)
-    medium_high_boundary = THRESHOLD_RELEASE + interval * (2.0 / 3.0)
-    if score >= medium_high_boundary:
-        return "High"
-    if score >= low_high_boundary:
-        return "Medium"
-    return "Low"
+    return "High" if score >= CASE_HIGH_THRESHOLD else "Medium"
 
 async def _release_factory() -> None:
     """Automated Assessment Factory.
