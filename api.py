@@ -695,11 +695,10 @@ ENGINE_WEIGHTS: dict[str, float] = {
 
 
 # Case-level Medium/High cut within the Amber band.
-# 0.65 was picked to give roughly 4:1 Medium:High across the full
-# 21-case xlsx dataset. The legacy intra-band Low tier is dropped:
-# every amber case that's not yet close to auto-retention is simply
-# Medium, and High is reserved for the last ~15 points before retain.
-CASE_HIGH_THRESHOLD = 0.65
+# The legacy intra-band Low tier is dropped: every amber case that's
+# not yet close to auto-retention is simply Medium, and High is
+# reserved for the last ~10 points before retain.
+CASE_HIGH_THRESHOLD = 0.70
 
 
 def case_risk_level(score: float) -> str:
