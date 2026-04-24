@@ -2,28 +2,38 @@
 Inject two demo cases into simulation.db so they appear on the Customs
 Authority dashboard within the first two sim-minutes.
 
+Based on xlsx rows 50 and 76 of VAT_Cases_Generated_17042026_6.xlsx,
+adapted to the IE destination.
+
     Case 1 — VAT Misclassification (ambiguity-driven)
-            ShenZhen TechGlobal Co. × IE × COSMETICS & PERSONAL CARE
-            Bone-conduction headset declared as CO-06 ("Pharmaceutical /
-            medicinal product", IE 0%) though the product is consumer
-            electronics that should attract 23% under EL-01.
+            ShenZhen TechGlobal Co. × IE × ELECTRONICS & ACCESSORIES
+            Open-ear bone conduction sport headset declared under
+            EL-08 "Hearing aid / medical audio device" at IE 0% —
+            the recommended classification is EL-03 "Consumer audio
+            device" at IE 23%. The product sits in the grey zone:
+            bone-conduction IS a legitimate hearing-assistance route,
+            but this unit has no medical certification.
             Stronger signal: vat_ratio.  Case-level score ≈ 0.71 (High).
 
             + 4 historical closed cases (2 retained / 2 released) in
               historical_cases.db so _compute_customs_recommendation
               routes to "Submit for Tax Review" (50% retention rate).
 
-    Case 2 — Vague Description
-            Delhi PharmaExport Pvt Ltd × IE × FOOD SUPPLEMENTS & VITAMINS
-            "Capsules for daily health support" under FS-02 (IE 0%).
-            No rate mismatch — only signal is vagueness.
-            Case-level score ≈ 0.65 (Medium), vagueness ≥ 0.5 so
+    Case 2 — Vague Description + Supplier Risk
+            Delhi PharmaExport Pvt Ltd × IE × COSMETICS & PERSONAL CARE
+            "Capsules for daily health support" declared under CO-06
+            "Pharmaceutical / medicinal product" at IE 0% (correct —
+            no rate mismatch). Signals are vagueness + mild supplier
+            risk, matching the "VAT Product Description Vague,
+            Supplier Risk" problem the xlsx row 50 reports.
+            Case-level score ≈ 0.62 (Medium), vagueness ≥ 0.5 so
             _compute_customs_recommendation emits
             "Request Input from Deemed Importer".
 
-Both clusters use the same Jaccard-anchor marker convention as the
-main seeder so every order lands in a single open case via
-find_similar_open_case.
+Both clusters use the "-DEMO" suffix on the Jaccard-anchor markers so
+they form their own open cases instead of merging into the main
+DELPHA-IE-CPC or SHETEC-IE-EA clusters that other demo data may
+contribute.
 
 Run with the venv active (or directly with `python3`):
     python3 scripts/inject_demo_cases.py
@@ -60,8 +70,10 @@ def _category_code(parent_category: str) -> str:
     return "".join(w[0].upper() for w in parent_category.split() if w[0].isalpha())[:3]
 
 
-def _cluster_markers(seller: str, destination: str, parent: str) -> str:
+def _cluster_markers(seller: str, destination: str, parent: str, suffix: str = "") -> str:
     cid = f"{_seller_code(seller)}-{destination}-{_category_code(parent)}"
+    if suffix:
+        cid = f"{cid}-{suffix}"
     return (
         f"lot-{cid} ref-{cid} shipment-{cid} "
         f"batch-{cid} manifest-{cid} series-{cid}"
@@ -69,7 +81,13 @@ def _cluster_markers(seller: str, destination: str, parent: str) -> str:
 
 
 def _new_tx_id(rng: random.Random) -> str:
-    return f"TX-{uuid.UUID(int=rng.getrandbits(128)).hex[:12].upper()}"
+    # TXDEMO- prefix lets the cleanup DELETE reliably wipe every prior
+    # demo row regardless of which cluster / parent / suffix the previous
+    # run used. Without it, the deterministic RNG seed produces the same
+    # tx_ids across runs, bulk_insert's "INSERT OR IGNORE" skips them,
+    # and the stale cluster data survives — so the UI displays the old
+    # parents even after you change CASE_1 / CASE_2 in this script.
+    return f"TXDEMO-{uuid.UUID(int=rng.getrandbits(128)).hex[:10].upper()}"
 
 
 # ── Demo-case specs ────────────────────────────────────────────────────────
@@ -77,14 +95,15 @@ def _new_tx_id(rng: random.Random) -> str:
 CASE_1 = {
     "seller_name":       "ShenZhen TechGlobal Co.",
     "destination":       "IE",
-    "parent_category":   "COSMETICS & PERSONAL CARE",          # declared
-    "subcategory_code":  "CO-06",                              # Pharmaceutical / medicinal product → IE 0%
-    "declared_rate":     0.0,
-    "correct_rate":      0.23,                                 # real classification: Electronics 23%
+    "parent_category":   "ELECTRONICS & ACCESSORIES",          # xlsx row 76 declared parent
+    "subcategory_code":  "EL-08",                              # Hearing aid / medical audio device → IE 0% (our add)
+    "declared_rate":     0.0,                                  # 0 % zero-rated medical device claim
+    "correct_rate":      0.23,                                 # recommended: EL-03 Consumer audio device at IE 23%
     "has_error":         1,
     "n_orders":          25,
     "base_value":        85.0,
-    "base_description":  "Open-ear bone conduction sport headset, 8-hour battery, hearing-assistance positioning (no medical certification)",
+    "base_description":  "Open-ear bone conduction sport headset, IP68, 8-hour battery, declared as hearing assistance device (no medical certification)",
+    "cluster_suffix":    "DEMO",                               # keeps cluster disjoint from any SHETEC-IE-EA from main dataset
     # Engine scores — vat_ratio dominates; case-level score ≈ 0.71 (High)
     "engine_vat_ratio":  0.90,
     "engine_ml":         0.20,
@@ -95,19 +114,21 @@ CASE_1 = {
 CASE_2 = {
     "seller_name":       "Delhi PharmaExport Pvt Ltd",
     "destination":       "IE",
-    "parent_category":   "FOOD SUPPLEMENTS & VITAMINS",        # declared
-    "subcategory_code":  "FS-02",                              # Omega / fatty acids → IE 0%
+    "parent_category":   "COSMETICS & PERSONAL CARE",          # xlsx row 50 declared parent
+    "subcategory_code":  "CO-06",                              # Pharmaceutical / medicinal product → IE 0%
     "declared_rate":     0.0,
-    "correct_rate":      0.0,                                  # no misclass; vagueness is the sole driver
+    "correct_rate":      0.0,                                  # xlsx shows recommended == declared — no rate gap
     "has_error":         0,
     "n_orders":          25,
     "base_value":        120.0,
     "base_description":  "Capsules for daily health support",
-    # Engine scores — vagueness dominates; case-level score ≈ 0.65 (Medium)
+    "cluster_suffix":    "DEMO",                               # keeps cluster disjoint from the main DELPHA-IE-CPC cluster
+    # Engine scores — vagueness dominates, mild supplier risk per xlsx row 50's
+    # "VAT Product Description Vague, Supplier Risk" problem; case-level score ≈ 0.62 (Medium)
     "engine_vat_ratio":  0.0,
-    "engine_ml":         0.10,
+    "engine_ml":         0.15,
     "engine_ie_wl":      0.0,
-    "engine_vagueness":  0.65,
+    "engine_vagueness":  0.60,
 }
 
 
@@ -122,7 +143,10 @@ def _build_tx_rows(case: dict, rng: random.Random) -> list[dict]:
     if not seller:
         raise RuntimeError(f"Unknown seller: {case['seller_name']}")
 
-    markers = _cluster_markers(case["seller_name"], case["destination"], case["parent_category"])
+    markers = _cluster_markers(
+        case["seller_name"], case["destination"], case["parent_category"],
+        suffix=case.get("cluster_suffix", ""),
+    )
     base    = case["base_value"]
     rows: list[dict] = []
 
@@ -196,18 +220,15 @@ def _inject_historical_cases(case: dict) -> int:
     inserted = 0
 
     with conn:
-        # Idempotent cleanup — must run ONCE before the insert loop,
-        # otherwise each iteration wipes the previous iteration's row
-        # and only the last insert survives. Clean all three tables
-        # (including orphaned Sales_Order / Sales_Order_Risk from earlier
-        # buggy runs) keyed on the target (seller, category, destination)
-        # with the CASE-H-DEMO- / SOH-DEMO- prefixes.
+        # Idempotent cleanup — runs ONCE before the insert loop, and
+        # deletes ANY row previously tagged with the SOH-DEMO- prefix
+        # regardless of (seller, category, destination). This keeps the
+        # script cross-run consistent even if we re-point Case 1 to a
+        # different parent category (which happened once already when
+        # we moved the bone-conduction case from COSMETICS to ELECTRONICS).
         bk_rows = conn.execute(
             "SELECT Sales_Order_Business_Key FROM Sales_Order "
-            "WHERE Seller_Name = ? AND HS_Product_Category = ? "
-            "  AND Country_Destination = ? "
-            "  AND Sales_Order_Business_Key LIKE 'SOH-DEMO-%'",
-            (case["seller_name"], case["parent_category"], case["destination"]),
+            "WHERE Sales_Order_Business_Key LIKE 'SOH-DEMO-%'"
         ).fetchall()
         for (bk,) in bk_rows:
             conn.execute("DELETE FROM Sales_Order_Case WHERE Sales_Order_Business_Key = ?", (bk,))
@@ -295,15 +316,13 @@ def _inject_historical_cases(case: dict) -> int:
 def main() -> None:
     rng = random.Random(20260424)
 
-    # 1) Delete any prior demo rows in simulation.db so the script is idempotent.
+    # 1) Delete any prior demo rows in simulation.db so the script is
+    # idempotent. Match on the TXDEMO- transaction_id prefix so we sweep
+    # every row this script has ever injected — regardless of which
+    # parent category / cluster marker a previous run used.
     conn = sqlite3.connect(SIMULATION_DB)
     with conn:
-        for case in (CASE_1, CASE_2):
-            marker_fragment = f"{_seller_code(case['seller_name'])}-{case['destination']}-{_category_code(case['parent_category'])}"
-            conn.execute(
-                "DELETE FROM transactions WHERE item_description LIKE ?",
-                (f"%lot-{marker_fragment}%",),
-            )
+        conn.execute("DELETE FROM transactions WHERE transaction_id LIKE 'TXDEMO-%'")
     conn.close()
 
     # 2) Build + bulk-insert simulation.db rows.

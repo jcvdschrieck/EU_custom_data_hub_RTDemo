@@ -223,6 +223,13 @@ VAT_RATE_LOOKUP: dict[tuple[str, str], tuple[float, str]] = {
     ('IE', 'EL-04'): (0.2300, 'S'),
     ('IE', 'EL-05'): (0.2300, 'S'),
     ('IE', 'EL-07'): (0.2300, 'S'),
+    # Medical audio devices (hearing aids, bone-conduction medical headsets)
+    # are zero-rated in Ireland under Revenue Tax & Duty Manual Part 05-03-02
+    # when they meet the medical-device criteria. The classification is
+    # ambiguity-prone: a consumer audio product (EL-03, standard 23%) can
+    # be mis-declared under EL-08 to attract the zero rate, which is what
+    # the bone-conduction-headset demo case exercises.
+    ('IE', 'EL-08'): (0.0000, 'Z'),
     ('IE', 'FP-01'): (0.0000, 'Z'),
     ('IE', 'FP-03'): (0.0000, 'Z'),
     ('IE', 'FP-04'): (0.2300, 'S'),
