@@ -1,0 +1,25 @@
+{
+  "_description": "Demo-mode overrides for the VAT Fraud Detection agent. Each entry short-circuits the real agent subprocess for transactions matching the 'match' criteria, returning a pre-canned result after the configured 'delay_seconds'. This avoids the ~1 min LLM+RAG round-trip on cases we want to showcase deterministically. Edit this file in place, then POST /api/simulation/reset (or click Reset on the Simulation page) to apply. Changes are picked up on the next agent invocation — no server restart needed.",
+  "_fields": {
+    "name":            "human-readable identifier for this override (log line uses it)",
+    "match.seller_name": "exact Seller_Name match (case-sensitive); omit or leave empty to match any seller",
+    "match.item_description_contains": "substring match (case-insensitive) against the tx item_description; omit or leave empty to match any description",
+    "delay_seconds":   "integer — how many real seconds to wait before returning the pre-canned result. Simulates the thinking time of the real agent. Set to 0 for an instant response.",
+    "recommendation":  "one of: correct | incorrect | uncertain. Anything else (typo, missing, etc.) defaults to 'incorrect' which drives the Customs Officer toward Recommend Control.",
+    "rationale":       "free text — shown as the agent's reasoning in the Tax Authority case view and the VAT Fraud Detection activity log.",
+    "source":          "free text — shown as a single legislation reference in the Tax VAT Assessment panel."
+  },
+  "overrides": [
+    {
+      "name": "shenzhen_bone_conduction",
+      "match": {
+        "seller_name": "ShenZhen TechGlobal Co.",
+        "item_description_contains": "bone conduction"
+      },
+      "delay_seconds": 5,
+      "recommendation": "incorrect",
+      "rationale": "Open-ear bone-conduction sport headsets declared under EL-08 ('Hearing aid / medical audio device', IE zero-rated) are not eligible for the 0% rate because the product carries no medical certification and is marketed as consumer sports equipment. The correct classification is EL-03 ('Consumer audio device') at the Irish standard rate of 23%.",
+      "source": "Revenue Tax & Duty Manual — Part 05-03-02 (Medical devices and appliances — zero-rating criteria)"
+    }
+  ]
+}
