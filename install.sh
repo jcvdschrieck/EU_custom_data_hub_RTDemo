@@ -3,13 +3,16 @@
 #
 # What it does (idempotent):
 #   1. Installs Python 3.11+ and Node.js 18+ via brew / apt if missing.
-#   2. Initialises the vat_fraud_detection git submodule.
-#   3. Clones the C&T frontend repo as a sibling directory if absent.
-#   4. Installs Python deps (pip) and Node deps (npm) for both frontends.
-#   5. Builds the internal Vite frontend into frontend/dist/.
-#   6. Writes customsandtaxriskmanagemensystem/.env and
+#   2. Clones the C&T frontend repo as a sibling directory if absent.
+#   3. Installs Python deps (pip) and Node deps (npm) for both frontends.
+#   4. Builds the internal Vite frontend into frontend/dist/.
+#   5. Writes customsandtaxriskmanagemensystem/.env and
 #      vat_fraud_detection/.env from config.env.
-#   7. Seeds the four SQLite databases.
+#   6. Seeds the four SQLite databases.
+#
+# Note: vat_fraud_detection/ is vendored — its files ship inside this
+# repo as plain tree content, not as a git submodule. No submodule
+# init step is needed.
 #
 # Optional after install:
 #   cd vat_fraud_detection && python3 build_knowledge_base.py --minilm-only
@@ -92,10 +95,6 @@ if (( node_major < 18 )); then
   exit 1
 fi
 echo "✓ Node.js $(node -v)"
-
-# ── Step 3: submodule ───────────────────────────────────────────────────
-echo "==> Initialising vat_fraud_detection submodule"
-git submodule update --init --recursive
 
 # ── Step 4: Python venv + deps ──────────────────────────────────────────
 # A dedicated venv sidesteps PEP 668 ("externally managed") on recent

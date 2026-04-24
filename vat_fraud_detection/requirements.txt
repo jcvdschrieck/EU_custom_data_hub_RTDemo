@@ -1,0 +1,34 @@
+# --- UI ---
+streamlit>=1.35
+
+# --- Anthropic ---
+anthropic>=0.28
+
+# --- Vector store & embeddings ---
+chromadb>=0.5
+sentence-transformers>=3.0
+
+# --- OCR ---
+pdfplumber>=0.11
+pytesseract>=0.3.13
+Pillow>=10.0
+
+# --- Data handling ---
+pydantic>=2.7
+pandas>=2.2
+openpyxl>=3.1
+lxml>=5.2
+
+# --- Web fetching ---
+requests>=2.32
+beautifulsoup4>=4.12
+
+# --- LM Studio (OpenAI-compatible local API) ---
+openai>=1.0
+
+# --- Text-to-speech ---
+gTTS>=2.5
+
+# --- Utilities ---
+python-dotenv>=1.0
+tenacity>=8.3

@@ -1,0 +1,11 @@
+.env
+__pycache__/
+*.pyc
+.DS_Store
+data/chroma_db/
+data/*.db
+data/*.db-shm
+data/*.db-wal
+eu_vat_hub/data/*.db
+eu_vat_hub/data/*.db-shm
+eu_vat_hub/data/*.db-wal

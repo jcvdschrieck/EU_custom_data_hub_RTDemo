@@ -1,0 +1,4 @@
+data/eu_vat.db
+__pycache__/
+*.pyc
+.env

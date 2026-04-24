@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2" xmlns:cac="urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2" xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2">
+  <cbc:ID>INV-0018</cbc:ID>
+  <cbc:IssueDate>2026-02-20</cbc:IssueDate>
+  <cbc:InvoiceTypeCode>380</cbc:InvoiceTypeCode>
+  <cbc:DocumentCurrencyCode>EUR</cbc:DocumentCurrencyCode>
+
+  <cac:AccountingSupplierParty>
+    <cac:Party>
+      <cac:PartyName><cbc:Name>Shamrock Digital Ltd</cbc:Name></cac:PartyName>
+      <cac:PostalAddress><cbc:StreetName>22 River Rd, Cork</cbc:StreetName><cbc:CountrySubentity>Ireland</cbc:CountrySubentity></cac:PostalAddress>
+      <cac:PartyTaxScheme><cbc:CompanyID>IE7654321B</cbc:CompanyID><cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme></cac:PartyTaxScheme>
+    </cac:Party>
+  </cac:AccountingSupplierParty>
+
+  <cac:AccountingCustomerParty>
+    <cac:Party>
+      <cac:PartyName><cbc:Name>Celtic Retailers Ltd</cbc:Name></cac:PartyName>
+      <cac:PostalAddress><cbc:StreetName>10 High St, Dublin 1</cbc:StreetName><cbc:CountrySubentity>Ireland</cbc:CountrySubentity></cac:PostalAddress>
+      <cac:PartyTaxScheme><cbc:CompanyID>IE9988776E</cbc:CompanyID><cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme></cac:PartyTaxScheme>
+    </cac:Party>
+  </cac:AccountingCustomerParty>
+
+  <cac:TaxTotal>
+    <cbc:TaxAmount currencyID="EUR">581.17</cbc:TaxAmount>
+
+    <cac:TaxSubtotal>
+      <cbc:TaxableAmount currencyID="EUR">2526.84</cbc:TaxableAmount>
+      <cbc:TaxAmount currencyID="EUR">581.17</cbc:TaxAmount>
+      <cac:TaxCategory>
+        <cbc:ID>S</cbc:ID>
+        <cbc:Percent>23.0</cbc:Percent>
+        <cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme>
+      </cac:TaxCategory>
+    </cac:TaxSubtotal>
+  </cac:TaxTotal>
+
+  <cac:LegalMonetaryTotal>
+    <cbc:LineExtensionAmount currencyID="EUR">2526.84</cbc:LineExtensionAmount>
+    <cbc:TaxExclusiveAmount currencyID="EUR">2526.84</cbc:TaxExclusiveAmount>
+    <cbc:TaxInclusiveAmount currencyID="EUR">3108.01</cbc:TaxInclusiveAmount>
+    <cbc:PayableAmount currencyID="EUR">3108.01</cbc:PayableAmount>
+  </cac:LegalMonetaryTotal>
+
+
+  <cac:InvoiceLine>
+    <cbc:ID>1</cbc:ID>
+    <cbc:InvoicedQuantity unitCode="EA">6</cbc:InvoicedQuantity>
+    <cbc:LineExtensionAmount currencyID="EUR">2526.84</cbc:LineExtensionAmount>
+    <cac:Item>
+      <cbc:Description>Children's jacket (under 11)</cbc:Description>
+      <cbc:Name>Children's jacket (under 11)</cbc:Name>
+      <cac:ClassifiedTaxCategory>
+        <cbc:ID>S</cbc:ID>
+        <cbc:Percent>23.0</cbc:Percent>
+        <cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme>
+      </cac:ClassifiedTaxCategory>
+    </cac:Item>
+    <cac:Price>
+      <cbc:PriceAmount currencyID="EUR">421.14</cbc:PriceAmount>
+    </cac:Price>
+  </cac:InvoiceLine>
+</Invoice>

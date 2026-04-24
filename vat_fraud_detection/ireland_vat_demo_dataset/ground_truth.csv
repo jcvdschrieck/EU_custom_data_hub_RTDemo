@@ -1,0 +1,69 @@
+invoice_id,issue_date,supplier_name,supplier_vat_id,customer_name,customer_vat_id,line_description,quantity,unit_price,net_amount,vat_rate_applied,vat_rate_expected,is_fraud_line,scenario,notes
+INV-0001,2026-01-20,Liffey Services Ltd,IE1357924D,Celtic Retailers Ltd,IE9988776E,IT advisory services,4,231.37,925.48,13.5,23.0,1,Consulting_service,Applied VAT differs from expected for scenario
+INV-0002,2026-01-27,Liffey Services Ltd,IE1357924D,Connacht Wholesale Ltd,IE8877665F,E-book download - novel,3,316.58,949.74,0.0,0.0,0,Ebook_audiobook,
+INV-0002,2026-01-27,Liffey Services Ltd,IE1357924D,Connacht Wholesale Ltd,IE8877665F,Digital magazine subscription,3,103.17,309.51,9.0,9.0,0,Eperiodical,
+INV-0002,2026-01-27,Liffey Services Ltd,IE1357924D,Connacht Wholesale Ltd,IE8877665F,E-periodical subscription (monthly),2,175.93,351.86,9.0,9.0,0,Eperiodical,
+INV-0002,2026-01-27,Liffey Services Ltd,IE1357924D,Connacht Wholesale Ltd,IE8877665F,Digital magazine subscription,5,364.75,1823.75,9.0,9.0,0,Eperiodical,
+INV-0003,2026-02-13,Emerald Supplies Ltd,IE1234567A,Leinster Media Ltd,IE6655443H,E-book bundle (3 titles),4,319.42,1277.68,0.0,0.0,0,Ebook_audiobook,
+INV-0004,2026-01-17,Shamrock Digital Ltd,IE7654321B,Munster Hospitality Ltd,IE7766554G,Hot meal takeaway,7,130.86,916.02,9.0,13.5,1,Catering_takeaway,Applied VAT differs from expected for scenario
+INV-0005,2026-02-07,Shamrock Digital Ltd,IE7654321B,Munster Hospitality Ltd,IE7766554G,Prepared hot food,2,277.24,554.48,9.0,13.5,1,Catering_takeaway,Applied VAT differs from expected for scenario
+INV-0005,2026-02-07,Shamrock Digital Ltd,IE7654321B,Munster Hospitality Ltd,IE7766554G,Catering service - lunch,8,175.72,1405.76,13.5,13.5,0,Catering_takeaway,
+INV-0005,2026-02-07,Shamrock Digital Ltd,IE7654321B,Munster Hospitality Ltd,IE7766554G,Prepared hot food,1,109.24,109.24,9.0,13.5,1,Catering_takeaway,Applied VAT differs from expected for scenario
+INV-0006,2026-02-04,Liffey Services Ltd,IE1357924D,Munster Hospitality Ltd,IE7766554G,Prepared hot food,4,297.7,1190.8,13.5,13.5,0,Catering_takeaway,
+INV-0007,2026-02-09,Liffey Services Ltd,IE1357924D,Connacht Wholesale Ltd,IE8877665F,Milk 2L,5,338.18,1690.9,0.0,0.0,0,Food_retail_basic,
+INV-0007,2026-02-09,Liffey Services Ltd,IE1357924D,Connacht Wholesale Ltd,IE8877665F,Children's jacket (under 11),7,168.0,1176.0,0.0,0.0,0,Childrens_clothing,
+INV-0007,2026-02-09,Liffey Services Ltd,IE1357924D,Connacht Wholesale Ltd,IE8877665F,Fresh vegetables box,8,48.18,385.44,0.0,0.0,0,Food_retail_basic,
+INV-0008,2026-01-18,Emerald Supplies Ltd,IE1234567A,Connacht Wholesale Ltd,IE8877665F,Children's jacket (under 11),2,178.07,356.14,23.0,0.0,1,Childrens_clothing,Applied VAT differs from expected for scenario
+INV-0008,2026-01-18,Emerald Supplies Ltd,IE1234567A,Connacht Wholesale Ltd,IE8877665F,Subscription + device bundle,1,308.69,308.69,9.0,23.0,1,Generic_ambiguous_bundle,Applied VAT differs from expected for scenario
+INV-0009,2026-02-01,Atlantic Traders Ltd,IE2468135C,Celtic Retailers Ltd,IE9988776E,Children's T-shirt (under 11),8,9.43,75.44,0.0,0.0,0,Childrens_clothing,
+INV-0009,2026-02-01,Atlantic Traders Ltd,IE2468135C,Celtic Retailers Ltd,IE9988776E,Audiobook download,2,392.77,785.54,9.0,0.0,1,Ebook_audiobook,Applied VAT differs from expected for scenario
+INV-0009,2026-02-01,Atlantic Traders Ltd,IE2468135C,Celtic Retailers Ltd,IE9988776E,Catering service - lunch,6,345.03,2070.18,9.0,13.5,1,Catering_takeaway,Applied VAT differs from expected for scenario
+INV-0010,2026-02-17,Emerald Supplies Ltd,IE1234567A,Munster Hospitality Ltd,IE7766554G,Smartphone 128GB,6,396.4,2378.4,23.0,23.0,0,Electronics_standard,
+INV-0010,2026-02-17,Emerald Supplies Ltd,IE1234567A,Munster Hospitality Ltd,IE7766554G,Audiobook download,1,114.47,114.47,0.0,0.0,0,Ebook_audiobook,
+INV-0010,2026-02-17,Emerald Supplies Ltd,IE1234567A,Munster Hospitality Ltd,IE7766554G,Business consulting services,8,368.68,2949.44,23.0,23.0,0,Consulting_service,
+INV-0010,2026-02-17,Emerald Supplies Ltd,IE1234567A,Munster Hospitality Ltd,IE7766554G,Milk 2L,8,426.51,3412.08,0.0,0.0,0,Food_retail_basic,
+INV-0011,2026-01-25,Atlantic Traders Ltd,IE2468135C,Leinster Media Ltd,IE6655443H,Prepared hot food,7,447.86,3135.02,13.5,13.5,0,Catering_takeaway,
+INV-0011,2026-01-25,Atlantic Traders Ltd,IE2468135C,Leinster Media Ltd,IE6655443H,Digital magazine subscription,8,61.48,491.84,9.0,9.0,0,Eperiodical,
+INV-0012,2026-01-29,Emerald Supplies Ltd,IE1234567A,Munster Hospitality Ltd,IE7766554G,Catering service - lunch,1,39.38,39.38,13.5,13.5,0,Catering_takeaway,
+INV-0013,2026-02-24,Emerald Supplies Ltd,IE1234567A,Connacht Wholesale Ltd,IE8877665F,Wireless earbuds,2,235.26,470.52,23.0,23.0,0,Electronics_standard,
+INV-0014,2026-02-01,Liffey Services Ltd,IE1357924D,Connacht Wholesale Ltd,IE8877665F,Assorted items,8,364.91,2919.28,23.0,23.0,0,Generic_ambiguous_bundle,
+INV-0014,2026-02-01,Liffey Services Ltd,IE1357924D,Connacht Wholesale Ltd,IE8877665F,Kids shoes (under 11),7,189.71,1327.97,0.0,0.0,0,Childrens_clothing,
+INV-0015,2026-01-18,Emerald Supplies Ltd,IE1234567A,Celtic Retailers Ltd,IE9988776E,E-periodical subscription (monthly),4,92.68,370.72,9.0,9.0,0,Eperiodical,
+INV-0015,2026-01-18,Emerald Supplies Ltd,IE1234567A,Celtic Retailers Ltd,IE9988776E,Assorted items,7,89.1,623.7,23.0,23.0,0,Generic_ambiguous_bundle,
+INV-0015,2026-01-18,Emerald Supplies Ltd,IE1234567A,Celtic Retailers Ltd,IE9988776E,Assorted items,1,296.25,296.25,23.0,23.0,0,Generic_ambiguous_bundle,
+INV-0015,2026-01-18,Emerald Supplies Ltd,IE1234567A,Celtic Retailers Ltd,IE9988776E,IT advisory services,3,187.64,562.92,23.0,23.0,0,Consulting_service,
+INV-0016,2026-02-14,Shamrock Digital Ltd,IE7654321B,Leinster Media Ltd,IE6655443H,Rice 1kg,1,443.51,443.51,0.0,0.0,0,Food_retail_basic,
+INV-0017,2026-01-31,Liffey Services Ltd,IE1357924D,Munster Hospitality Ltd,IE7766554G,Bundle pack (assorted),4,139.14,556.56,23.0,23.0,0,Generic_ambiguous_bundle,
+INV-0017,2026-01-31,Liffey Services Ltd,IE1357924D,Munster Hospitality Ltd,IE7766554G,Wireless earbuds,1,30.16,30.16,23.0,23.0,0,Electronics_standard,
+INV-0017,2026-01-31,Liffey Services Ltd,IE1357924D,Munster Hospitality Ltd,IE7766554G,Misc goods,1,432.66,432.66,23.0,23.0,0,Generic_ambiguous_bundle,
+INV-0017,2026-01-31,Liffey Services Ltd,IE1357924D,Munster Hospitality Ltd,IE7766554G,Business consulting services,4,186.47,745.88,23.0,23.0,0,Consulting_service,
+INV-0018,2026-02-20,Shamrock Digital Ltd,IE7654321B,Celtic Retailers Ltd,IE9988776E,Children's jacket (under 11),6,421.14,2526.84,23.0,0.0,1,Childrens_clothing,Applied VAT differs from expected for scenario
+INV-0019,2026-03-01,Atlantic Traders Ltd,IE2468135C,Connacht Wholesale Ltd,IE8877665F,Children's T-shirt (under 11),5,210.09,1050.45,0.0,0.0,0,Childrens_clothing,
+INV-0019,2026-03-01,Atlantic Traders Ltd,IE2468135C,Connacht Wholesale Ltd,IE8877665F,Business consulting services,8,282.55,2260.4,23.0,23.0,0,Consulting_service,
+INV-0019,2026-03-01,Atlantic Traders Ltd,IE2468135C,Connacht Wholesale Ltd,IE8877665F,Business consulting services,4,231.6,926.4,23.0,23.0,0,Consulting_service,
+INV-0020,2026-01-23,Atlantic Traders Ltd,IE2468135C,Celtic Retailers Ltd,IE9988776E,Digital magazine subscription,3,201.68,605.04,9.0,9.0,0,Eperiodical,
+INV-0020,2026-01-23,Atlantic Traders Ltd,IE2468135C,Celtic Retailers Ltd,IE9988776E,E-book download - novel,5,419.84,2099.2,0.0,0.0,0,Ebook_audiobook,
+INV-0021,2026-01-21,Shamrock Digital Ltd,IE7654321B,Munster Hospitality Ltd,IE7766554G,IT advisory services,5,132.54,662.7,13.5,23.0,1,Consulting_service,Applied VAT differs from expected for scenario
+INV-0022,2026-02-05,Shamrock Digital Ltd,IE7654321B,Munster Hospitality Ltd,IE7766554G,E-book download - novel,2,288.35,576.7,0.0,0.0,0,Ebook_audiobook,
+INV-0022,2026-02-05,Shamrock Digital Ltd,IE7654321B,Munster Hospitality Ltd,IE7766554G,E-book download - novel,1,155.43,155.43,0.0,0.0,0,Ebook_audiobook,
+INV-0022,2026-02-05,Shamrock Digital Ltd,IE7654321B,Munster Hospitality Ltd,IE7766554G,Apples 1kg,3,335.62,1006.86,0.0,0.0,0,Food_retail_basic,
+INV-0022,2026-02-05,Shamrock Digital Ltd,IE7654321B,Munster Hospitality Ltd,IE7766554G,Children's jacket (under 11),1,57.45,57.45,0.0,0.0,0,Childrens_clothing,
+INV-0023,2026-02-28,Shamrock Digital Ltd,IE7654321B,Celtic Retailers Ltd,IE9988776E,Rice 1kg,3,26.49,79.47,0.0,0.0,0,Food_retail_basic,
+INV-0023,2026-02-28,Shamrock Digital Ltd,IE7654321B,Celtic Retailers Ltd,IE9988776E,E-periodical subscription (monthly),6,100.85,605.1,9.0,9.0,0,Eperiodical,
+INV-0023,2026-02-28,Shamrock Digital Ltd,IE7654321B,Celtic Retailers Ltd,IE9988776E,Hot meal takeaway,6,352.81,2116.86,13.5,13.5,0,Catering_takeaway,
+INV-0024,2026-02-10,Shamrock Digital Ltd,IE7654321B,Connacht Wholesale Ltd,IE8877665F,Rice 1kg,1,87.28,87.28,0.0,0.0,0,Food_retail_basic,
+INV-0024,2026-02-10,Shamrock Digital Ltd,IE7654321B,Connacht Wholesale Ltd,IE8877665F,Children's jacket (under 11),4,125.93,503.72,0.0,0.0,0,Childrens_clothing,
+INV-0025,2026-01-21,Liffey Services Ltd,IE1357924D,Celtic Retailers Ltd,IE9988776E,Catering service - lunch,8,162.55,1300.4,13.5,13.5,0,Catering_takeaway,
+INV-0025,2026-01-21,Liffey Services Ltd,IE1357924D,Celtic Retailers Ltd,IE9988776E,Catering service - lunch,1,299.73,299.73,9.0,13.5,1,Catering_takeaway,Applied VAT differs from expected for scenario
+INV-0025,2026-01-21,Liffey Services Ltd,IE1357924D,Celtic Retailers Ltd,IE9988776E,E-book download - novel,5,163.21,816.05,9.0,0.0,1,Ebook_audiobook,Applied VAT differs from expected for scenario
+INV-0025,2026-01-21,Liffey Services Ltd,IE1357924D,Celtic Retailers Ltd,IE9988776E,E-periodical subscription (monthly),2,395.65,791.3,0.0,9.0,1,Eperiodical,Applied VAT differs from expected for scenario
+INV-0026,2026-02-21,Atlantic Traders Ltd,IE2468135C,Celtic Retailers Ltd,IE9988776E,Kids shoes (under 11),6,200.89,1205.34,0.0,0.0,0,Childrens_clothing,
+INV-0027,2026-02-16,Emerald Supplies Ltd,IE1234567A,Leinster Media Ltd,IE6655443H,E-book download - novel,7,8.75,61.25,0.0,0.0,0,Ebook_audiobook,
+INV-0027,2026-02-16,Emerald Supplies Ltd,IE1234567A,Leinster Media Ltd,IE6655443H,Prepared hot food,7,38.93,272.51,13.5,13.5,0,Catering_takeaway,
+INV-0028,2026-02-26,Atlantic Traders Ltd,IE2468135C,Munster Hospitality Ltd,IE7766554G,E-book bundle (3 titles),7,152.17,1065.19,0.0,0.0,0,Ebook_audiobook,
+INV-0029,2026-02-28,Atlantic Traders Ltd,IE2468135C,Connacht Wholesale Ltd,IE8877665F,Children's jacket (under 11),7,307.37,2151.59,0.0,0.0,0,Childrens_clothing,
+INV-0029,2026-02-28,Atlantic Traders Ltd,IE2468135C,Connacht Wholesale Ltd,IE8877665F,Digital book (ePub),1,142.31,142.31,9.0,0.0,1,Ebook_audiobook,Applied VAT differs from expected for scenario
+INV-0030,2026-02-21,Atlantic Traders Ltd,IE2468135C,Leinster Media Ltd,IE6655443H,Bundle pack (assorted),8,358.83,2870.64,23.0,23.0,0,Generic_ambiguous_bundle,
+INV-0030,2026-02-21,Atlantic Traders Ltd,IE2468135C,Leinster Media Ltd,IE6655443H,Fresh bread loaf,5,235.83,1179.15,0.0,0.0,0,Food_retail_basic,
+INV-0030,2026-02-21,Atlantic Traders Ltd,IE2468135C,Leinster Media Ltd,IE6655443H,E-periodical subscription (monthly),4,305.38,1221.52,9.0,9.0,0,Eperiodical,
+INV-0030,2026-02-21,Atlantic Traders Ltd,IE2468135C,Leinster Media Ltd,IE6655443H,Catering service - lunch,3,18.8,56.4,13.5,13.5,0,Catering_takeaway,

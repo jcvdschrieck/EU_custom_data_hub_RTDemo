@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2" xmlns:cac="urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2" xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2">
+  <cbc:ID>INV-0025</cbc:ID>
+  <cbc:IssueDate>2026-01-21</cbc:IssueDate>
+  <cbc:InvoiceTypeCode>380</cbc:InvoiceTypeCode>
+  <cbc:DocumentCurrencyCode>EUR</cbc:DocumentCurrencyCode>
+
+  <cac:AccountingSupplierParty>
+    <cac:Party>
+      <cac:PartyName><cbc:Name>Liffey Services Ltd</cbc:Name></cac:PartyName>
+      <cac:PostalAddress><cbc:StreetName>44 Market Sq, Limerick</cbc:StreetName><cbc:CountrySubentity>Ireland</cbc:CountrySubentity></cac:PostalAddress>
+      <cac:PartyTaxScheme><cbc:CompanyID>IE1357924D</cbc:CompanyID><cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme></cac:PartyTaxScheme>
+    </cac:Party>
+  </cac:AccountingSupplierParty>
+
+  <cac:AccountingCustomerParty>
+    <cac:Party>
+      <cac:PartyName><cbc:Name>Celtic Retailers Ltd</cbc:Name></cac:PartyName>
+      <cac:PostalAddress><cbc:StreetName>10 High St, Dublin 1</cbc:StreetName><cbc:CountrySubentity>Ireland</cbc:CountrySubentity></cac:PostalAddress>
+      <cac:PartyTaxScheme><cbc:CompanyID>IE9988776E</cbc:CompanyID><cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme></cac:PartyTaxScheme>
+    </cac:Party>
+  </cac:AccountingCustomerParty>
+
+  <cac:TaxTotal>
+    <cbc:TaxAmount currencyID="EUR">275.97</cbc:TaxAmount>
+
+    <cac:TaxSubtotal>
+      <cbc:TaxableAmount currencyID="EUR">1300.40</cbc:TaxableAmount>
+      <cbc:TaxAmount currencyID="EUR">175.55</cbc:TaxAmount>
+      <cac:TaxCategory>
+        <cbc:ID>AA</cbc:ID>
+        <cbc:Percent>13.5</cbc:Percent>
+        <cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme>
+      </cac:TaxCategory>
+    </cac:TaxSubtotal>
+    <cac:TaxSubtotal>
+      <cbc:TaxableAmount currencyID="EUR">1115.78</cbc:TaxableAmount>
+      <cbc:TaxAmount currencyID="EUR">100.42</cbc:TaxAmount>
+      <cac:TaxCategory>
+        <cbc:ID>AB</cbc:ID>
+        <cbc:Percent>9.0</cbc:Percent>
+        <cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme>
+      </cac:TaxCategory>
+    </cac:TaxSubtotal>
+    <cac:TaxSubtotal>
+      <cbc:TaxableAmount currencyID="EUR">791.30</cbc:TaxableAmount>
+      <cbc:TaxAmount currencyID="EUR">0.00</cbc:TaxAmount>
+      <cac:TaxCategory>
+        <cbc:ID>Z</cbc:ID>
+        <cbc:Percent>0.0</cbc:Percent>
+        <cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme>
+      </cac:TaxCategory>
+    </cac:TaxSubtotal>
+  </cac:TaxTotal>
+
+  <cac:LegalMonetaryTotal>
+    <cbc:LineExtensionAmount currencyID="EUR">3207.48</cbc:LineExtensionAmount>
+    <cbc:TaxExclusiveAmount currencyID="EUR">3207.48</cbc:TaxExclusiveAmount>
+    <cbc:TaxInclusiveAmount currencyID="EUR">3483.45</cbc:TaxInclusiveAmount>
+    <cbc:PayableAmount currencyID="EUR">3483.45</cbc:PayableAmount>
+  </cac:LegalMonetaryTotal>
+
+
+  <cac:InvoiceLine>
+    <cbc:ID>1</cbc:ID>
+    <cbc:InvoicedQuantity unitCode="EA">8</cbc:InvoicedQuantity>
+    <cbc:LineExtensionAmount currencyID="EUR">1300.40</cbc:LineExtensionAmount>
+    <cac:Item>
+      <cbc:Description>Catering service - lunch</cbc:Description>
+      <cbc:Name>Catering service - lunch</cbc:Name>
+      <cac:ClassifiedTaxCategory>
+        <cbc:ID>AA</cbc:ID>
+        <cbc:Percent>13.5</cbc:Percent>
+        <cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme>
+      </cac:ClassifiedTaxCategory>
+    </cac:Item>
+    <cac:Price>
+      <cbc:PriceAmount currencyID="EUR">162.55</cbc:PriceAmount>
+    </cac:Price>
+  </cac:InvoiceLine>
+  <cac:InvoiceLine>
+    <cbc:ID>2</cbc:ID>
+    <cbc:InvoicedQuantity unitCode="EA">1</cbc:InvoicedQuantity>
+    <cbc:LineExtensionAmount currencyID="EUR">299.73</cbc:LineExtensionAmount>
+    <cac:Item>
+      <cbc:Description>Catering service - lunch</cbc:Description>
+      <cbc:Name>Catering service - lunch</cbc:Name>
+      <cac:ClassifiedTaxCategory>
+        <cbc:ID>AB</cbc:ID>
+        <cbc:Percent>9.0</cbc:Percent>
+        <cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme>
+      </cac:ClassifiedTaxCategory>
+    </cac:Item>
+    <cac:Price>
+      <cbc:PriceAmount currencyID="EUR">299.73</cbc:PriceAmount>
+    </cac:Price>
+  </cac:InvoiceLine>
+  <cac:InvoiceLine>
+    <cbc:ID>3</cbc:ID>
+    <cbc:InvoicedQuantity unitCode="EA">5</cbc:InvoicedQuantity>
+    <cbc:LineExtensionAmount currencyID="EUR">816.05</cbc:LineExtensionAmount>
+    <cac:Item>
+      <cbc:Description>E-book download - novel</cbc:Description>
+      <cbc:Name>E-book download - novel</cbc:Name>
+      <cac:ClassifiedTaxCategory>
+        <cbc:ID>AB</cbc:ID>
+        <cbc:Percent>9.0</cbc:Percent>
+        <cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme>
+      </cac:ClassifiedTaxCategory>
+    </cac:Item>
+    <cac:Price>
+      <cbc:PriceAmount currencyID="EUR">163.21</cbc:PriceAmount>
+    </cac:Price>
+  </cac:InvoiceLine>
+  <cac:InvoiceLine>
+    <cbc:ID>4</cbc:ID>
+    <cbc:InvoicedQuantity unitCode="EA">2</cbc:InvoicedQuantity>
+    <cbc:LineExtensionAmount currencyID="EUR">791.30</cbc:LineExtensionAmount>
+    <cac:Item>
+      <cbc:Description>E-periodical subscription (monthly)</cbc:Description>
+      <cbc:Name>E-periodical subscription (monthly)</cbc:Name>
+      <cac:ClassifiedTaxCategory>
+        <cbc:ID>Z</cbc:ID>
+        <cbc:Percent>0.0</cbc:Percent>
+        <cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme>
+      </cac:ClassifiedTaxCategory>
+    </cac:Item>
+    <cac:Price>
+      <cbc:PriceAmount currencyID="EUR">395.65</cbc:PriceAmount>
+    </cac:Price>
+  </cac:InvoiceLine>
+</Invoice>

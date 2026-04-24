@@ -50,7 +50,7 @@ The Customs and Tax operator dashboards live in a companion repository: **[C&T R
                                                   │ subprocess
                                                   ▼
                               ┌──────────────────────────────────────┐
-                              │  vat_fraud_detection/ (git submodule)│
+                              │  vat_fraud_detection/ (vendored)     │
                               │  Local-LLM VAT compliance analyser   │
                               │  with RAG over EU VAT legislation    │
                               │  (LM Studio on :1234)                │
@@ -125,7 +125,7 @@ For a colleague installing from a machine with nothing on it, skip the manual st
 
 ```bash
 # macOS / Linux
-git clone --recurse-submodules https://github.com/jcvdschrieck/EU_custom_data_hub_RTDemo.git
+git clone https://github.com/jcvdschrieck/EU_custom_data_hub_RTDemo.git
 cd EU_custom_data_hub_RTDemo
 ./install.sh
 ./run.sh
@@ -133,7 +133,7 @@ cd EU_custom_data_hub_RTDemo
 
 ```powershell
 # Windows (PowerShell 5.1+)
-git clone --recurse-submodules https://github.com/jcvdschrieck/EU_custom_data_hub_RTDemo.git
+git clone https://github.com/jcvdschrieck/EU_custom_data_hub_RTDemo.git
 cd EU_custom_data_hub_RTDemo
 .\install.ps1
 .\run.ps1
@@ -141,12 +141,11 @@ cd EU_custom_data_hub_RTDemo
 
 What the installer does:
 1. Installs Python 3.11+ and Node.js 18+ via `brew` / `apt` / `winget` if missing.
-2. Initialises the `vat_fraud_detection` submodule.
-3. Clones the `customsandtaxriskmanagemensystem` frontend as a sibling directory.
-4. Installs Python + Node dependencies.
-5. Builds the internal frontend into `frontend/dist/`.
-6. Generates `customsandtaxriskmanagemensystem/.env` and `vat_fraud_detection/.env` from `config.env`.
-7. Seeds all four SQLite databases.
+2. Clones the `customsandtaxriskmanagemensystem` frontend as a sibling directory.
+3. Installs Python + Node dependencies.
+4. Builds the internal frontend into `frontend/dist/`.
+5. Generates `customsandtaxriskmanagemensystem/.env` and `vat_fraud_detection/.env` from `config.env`.
+6. Seeds all four SQLite databases.
 
 The installer is idempotent — re-run it any time after changing `config.env` to regenerate the `.env` files.
 
@@ -177,17 +176,14 @@ No source files need editing to change ports or the LM Studio model.
 
 ### Manual install (if you prefer step-by-step)
 
-#### 1. Clone with the VAT Fraud Detection submodule
+#### 1. Clone the repo
 
 ```bash
-git clone --recurse-submodules https://github.com/jcvdschrieck/EU_custom_data_hub_RTDemo.git
+git clone https://github.com/jcvdschrieck/EU_custom_data_hub_RTDemo.git
 cd EU_custom_data_hub_RTDemo
 ```
 
-If you cloned without `--recurse-submodules`:
-```bash
-git submodule update --init --recursive
-```
+`vat_fraud_detection/` ships inside the repo as vendored files — no `--recurse-submodules` or `git submodule init` required.
 
 Clone the companion frontend next to it:
 ```bash
@@ -415,7 +411,7 @@ EU_custom_data_hub_RTDemo/
 │   ├── regions.py               # Country → UN geoscheme sub-region map
 │   └── agent_bridge.py          # Subprocess bridge → vat_fraud_detection
 ├── frontend/                    # Internal React + Vite UI (built → FastAPI serves dist/)
-├── vat_fraud_detection/         # Git submodule — local LLM VAT compliance agent
+├── vat_fraud_detection/         # Vendored — local LLM VAT compliance agent
 │   ├── lib/analyser.py          # Core AI analysis engine
 │   ├── build_knowledge_base.py  # RAG index builder
 │   └── prompts/                 # LLM system prompts

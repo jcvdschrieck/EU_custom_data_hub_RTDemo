@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2" xmlns:cac="urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2" xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2">
+  <cbc:ID>INV-0008</cbc:ID>
+  <cbc:IssueDate>2026-01-18</cbc:IssueDate>
+  <cbc:InvoiceTypeCode>380</cbc:InvoiceTypeCode>
+  <cbc:DocumentCurrencyCode>EUR</cbc:DocumentCurrencyCode>
+
+  <cac:AccountingSupplierParty>
+    <cac:Party>
+      <cac:PartyName><cbc:Name>Emerald Supplies Ltd</cbc:Name></cac:PartyName>
+      <cac:PostalAddress><cbc:StreetName>1 Green St, Dublin 2</cbc:StreetName><cbc:CountrySubentity>Ireland</cbc:CountrySubentity></cac:PostalAddress>
+      <cac:PartyTaxScheme><cbc:CompanyID>IE1234567A</cbc:CompanyID><cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme></cac:PartyTaxScheme>
+    </cac:Party>
+  </cac:AccountingSupplierParty>
+
+  <cac:AccountingCustomerParty>
+    <cac:Party>
+      <cac:PartyName><cbc:Name>Connacht Wholesale Ltd</cbc:Name></cac:PartyName>
+      <cac:PostalAddress><cbc:StreetName>3 Quay St, Galway</cbc:StreetName><cbc:CountrySubentity>Ireland</cbc:CountrySubentity></cac:PostalAddress>
+      <cac:PartyTaxScheme><cbc:CompanyID>IE8877665F</cbc:CompanyID><cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme></cac:PartyTaxScheme>
+    </cac:Party>
+  </cac:AccountingCustomerParty>
+
+  <cac:TaxTotal>
+    <cbc:TaxAmount currencyID="EUR">109.69</cbc:TaxAmount>
+
+    <cac:TaxSubtotal>
+      <cbc:TaxableAmount currencyID="EUR">356.14</cbc:TaxableAmount>
+      <cbc:TaxAmount currencyID="EUR">81.91</cbc:TaxAmount>
+      <cac:TaxCategory>
+        <cbc:ID>S</cbc:ID>
+        <cbc:Percent>23.0</cbc:Percent>
+        <cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme>
+      </cac:TaxCategory>
+    </cac:TaxSubtotal>
+    <cac:TaxSubtotal>
+      <cbc:TaxableAmount currencyID="EUR">308.69</cbc:TaxableAmount>
+      <cbc:TaxAmount currencyID="EUR">27.78</cbc:TaxAmount>
+      <cac:TaxCategory>
+        <cbc:ID>AB</cbc:ID>
+        <cbc:Percent>9.0</cbc:Percent>
+        <cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme>
+      </cac:TaxCategory>
+    </cac:TaxSubtotal>
+  </cac:TaxTotal>
+
+  <cac:LegalMonetaryTotal>
+    <cbc:LineExtensionAmount currencyID="EUR">664.83</cbc:LineExtensionAmount>
+    <cbc:TaxExclusiveAmount currencyID="EUR">664.83</cbc:TaxExclusiveAmount>
+    <cbc:TaxInclusiveAmount currencyID="EUR">774.52</cbc:TaxInclusiveAmount>
+    <cbc:PayableAmount currencyID="EUR">774.52</cbc:PayableAmount>
+  </cac:LegalMonetaryTotal>
+
+
+  <cac:InvoiceLine>
+    <cbc:ID>1</cbc:ID>
+    <cbc:InvoicedQuantity unitCode="EA">2</cbc:InvoicedQuantity>
+    <cbc:LineExtensionAmount currencyID="EUR">356.14</cbc:LineExtensionAmount>
+    <cac:Item>
+      <cbc:Description>Children's jacket (under 11)</cbc:Description>
+      <cbc:Name>Children's jacket (under 11)</cbc:Name>
+      <cac:ClassifiedTaxCategory>
+        <cbc:ID>S</cbc:ID>
+        <cbc:Percent>23.0</cbc:Percent>
+        <cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme>
+      </cac:ClassifiedTaxCategory>
+    </cac:Item>
+    <cac:Price>
+      <cbc:PriceAmount currencyID="EUR">178.07</cbc:PriceAmount>
+    </cac:Price>
+  </cac:InvoiceLine>
+  <cac:InvoiceLine>
+    <cbc:ID>2</cbc:ID>
+    <cbc:InvoicedQuantity unitCode="EA">1</cbc:InvoicedQuantity>
+    <cbc:LineExtensionAmount currencyID="EUR">308.69</cbc:LineExtensionAmount>
+    <cac:Item>
+      <cbc:Description>Subscription + device bundle</cbc:Description>
+      <cbc:Name>Subscription + device bundle</cbc:Name>
+      <cac:ClassifiedTaxCategory>
+        <cbc:ID>AB</cbc:ID>
+        <cbc:Percent>9.0</cbc:Percent>
+        <cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme>
+      </cac:ClassifiedTaxCategory>
+    </cac:Item>
+    <cac:Price>
+      <cbc:PriceAmount currencyID="EUR">308.69</cbc:PriceAmount>
+    </cac:Price>
+  </cac:InvoiceLine>
+</Invoice>

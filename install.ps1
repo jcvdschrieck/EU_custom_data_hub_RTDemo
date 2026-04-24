@@ -66,10 +66,6 @@ if ($nodeMajor -lt 18) {
 }
 Write-Host "✓ Node.js $((& node -v).Trim())"
 
-# ── Submodule ───────────────────────────────────────────────────────────
-Write-Host "==> Initialising vat_fraud_detection submodule"
-& git submodule update --init --recursive
-
 # ── Python venv + deps ──────────────────────────────────────────────────
 $venvDir = Join-Path $ScriptDir '.venv'
 if (-not (Test-Path $venvDir)) {
