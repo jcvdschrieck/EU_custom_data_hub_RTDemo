@@ -2236,17 +2236,19 @@ def _compute_tax_recommendation(case: dict) -> tuple[str, str]:
         base = (f"A VAT gap of €{abs_gap:.2f} has been calculated on this "
                 f"case, but there are no past closed cases on record for "
                 f"seller \"{seller}\" on {category} going to {destination} "
-                "to reinforce or contradict the finding. Third-party input "
-                "is recommended before concluding.")
-        return ("Request Input from Deemed Importer",
+                "to reinforce or contradict the finding. The AI is unable "
+                "to make a confident recommendation on this case — the "
+                "officer's judgement is required.")
+        return ("AI Uncertain",
                 base + _confirming_signals_text(case, retain_leaning=True))
     base = (f"A VAT gap of €{abs_gap:.2f} has been calculated on this "
             f"case, but only {retained} of the {total} past closed cases "
             f"for seller \"{seller}\" on {category} going to {destination} "
             f"ended in retention ({retPct*100:.0f}%). The historical "
-            "pattern is not strong enough on its own — third-party input "
-            "is recommended before concluding.")
-    return ("Request Input from Deemed Importer",
+            "pattern is not strong enough on its own to confirm or dismiss "
+            "the finding — the AI is unable to make a confident "
+            "recommendation, and the officer's judgement is required.")
+    return ("AI Uncertain",
             base + _confirming_signals_text(case, retain_leaning=True))
 
 

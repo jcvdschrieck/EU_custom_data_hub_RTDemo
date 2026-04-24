@@ -292,23 +292,36 @@ def _draw_signals(rng: random.Random, profile: str) -> dict:
     }
 
 
-def _value_for_gap_hint(rng: random.Random, hint: str, applied: float,
-                        expected: float, n_orders: int) -> float:
-    """Pick a per-order product value so the *case-level* VAT gap matches
-    the hint: total gap > 1€ ("above") or ≤ 1€ ("below"). Spreading the
-    1€ budget across n_orders keeps multi-order release cases under the
-    Tax "no/limited risk" cut-off. When there's no rate deviation, value
-    is free."""
+_VALUE_CAP = 149.99   # stay strictly below the €150 IOSS threshold
+_CLUSTER_LO = 0.894   # ±11% window → max/min ≤ 1.25 between any two orders
+_CLUSTER_HI = 1.118
+
+
+def _cluster_base_for_gap_hint(rng: random.Random, hint: str, applied: float,
+                               expected: float, n_orders: int) -> float:
+    """Pick a *case-level* base product value so the per-order values —
+    each drawn within ±11% of this base — produce a total VAT gap that
+    matches the hint ("above" > 1€, "below" ≤ 1€). A shared base keeps
+    every order inside the case within 25% of every other order, which
+    is how real invoices cluster.
+    """
     if applied >= expected:
-        return round(rng.uniform(20.0, 150.0), 2)
+        return rng.uniform(20.0, _VALUE_CAP / _CLUSTER_HI)
     delta = expected - applied
     if hint == "above":
-        # Per-order gap needs headroom so the sum comfortably exceeds 1€.
-        floor = max(30.0, 1.5 / delta + 5.0)
-        return round(rng.uniform(floor, floor + 120.0), 2)
-    # "below": per-order ceil so n_orders × ceil × delta ≤ ~0.9 €
+        # Per-order gap needs headroom so n_orders × base × delta > ~1.5 €.
+        floor = max(30.0, 1.5 / (n_orders * delta) + 5.0)
+        return rng.uniform(floor, _VALUE_CAP / _CLUSTER_HI)
+    # "below": n_orders × base × delta ≤ ~0.9 €
     ceil = max(1.5, 0.9 / (n_orders * delta))
-    return round(rng.uniform(1.0, ceil), 2)
+    return rng.uniform(1.0, ceil)
+
+
+def _draw_cluster_value(rng: random.Random, base: float) -> float:
+    """Per-order value within ±11% of a case's cluster base, rounded to
+    2dp and capped strictly below €150."""
+    v = rng.uniform(base * _CLUSTER_LO, base * _CLUSTER_HI)
+    return round(min(v, _VALUE_CAP), 2)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -391,11 +404,16 @@ def _build_case(rng: random.Random, seller_name: str, parent_cat: str,
     case_id  = _new_case_id(rng)
     so_bk    = _new_so_bk(rng)
 
+    # Shared base value per case — every order's value drawn within ±11%
+    # so any two orders inside the case differ by at most 25%.
+    cluster_base = _cluster_base_for_gap_hint(rng, sig["gap_hint"], applied,
+                                              expected, n_orders)
+
     orders = []
     total_value = 0.0
     total_gap   = 0.0
     for i in range(n_orders):
-        v = _value_for_gap_hint(rng, sig["gap_hint"], applied, expected, n_orders)
+        v = _draw_cluster_value(rng, cluster_base)
         per_order_vat  = round(v * applied, 2)
         per_order_gap  = round(v * (expected - applied), 2)
         total_value   += v

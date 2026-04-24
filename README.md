@@ -1,8 +1,8 @@
 # EU Custom Data Hub — Real-Time Demo
 
-A real-time simulation of the European Commission's **Taxation and Customs Union** transaction monitoring system. The application streams B2C cross-border e-commerce transactions across 27 EU member states, scores them in real time for VAT fraud risk, routes RED and AMBER cases through two independent operator queues (Customs and Tax), and persists the full lifecycle into a normalised data hub.
+A real-time simulation of the European Commission's **Taxation and Customs Union** transaction monitoring system. Streams B2C cross-border e-commerce transactions across the EU27, scores them in real time for VAT fraud risk, routes cases through two independent operator queues (Customs and Tax), and persists the full lifecycle into a normalised data hub.
 
-The Customs and Tax operator dashboards live in a companion repository: **[C&T Risk Management System](https://github.com/jcvdschrieck/customsandtaxriskmanagemensystem)** (forked from [caguilarvz/customsandtaxriskmanagemensystem](https://github.com/caguilarvz/customsandtaxriskmanagemensystem)).
+The Customs and Tax operator dashboards live in a companion repository: **[C&T Risk Management System](https://github.com/jcvdschrieck/customsandtaxriskmanagemensystem)**.
 
 ---
 
@@ -10,46 +10,42 @@ The Customs and Tax operator dashboards live in a companion repository: **[C&T R
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│  FastAPI backend (port 8000)                                         │
+│  FastAPI backend (port 8505)                                         │
 │                                                                      │
 │  Simulation engine                                                   │
 │    └─ Continuous-clock replay of a 15-min compressed April-2026      │
-│       window. One Sales Order Event published per sim-clock tick.    │
+│       window. One Sales Order Event per sim-clock tick.              │
 │                                                                      │
 │  Pub/sub pipeline (lib/broker.py — in-memory MessageBroker)          │
 │    ├─ RT Risk Engine 1   — vat_ratio (declared-vs-expected rate)     │
 │    ├─ RT Risk Engine 2   — watchlist (ML supplier risk)              │
 │    ├─ RT Risk Engine 3   — ireland_watchlist (IE-only, 1–5 s latency)│
 │    ├─ RT Risk Engine 4   — description_vagueness                     │
-│    ├─ Sales Order Validation — field-completeness check              │
-│    ├─ Release Factory   — weighted-sum consolidation, routes         │
-│    │                      Green / Amber / Red                        │
+│    ├─ Sales Order Validation  — field-completeness check             │
+│    ├─ Release Factory         — weighted-sum consolidation, routes   │
+│    │                            Green / Amber / Red                  │
 │    ├─ C&T Risk Management Factory — drains AMBER → cases in          │
-│    │                      investigation.db → SSE to operator UI      │
+│    │                            investigation.db → SSE to operator UI│
 │    └─ Exit Process Worker     — terminal events                      │
 │                                                                      │
-│  Risk monitoring details — see docs/risk_monitoring_rules.md         │
-│                                                                      │
-│  Two-entity workflow API                                             │
-│    /api/customs/*  — Customs Office (master, terminal decision)      │
-│    /api/tax/*      — Tax Office (advisory, runs the AI agent)        │
-│                                                                      │
-│  SSE streams                                                         │
-│    /api/queue/stream            — live transaction feed              │
-│    /api/customs/queue/stream    — Customs queue updates              │
-│    /api/tax/queue/stream        — Tax queue updates                  │
-│    /api/simulation/stream       — consolidated {status, pipeline}    │
+│  Reference + case API                                                │
+│    /api/reference            — lookup tables (VAT categories,        │
+│                                actions, statuses, risk signals, …)   │
+│    /api/rg/cases/*           — case list + detail + SSE stream       │
+│    /api/rg/cases/{id}/ask    — dual-agent chat (advisor / action)    │
+│    /api/simulation/*         — simulation control + progress         │
 └──────────────┬──────────────────────────────────┬────────────────────┘
                │ HTTP / SSE / static              │ HTTP + SSE + CORS
                ▼                                  ▼
 ┌──────────────────────────────────┐  ┌──────────────────────────────┐
 │  Internal React + Vite frontend  │  │  C&T Risk Management System  │
-│  served by FastAPI on :8000      │  │  (companion repo, :8080 dev) │
-│  ├─ Simulation diagram & ctrl    │  │  Vite + React + shadcn/ui    │
-│  ├─ Live queue / Dashboard       │  │  ├─ Customs Authority page   │
-│  ├─ Suspicious transactions      │  │  ├─ Tax Authority page       │
-│  ├─ Agent Log (audit history)    │  │  ├─ Case Review (detail)     │
-│  └─ Ireland investigation queue  │  │  └─ Closed Cases archive     │
+│  served by FastAPI on :8505      │  │  (companion repo, :8080 dev) │
+│  (dev mode on :5175 with proxy)  │  │  Vite + React + shadcn/ui    │
+│  ├─ Simulation pipeline diagram  │  │  ├─ Customs Authority page   │
+│  ├─ Live queue / dashboard       │  │  ├─ Tax Authority page       │
+│  ├─ Suspicious transactions      │  │  ├─ Case Review (detail)     │
+│  ├─ Agent log                    │  │  └─ Closed Cases archive     │
+│  └─ Ireland investigation queue  │  │                              │
 └──────────────────────────────────┘  └──────────────────────────────┘
                                                   │ subprocess
                                                   ▼
@@ -63,37 +59,39 @@ The Customs and Tax operator dashboards live in a companion repository: **[C&T R
 
 ### Two-entity workflow
 
-Customs and Tax are modelled as two **completely separate offices**, each with its own broker listener, in-memory queue, SSE stream, and C&T Risk Management System dashboard page. Routing on the Release Factory:
+Customs and Tax are modelled as two **separate offices**, each with its own broker listener, queue, SSE stream, and dashboard page. Routing at the Release Factory:
 
 | Risk Score | Route | Lands in | Operator action |
 |---|---|---|---|
-| `< 33.33%` | **Green** → release | terminal event, no case | none — auto-released |
-| `33.33% – 80%` | **Amber** → investigate | `investigation.db` case via the C&T Risk Management Factory | Customs Officer reviews; can release, retain, or submit to Tax for advice. Tax Officer optionally runs the VAT Fraud Detection Agent, then issues a non-binding **recommendation** that returns the case to the Customs queue |
-| `≥ 80%` | **Red** → retain | terminal event, **no case** (retain bypasses C&T by design — retentions arise from officer escalation of an existing investigate case) | none — auto-retained |
+| `< 33%` | **Green** → release | terminal event, no case | none — auto-released |
+| `33% – 80%` | **Amber** → investigate | `investigation.db` case via the C&T Risk Management Factory | Customs Officer reviews; can release, retain, submit to Tax, or request input from the Deemed Importer. Tax Officer optionally runs the VAT Fraud Detection Agent, then issues a non-binding **recommendation** that returns the case to Customs. |
+| `≥ 80%` | **Red** → retain | terminal event, **no case** (retain bypasses C&T by design) | none — auto-retained |
 
-The **Customs Officer is master**: their final decision is the only terminal event. When the Customs decision differs from a Tax recommendation, an audit `custom_override = true` flag is set on the published event.
+The **C&T frontend filters cases to `Country_Destination == "IE"`** at the read boundary (`backendCaseStore.getAllBackendCases`). Non-IE cases are still produced and persisted, but are hidden from the Irish authority's UI. Replace the `AUTHORITY_COUNTRY` constant to target another member state.
 
-The **C&T frontend filters cases to `Country_Destination == "IE"`** at the read boundary (`backendCaseStore.getAllBackendCases`); non-IE cases are still produced and persisted in `investigation.db`, but are hidden from the Irish authority's UI. Replace the `AUTHORITY_COUNTRY` constant when adding other countries.
+Engine details, weights, thresholds and the `vat_ratio` floor are documented in **[docs/risk_monitoring_rules.md](docs/risk_monitoring_rules.md)**.
 
-Engine details, pre-baking mechanism, weights, thresholds and the `vat_ratio` floor are documented in **[docs/risk_monitoring_rules.md](docs/risk_monitoring_rules.md)**.
+### Case-detail AI assistants
 
-### Data hub
+Each case-review page exposes a chat that switches between **two agents** per turn:
 
-Three normalised tables in `european_custom.db`, populated by `_data_hub_writer` on a **30-second polling tick** (subscribes to `SALES_ORDER_EVENT`, `RT_SCORE`, and `AI_ANALYSIS_EVENT`):
+- **Advisor** (default) — pure Q&A. Never proposes or describes an action.
+- **Action-taker** — activated only when the officer clearly demands a decision ("apply Confirm Risk", "submit for tax review", …). Proposes the action, posts a rationale, asks for `yes`/`no` in chat.
 
-| Table | Source | Cardinality |
-|---|---|---|
-| `sales_order_line_item` | `SALES_ORDER_EVENT` | every transaction (one synthetic line per order today) |
-| `line_item_risk` | `RT_SCORE` | every transaction (RT_SCORE fires for all of them) |
-| `line_item_ai_analysis` | `AI_ANALYSIS_EVENT` (published by `/api/tax/{id}/run-agent`) | only Tax-officer-triggered runs |
+Drifting off-topic while an action is pending parks the proposal silently and hands the message back to the advisor — users never feel stuck in a confirmation loop.
 
-Keyed by `sales_order_line_item_SKU = f"{order_id}-{line_number:03d}"`. The legacy flat `transactions` table is preserved alongside (the alarm checker still uses it for its 7-day VAT-ratio baseline) and is back-filled into `sales_order_line_item` once on first startup.
+### Databases
 
-The **Sales Order + Line Item** table preserves the two-tier party model from `simplified_order.json`:
-- `deemed_importer_*` — the EU reseller (order header)
-- `seller_*` + `origin_country` — the non-EU producer (per line item)
+Four SQLite files under `data/` (all git-ignored):
 
-`dest_country_region` uses the UN geoscheme EU sub-regions (Western / Northern / Southern / Eastern Europe), mapped by `lib/regions.py`.
+| File | Purpose |
+|---|---|
+| `european_custom.db` | ~10 000 historical transactions (Sep 2025 – Feb 2026) + the 3-table normalised data hub (`sales_order_line_item`, `line_item_risk`, `line_item_ai_analysis`) |
+| `simulation.db` | April-2026 transactions to replay (~2 300 tx, regenerated from `Context/VAT_Cases_Generated_*.xlsx` + `Context/Fake_ML.xlsx`) |
+| `investigation.db` | Live open/closed case store — `Sales_Order` + `Sales_Order_Risk` + `Sales_Order_Case` |
+| `historical_cases.db` | ~36 past IE closed cases used by the "Previous Cases" panel and the retention-rate-based recommendation rule |
+
+All four are built or rebuilt by a single `python seed_databases.py` run.
 
 ---
 
@@ -102,17 +100,14 @@ The **Sales Order + Line Item** table preserves the two-tier party model from `s
 | Tool | Version | Notes |
 |---|---|---|
 | Python | 3.11+ | |
-| Node.js | 18+ | Required to build the frontend |
-| npm | 9+ | Bundled with Node.js |
-| LM Studio | Latest | Optional — needed for the VAT Fraud Detection Agent |
+| Node.js | 18+ | Bundled with npm 9+ |
+| LM Studio | Latest | Optional — only needed for the VAT Fraud Detection Agent |
 
 ### Installing Node.js
 
-`npm` is bundled with Node.js — installing Node.js is all you need.
+**macOS** — `brew install node` (or download the `.pkg` from [nodejs.org](https://nodejs.org)).
 
-**Windows** — download the LTS installer from [https://nodejs.org](https://nodejs.org), run it, and open a **new** terminal so the updated PATH is picked up.
-
-**macOS** — `brew install node` (or download the `.pkg` from nodejs.org).
+**Windows** — download the LTS installer from [nodejs.org](https://nodejs.org), then open a **new** terminal so PATH is picked up.
 
 **Linux (Debian/Ubuntu)**
 ```bash
@@ -122,18 +117,83 @@ sudo apt-get install -y nodejs
 
 ---
 
-## Setup
+## Installation
 
-### 1. Clone with submodule
+### Scripted install (recommended for a fresh machine)
+
+For a colleague installing from a machine with nothing on it, skip the manual steps below and run the one-shot installer:
+
+```bash
+# macOS / Linux
+git clone --recurse-submodules https://github.com/jcvdschrieck/EU_custom_data_hub_RTDemo.git
+cd EU_custom_data_hub_RTDemo
+./install.sh
+./run.sh
+```
+
+```powershell
+# Windows (PowerShell 5.1+)
+git clone --recurse-submodules https://github.com/jcvdschrieck/EU_custom_data_hub_RTDemo.git
+cd EU_custom_data_hub_RTDemo
+.\install.ps1
+.\run.ps1
+```
+
+What the installer does:
+1. Installs Python 3.11+ and Node.js 18+ via `brew` / `apt` / `winget` if missing.
+2. Initialises the `vat_fraud_detection` submodule.
+3. Clones the `customsandtaxriskmanagemensystem` frontend as a sibling directory.
+4. Installs Python + Node dependencies.
+5. Builds the internal frontend into `frontend/dist/`.
+6. Generates `customsandtaxriskmanagemensystem/.env` and `vat_fraud_detection/.env` from `config.env`.
+7. Seeds all four SQLite databases.
+
+The installer is idempotent — re-run it any time after changing `config.env` to regenerate the `.env` files.
+
+**Optional after install (~5 min)** — build the RAG knowledge base so the VAT Fraud Detection Agent can cite Irish legislation:
+```bash
+cd vat_fraud_detection && python3 build_knowledge_base.py --minilm-only
+```
+
+#### Customising ports and the LM Studio model
+
+Edit `config.env` **before running** `./install.sh`, then re-run the installer if it's already run once. The file holds four knobs:
+
+```
+BACKEND_PORT=8505                                    # FastAPI backend
+CT_FRONTEND_PORT=8080                                # C&T operator dashboard (dev server)
+LM_STUDIO_URL=http://localhost:1234                  # LM Studio local server
+LM_STUDIO_MODEL=mistralai/mistral-7b-instruct-v0.3   # identifier LM Studio is serving
+```
+
+Changes propagate automatically:
+- `BACKEND_PORT` is read by `run.sh` / `run.ps1` via the `API_PORT` env var, which `lib/config.py` honours. It is also written into `customsandtaxriskmanagemensystem/.env` as `VITE_API_BASE_URL`.
+- `CT_FRONTEND_PORT` is passed to Vite via the `PORT` env var (see `vite.config.ts`).
+- `LM_STUDIO_URL` and `LM_STUDIO_MODEL` are written into `vat_fraud_detection/.env`.
+
+No source files need editing to change ports or the LM Studio model.
+
+---
+
+### Manual install (if you prefer step-by-step)
+
+#### 1. Clone with the VAT Fraud Detection submodule
 
 ```bash
 git clone --recurse-submodules https://github.com/jcvdschrieck/EU_custom_data_hub_RTDemo.git
 cd EU_custom_data_hub_RTDemo
 ```
 
-If you already cloned without `--recurse-submodules`:
+If you cloned without `--recurse-submodules`:
 ```bash
 git submodule update --init --recursive
+```
+
+Clone the companion frontend next to it:
+```bash
+cd ..
+git clone https://github.com/jcvdschrieck/customsandtaxriskmanagemensystem.git
+cd EU_custom_data_hub_RTDemo
 ```
 
 ### 2. Python dependencies
@@ -142,7 +202,7 @@ git submodule update --init --recursive
 pip install -r requirements.txt
 ```
 
-### 3. Frontend build
+### 3. Build the internal frontend
 
 ```bash
 cd frontend
@@ -151,146 +211,168 @@ npm run build
 cd ..
 ```
 
-This compiles the React app into `frontend/dist/`, which FastAPI serves automatically at `http://localhost:8000`.
+This compiles the pipeline/dashboard UI into `frontend/dist/`, which FastAPI serves automatically at `http://localhost:8505`.
 
-### 4. AI agent — LM Studio (optional)
+### 4. Install the C&T frontend dependencies
 
-The VAT Fraud Detection Agent calls a **locally hosted LLM via [LM Studio](https://lmstudio.ai)**. No API key, no internet — it runs entirely on your machine.
+```bash
+cd ../customsandtaxriskmanagemensystem
+npm install
+cd ../EU_custom_data_hub_RTDemo
+```
 
-1. Download and install [LM Studio](https://lmstudio.ai).
-2. Download an instruction-tuned model (a 7–8B model is plenty).
-3. In LM Studio, open the **Developer** tab and start the local server (default port `1234`).
+### 5. VAT Fraud Detection Agent — LM Studio (optional)
+
+The Agent calls a **locally hosted LLM via [LM Studio](https://lmstudio.ai)**. No API key, no internet.
+
+1. Install [LM Studio](https://lmstudio.ai).
+2. Download an instruction-tuned model (7–8B is plenty, e.g. `mistralai/mistral-7b-instruct-v0.3`).
+3. In LM Studio → **Developer** tab → start the local server (default port **`1234`**).
 4. Configure the model identifier:
 
 ```bash
 cp vat_fraud_detection/.env.example vat_fraud_detection/.env
 ```
 
-Then edit `vat_fraud_detection/.env`:
+Edit `vat_fraud_detection/.env`:
 ```
 LM_STUDIO_BASE_URL=http://localhost:1234/v1
 LM_STUDIO_MODEL=mistralai/mistral-7b-instruct-v0.3
 ```
 
-To find the exact model identifier, query the LM Studio server:
+List the identifiers LM Studio is currently serving:
 ```bash
 curl http://localhost:1234/v1/models
 ```
 
-> **Without LM Studio running**, the Tax officer can still run the agent — every analysis just returns an `uncertain` verdict with no legislation references.
+> **Without LM Studio**, the Tax officer can still trigger the agent — every analysis just returns `uncertain` with no legislation references.
 
-> **RAG context** — the vector store (`vat_fraud_detection/data/chroma_db/`) is not committed (~18 MB) and **must be built once** before the VAT Fraud Detection Agent can cite real Irish legislation:
-> ```bash
-> cd vat_fraud_detection
-> python build_knowledge_base.py --minilm-only
-> ```
-> This fetches the sources listed in `ireland_vat_demo_dataset/reference_pack_ireland_vat_sources.pdf` (VAT Consolidation Act 2010, Revenue Tax & Duty Manuals, etc.), chunks and embeds them into ChromaDB. Takes ~5 minutes on a first run. Re-runs are idempotent (skip already-indexed chunks). Without this step the agent falls back to ungrounded reasoning and often refuses to cite legislation for the case's destination country.
+**Build the RAG knowledge base** (one-off, ~5 min). The ChromaDB index is not committed (~18 MB):
+```bash
+cd vat_fraud_detection
+python build_knowledge_base.py --minilm-only
+cd ..
+```
 
-### 5. Seed the databases
+This fetches the sources listed in `ireland_vat_demo_dataset/reference_pack_ireland_vat_sources.pdf` (VAT Consolidation Act 2010, Revenue Tax & Duty Manuals, …), chunks and embeds them. Re-runs are idempotent.
+
+### 6. Seed the databases
 
 ```bash
 python seed_databases.py
 ```
 
-This creates two SQLite databases in `data/`:
-- `european_custom.db` — ~10 000 historical transactions (Sep 2025 – Feb 2026), back-filled into `sales_order_line_item` on first run
-- `simulation.db` — ~1 600 March 2026 transactions ready to replay
+Creates the four SQLite files described under [Databases](#databases).
 
 ---
 
 ## Running
 
+### Backend + internal frontend (standalone)
+
 ```bash
-python -m uvicorn api:app --host 0.0.0.0 --port 8000
+python -m uvicorn api:app --host 0.0.0.0 --port 8505
 ```
 
-Then open [http://localhost:8000](http://localhost:8000). You will land on the **Simulation** page; click **▶ Start** to begin.
+Open [http://localhost:8505](http://localhost:8505). Land on the **Simulation** page, click **▶ Start** to begin.
 
-> The frontend is served directly by FastAPI — no separate `npm run dev` needed in production. For frontend hot-reload during development, run `npm run dev` in `frontend/` and point your browser to `http://localhost:5175`.
+### Integrated mode (backend + C&T operator dashboard)
 
-### Running alongside C&T Risk Management System (integrated mode)
+In two terminals:
 
-The companion **C&T Risk Management System** frontend consumes this backend's `/api/rg/cases/*` REST + SSE endpoints. The C&T Risk Management Factory creates investigation cases from amber-routed assessments, writing a 3-row dataset (`Sales_Order` + `Sales_Order_Risk` + `Sales_Order_Case`) into `investigation.db`. The frontend reads cases via `GET /api/rg/cases` and subscribes to `/api/rg/cases/stream` for live updates. Officer actions POST back to the corresponding endpoints; case closure publishes a terminal `INVESTIGATION_OUTCOME` event.
-
-**Branches:**
-- `EU_custom_data_hub_RTDemo` → branch **`backend-v2`**
-- `customsandtaxriskmanagemensystem` → branch **`main`**
-
-**Remotes setup** (fork model):
 ```bash
-# C&T Risk Management repo
-cd customsandtaxriskmanagemensystem
-git remote -v
-# origin    git@github.com:jcvdschrieck/customsandtaxriskmanagemensystem.git  (your fork)
-# upstream  git@github.com:caguilarvz/customsandtaxriskmanagemensystem.git    (owner)
-```
-
-**Launch:**
-```bash
-# Terminal 1 — backend
+# Terminal 1 — backend + internal frontend
 cd EU_custom_data_hub_RTDemo
-git checkout backend-v2
-python -c "import api; import uvicorn; uvicorn.run(api.app, host='0.0.0.0', port=8000)"
+python -m uvicorn api:app --host 0.0.0.0 --port 8505
+```
 
-# Terminal 2 — frontend
+```bash
+# Terminal 2 — C&T operator dashboard
 cd customsandtaxriskmanagemensystem
-npm install   # first time only
-npx vite      # serves on http://localhost:8080
+npm run dev       # serves on http://localhost:8080
 ```
 
-The frontend needs a `.env` file:
+Open the pipeline at `http://localhost:8505` and the operator dashboard at `http://localhost:8080`. Cases routed to **investigate** appear on the **Customs Authority** page (IE-destined only) within seconds via SSE. Cases forwarded via *Submit for Tax Review* trigger the VAT Fraud Detection Agent, then appear on the **Tax Authority** page.
+
+CORS on the backend is open (`allow_origins=["*"]`). A simulation reset emits `cases_reset` + `reset` SSE events that the C&T dashboard listens for — it clears its in-memory case map and localStorage so both sides stay in sync without a manual refresh.
+
+### Hot-reload the internal frontend
+
+For edits to `frontend/src/**`, run the Vite dev server instead of re-building:
+```bash
+cd frontend
+npm run dev       # serves on http://localhost:5175, proxies /api to :8505
 ```
-VITE_API_BASE_URL=http://localhost:8000
+
+---
+
+## Changing ports
+
+Three services have preselected ports. If any collides with something already running, update these files in lockstep.
+
+### Backend (default `8505`)
+
+Single source of truth — every other component reads from it.
+
+1. `lib/config.py` — set `API_PORT = <new-port>`.
+2. `frontend/vite.config.js` — update **both** proxy targets (the `/api` and `/health` blocks) to `http://localhost:<new-port>`.
+3. `customsandtaxriskmanagemensystem/.env` — set `VITE_API_BASE_URL=http://localhost:<new-port>`.
+4. Start the backend on the new port: `python -m uvicorn api:app --port <new-port>`.
+
+### Internal frontend dev server (default `5175`)
+
+Used only when running `npm run dev` inside `frontend/`. The production build served by FastAPI is unaffected.
+
+- `frontend/vite.config.js` — set `server.port = <new-port>`.
+
+### C&T operator dashboard (default `8080`)
+
+- `customsandtaxriskmanagemensystem/vite.config.ts` — set `server.port = <new-port>`.
+
+### LM Studio (default `1234`)
+
+Change inside LM Studio's **Developer** tab, then update the env file:
+- `vat_fraud_detection/.env` — `LM_STUDIO_BASE_URL=http://localhost:<new-port>/v1`.
+
+### Quick "is this port free?" check
+
+```bash
+lsof -iTCP:8505 -sTCP:LISTEN                  # macOS / Linux
+# or
+netstat -an | grep -E "LISTEN.*\.8505\b"     # cross-platform
 ```
-
-Open the EU Custom Data Hub at `:8000` (click **▶ Start** on the simulation page), then the C&T Risk Management portal at `:8080`. Cases routed to **investigate** by the Release Factory automatically appear on the **Customs Authority** page (IE-destined only) within seconds via SSE. Cases the Customs Officer forwards via *Submit for Tax Review* trigger the AI VAT Fraud Detection Agent, then appear on the **Tax Authority** page.
-
-CORS on the backend is open (`allow_origins=["*"]`) so the frontend at `:8080` can call the backend at `:8000` directly.
-
-A simulation reset on `:8000` emits `cases_reset` + `reset` SSE events that the frontend listens for — it clears its in-memory case map and wipes its localStorage cache so both sides stay in sync without a manual page refresh.
 
 ---
 
 ## Application pages
 
-Internal React frontend served at `:8000`:
+Internal frontend served at `:8505`:
 
 | Page | URL | Description |
 |---|---|---|
-| Simulation | `/simulation` | Pipeline diagram (with side-by-side Customs / Tax bottom band), controls, event counts — **start here** |
+| Simulation | `/simulation` | Pipeline diagram, speed controls, event counts — **start here** |
 | Main | `/main` | Live transaction stream (SSE), KPI tiles, active alarms |
 | Dashboard | `/dashboard` | VAT metrics, charts by country & category |
-| Suspicious | `/suspicious` | Historical transactions flagged by the alarm system |
-| Agent Log | `/agent-log` | Audit history of every Tax officer agent run with legislation references |
+| Suspicious | `/suspicious` | Historical transactions flagged by the alarm engine |
+| Agent Log | `/agent-log` | Audit history of every Tax-officer agent run with legislation references |
 | Ireland Queue | nav dropdown | Per-country investigation queue (Ireland live, others placeholder) |
 
 C&T Risk Management frontend (companion repo, served at `:8080`):
 
 | Page | URL | Description |
 |---|---|---|
-| Access Portal | `/` | Authority + country selection (Ireland enabled) |
-| Customs Authority | `/customs-authority` | Ongoing investigation cases (IE only). Actions: release / retain / submit for tax review / request third-party input. Bulk actions supported. |
-| Closed Cases | `/customs-authority/closed` | Archive of closed cases |
-| Case Review | `/customs-authority/case/:id` | Case detail with AI summary, risk signals (from backend engines), linked orders, previous cases, correlate tab |
-| Tax Authority | `/tax-authority` | Cases under tax review + AI investigation. Shows "AI Processing" / "Ready for Review" status |
-| Tax Case Review | `/tax-authority/case/:id` | Tax review with VAT assessment, AI agent rationale button, officer-suggested VAT |
-| Manage Rules | `/manage-rules` | Business rule management |
-
-### Risk levels
-
-A simplified three-tier risk model maps directly to the pipeline routing:
-
-| Risk Level | RT Score | Route | Destination |
-|---|---|---|---|
-| **Red** | Both monitors flagged | `retain_event` | Customs queue |
-| **Amber** | One monitor flagged | `investigate_event` | Tax queue |
-| **Green** | Neither flagged | `release_event` | Auto-released to DB |
+| Access Portal | `/` | Authority + country selection |
+| Customs Authority | `/customs-authority` | Open investigation cases (IE). Actions: release / retain / submit for tax review / request input from Deemed Importer |
+| Closed Cases | `/customs-authority/closed` | Archive |
+| Case Review | `/customs-authority/case/:id` | Detail: risk signals, AI summary, VAT assessment, orders, previous + correlated cases, dual-agent chat |
+| Tax Authority | `/tax-authority` | Cases under tax review — status flips from "AI Processing" to "Ready for Review" when the agent completes |
+| Tax Case Review | `/tax-authority/case/:id` | VAT assessment editor with per-(country, subcategory) rate lookup, AI rationale, officer overrides |
 
 ---
 
 ## Simulation scenario
 
-All April-2026 source transactions are rescaled at seed time so their timestamps fall inside a **15-sim-minute window** starting at April 1st 00:00:00. The continuous-clock simulation loop advances `sim_time` smoothly between events at one of three multipliers:
+April-2026 source transactions are rescaled at seed time so their timestamps fall inside a **15-sim-minute window** starting `2026-04-01 00:00:00`. The continuous-clock simulation loop advances `sim_time` smoothly between events:
 
 | Multiplier | sim-sec / real-sec | Wall-clock playback |
 |---|---|---|
@@ -298,13 +380,18 @@ All April-2026 source transactions are rescaled at seed time so their timestamps
 | **×10** | 10 | 15 sim-min in ~1.5 real-min |
 | **×100** | 100 | 15 sim-min in ~9 real-sec |
 
-### Embedded fraud scenario
+### Embedded investigate clusters (IE destination)
 
-- **Supplier**: TechZone GmbH (Germany) — sells electronics B2C to Irish consumers
-- **Fraud**: applies 0% VAT (zero-rated rate) instead of the correct 23% Irish standard rate
-- **Detection**: the alarm engine spots the VAT/value ratio deviation early in the run
-- **Routing**: flagged orders are RED-scored by `RT Risk Assessment 1`, routed to the **Customs queue**
-- **Review**: the Customs Officer can decide directly OR escalate the case to the **Tax queue**, where the Tax Officer can run the VAT Fraud Detection Agent for a legislation-grounded verdict before issuing a non-binding recommendation back to Customs
+The seeder amplifies each IE investigate cluster to **50–100 orders** that share a 6-token Jaccard anchor in their descriptions, so they aggregate into a single open case on the C&T dashboard. Every order in a case is within **25% of every other order's price** (cluster-level base ± ~11%). Notable clusters:
+
+| Seller (non-EU producer) | Category | Pattern |
+|---|---|---|
+| Mumbai TechTrade Pvt Ltd | Electronics & Accessories | 2 split sub-cases (Jaccard disjoint markers) — demo the Correlated Cases panel |
+| Bengaluru ActiveGear Ltd | Clothing & Textiles | 2 split sub-cases — same pattern |
+| Delhi PharmaExport Pvt Ltd | Cosmetics & Personal Care | Single case, VAT-ratio flagged |
+| Hyderabad KidsEdu Traders | Books, Publications & Digital Content | Single case, high ML + vagueness |
+
+Release/retain rows keep their raw xlsx-derived values and do not cluster.
 
 ---
 
@@ -313,35 +400,32 @@ All April-2026 source transactions are rescaled at seed time so their timestamps
 ```
 EU_custom_data_hub_RTDemo/
 ├── api.py                       # FastAPI app — endpoints, pub/sub pipeline, SSE, lifespan
-├── seed_databases.py            # One-time DB seeder
+├── seed_databases.py            # One-time DB seeder (all four SQLite files)
 ├── requirements.txt
 ├── lib/
 │   ├── broker.py                # Pub/sub MessageBroker + topic constants
 │   ├── config.py                # Ports, paths, simulation time window
-│   ├── catalog.py               # Suppliers, countries, VAT rates
-│   ├── database.py              # SQLite schema (legacy + 3-table data hub) + helpers
-│   ├── regions.py               # Country → UN geoscheme sub-region map
-│   ├── event_store.py           # JSON event persistence (data/events/)
-│   ├── seeder.py                # Historical + simulation data generator
+│   ├── database.py              # SQLite schema (legacy + data hub + reference) + helpers
+│   ├── new_seeder.py            # xlsx → simulation.db seeder (cluster sizing + value clustering)
+│   ├── historical_seeder.py     # historical_cases.db seeder
+│   ├── seeder.py                # european_custom.db historical seeder
+│   ├── vat_dataset.py           # VAT categories, subcategories, per-country rate lookup
 │   ├── simulator.py             # Async event-driven simulation loop
 │   ├── alarm_checker.py         # VAT-ratio deviation alarm engine
-│   ├── watchlist.py             # Seller / origin-country watchlist
-│   ├── message_factory.py       # Builds schema-conforming broker messages
+│   ├── regions.py               # Country → UN geoscheme sub-region map
 │   └── agent_bridge.py          # Subprocess bridge → vat_fraud_detection
-├── frontend/                    # React + Vite (built output served by FastAPI)
-│   └── src/
-│       ├── pages/               # Simulation, Main, Dashboard, Suspicious, Agent Log, Ireland
-│       └── components/          # EclLayout, charts, helpers
-├── ireland_app/
-│   └── index.html               # Standalone Irish Revenue investigation app
-├── pages/                       # Streamlit dashboards (legacy alt UI)
+├── frontend/                    # Internal React + Vite UI (built → FastAPI serves dist/)
 ├── vat_fraud_detection/         # Git submodule — local LLM VAT compliance agent
-│   ├── _analyse_tx.py           # Subprocess entry point (called by agent_bridge)
 │   ├── lib/analyser.py          # Core AI analysis engine
+│   ├── build_knowledge_base.py  # RAG index builder
 │   └── prompts/                 # LLM system prompts
-└── data/                        # SQLite databases + event files (git-ignored)
-    ├── european_custom.db       # Historical + data hub tables
-    ├── simulation.db            # April-2026 transactions to replay
+├── docs/
+│   └── risk_monitoring_rules.md # Engine weights, thresholds, pre-baking details
+└── data/                        # SQLite + event files (git-ignored)
+    ├── european_custom.db
+    ├── simulation.db
+    ├── investigation.db
+    ├── historical_cases.db
     └── events/                  # Per-topic JSON event files (flushed on reset)
 ```
 
@@ -349,7 +433,23 @@ EU_custom_data_hub_RTDemo/
 
 ## API reference
 
-### Health & live data
+### Reference + case endpoints (consumed by the C&T dashboard)
+
+| Method | Endpoint | Description |
+|---|---|---|
+| GET  | `/api/reference` | Lookup bundle: VAT categories, subcategories, per-country VAT rates, customs/tax actions, statuses, risk signals, thresholds |
+| GET  | `/api/rg/cases` | All investigation cases (hydrated with orders + risk scores) |
+| GET  | `/api/rg/cases/{id}` | Single case detail |
+| GET  | `/api/rg/cases/stream` | SSE — `new_case`, `case_updated`, `cases_reset` |
+| GET  | `/api/rg/cases/{id}/previous` | Previous closed cases from the same seller |
+| GET  | `/api/rg/cases/{id}/correlated` | Open cases with the same declared category |
+| POST | `/api/rg/cases/{id}/customs-action` | Body `{action: "retainment"\|"release"\|"tax_review"\|"input_requested", comment?, officer?}` |
+| POST | `/api/rg/cases/{id}/tax-action` | Body `{action: "risk_confirmed"\|"no_limited_risk", comment?, officer?}` |
+| POST | `/api/rg/cases/{id}/communication` | Append to the case's communication log |
+| POST | `/api/rg/cases/{id}/ask` | Body `{question, role: "customs"\|"tax", mode?: "advisor"\|"action"}`. Returns `{answer, proposal, mode}` — advisor never sets proposal; action sets it when the officer clearly demanded one |
+| GET  | `/api/rg/agent/queue` | Live agent queue depth + case currently under analysis |
+
+### Live data
 
 | Method | Endpoint | Description |
 |---|---|---|
@@ -357,43 +457,26 @@ EU_custom_data_hub_RTDemo/
 | GET  | `/api/queue` | Latest 30 transactions (REST snapshot) |
 | GET  | `/api/queue/stream` | SSE — one transaction per event |
 | GET  | `/api/transactions` | Paginated historical query |
-| GET  | `/api/transactions/{id}/timeline` | Full chronological broker-event history for a single transaction (used by the C&T Risk Management System case-detail page) |
+| GET  | `/api/transactions/{id}/timeline` | Full broker-event history for a transaction |
 | GET  | `/api/metrics` | VAT aggregates with filters |
 | GET  | `/api/alarms` | Alarm list (`?active_only=true` optional) |
-| GET  | `/api/suspicious` | Last 50 suspicious transactions (used by the C&T Risk Management System Customs Authority dashboard) |
-| GET  | `/api/agent-log` | Audit history of every Tax officer agent run with legislation refs |
+| GET  | `/api/suspicious` | Last 50 suspicious transactions |
+| GET  | `/api/agent-log` | Audit history of every Tax-officer agent run |
 | GET  | `/api/ireland-queue` | Cases queued for Irish Revenue investigation |
 | GET  | `/api/ireland-case/{id}` | Full case detail |
-| GET  | `/api/catalog/suppliers` | Supplier catalogue |
-| GET  | `/api/catalog/countries` | Country list |
-
-### C&T Risk Management System (case-based API)
-
-| Method | Endpoint | Description |
-|---|---|---|
-| GET  | `/api/rg/cases` | All investigation cases (hydrated with orders + risk scores) |
-| GET  | `/api/rg/cases/{id}` | Single case detail |
-| GET  | `/api/rg/cases/stream` | SSE — live case events (`new_case`, `case_updated`, `cases_reset`) |
-| GET  | `/api/rg/cases/{id}/previous` | Previous closed cases from the same seller |
-| GET  | `/api/rg/cases/{id}/correlated` | Open cases with the same declared category |
-| POST | `/api/rg/cases/{id}/customs-action` | Body `{action: "retainment"\|"release"\|"tax_review"\|"input_requested"}`. Customs officer action. `tax_review` triggers the AI agent. |
-| POST | `/api/rg/cases/{id}/tax-action` | Body `{action: "risk_confirmed"\|"no_limited_risk"\|"input_requested"}`. Tax officer action. Returns case to customs. |
-| POST | `/api/rg/cases/{id}/communication` | Body `{from, action, message}`. Append to case communication log. |
-| GET  | `/api/rg/agent/queue` | Live agent queue depth + case currently under analysis |
-| GET  | `/api/reference` | Reference data: VAT categories, risk levels, regions, suspicion types, risk engine signals, risk thresholds |
 
 ### Simulation control
 
 | Method | Endpoint | Description |
 |---|---|---|
 | GET  | `/api/simulation/status` | Simulation state + progress |
-| GET  | `/api/simulation/pipeline` | Per-topic event counts, queue sizes, Customs/Tax queue depths, risk-score breakdown |
-| GET  | `/api/simulation/stream` | SSE pushing consolidated `{status, pipeline}` snapshots at ~5 Hz |
+| GET  | `/api/simulation/pipeline` | Per-topic event counts, queue sizes, Customs/Tax depths, risk-score breakdown |
+| GET  | `/api/simulation/stream` | SSE pushing `{status, pipeline}` at ~5 Hz |
 | POST | `/api/simulation/start` | Start simulation |
 | POST | `/api/simulation/pause` | Pause |
 | POST | `/api/simulation/resume` | Resume |
-| POST | `/api/simulation/speed` | Body `{speed: <float>}` (sim-sec per real-sec, capped between MIN_SPEED and MAX_SPEED) |
-| POST | `/api/simulation/reset` | Reset to start (preserves historical seed data) |
+| POST | `/api/simulation/speed` | Body `{speed: <float>}` (between `MIN_SPEED` and `MAX_SPEED`) |
+| POST | `/api/simulation/reset` | Reset to start (preserves seed data) |
 
 ---
 

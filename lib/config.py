@@ -1,4 +1,5 @@
 """Shared configuration."""
+import os
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -18,7 +19,9 @@ SEED_CASES_DB      = DATA_DIR / "seed_cases.db"
 # and Country_Destination = 'IE'. Built by lib.historical_seeder.
 HISTORICAL_CASES_DB = DATA_DIR / "historical_cases.db"
 
-API_PORT     = 8505
+# API_PORT is overridable via environment so the install / run scripts can
+# change it without editing this file. Defaults to 8505 otherwise.
+API_PORT     = int(os.environ.get("API_PORT", "8505"))
 API_BASE_URL = f"http://localhost:{API_PORT}"
 
 # Simulation time window

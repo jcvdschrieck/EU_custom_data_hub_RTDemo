@@ -56,20 +56,21 @@ _VALUE_MAX = 150.0
 # child ONLY differs in transaction_id, timestamp, value, and description.
 #
 # Factors tuned so:
-#   - Total tx ≈ 2000.
 #   - Route proportions preserve the xlsx split (~79% release, ~17%
 #     investigate, ~4% retain).
-#   - Ireland-destined volume is a minority of the total (≈13%) but
-#     Ireland investigate clusters are amplified to ~30 tx each so the
-#     C&T frontend (which filters to Country_Destination == "IE") shows
-#     rich, multi-order cases.
+#   - Ireland-destined IE investigate clusters are amplified to a
+#     randomized target size in [50, 100] so the C&T frontend (which
+#     filters to Country_Destination == "IE") shows rich cases carrying
+#     up to 100 orders each.
+#   - non-IE clusters stay small (they don't drive the C&T demo).
 #
-# ("target_cluster_size", N) for investigate rows scales the whole
-# cluster — siblings are shared across the cluster's xlsx rows. For
-# release/retain (no clustering) the factor is per-row.
-_INVESTIGATE_CLUSTER_SIZE = {
-    "IE":     30,   # 4 clusters × 30 ≈ 120 tx
-    "non-IE": 14,   # 15 clusters × 14 ≈ 210 tx
+# Investigate cluster size is sampled per-cluster from an inclusive range
+# (min, max). All members of a cluster share identical cluster markers, so
+# Jaccard stays > DESCRIPTION_SIMILARITY_THRESHOLD regardless of size and
+# find_similar_open_case merges them into a single open case.
+_INVESTIGATE_CLUSTER_SIZE: dict[str, tuple[int, int]] = {
+    "IE":     (50, 100),   # 4 clusters × ~75 ≈ 300 tx
+    "non-IE": (14, 14),    # 15 clusters × 14 ≈ 210 tx
 }
 _RELEASE_COPIES_PER_ROW = {
     "IE":     4,    # 35 rows × 4 = 140
@@ -339,11 +340,19 @@ def _build_tx_row(
     recommended_rate: float,
     description: str,
     fake_ml_row: dict,
+    value: float | None = None,
 ) -> dict:
-    """Compose one row in the shape expected by lib.database.bulk_insert."""
+    """Compose one row in the shape expected by lib.database.bulk_insert.
+
+    *value* lets the caller force a per-tx amount — used by the investigate
+    pass to keep every sibling in a cluster within ±25% of a cluster-level
+    base price so every order inside a case has a comparable value. When
+    None, a free uniform draw is used (release/retain rows, no clustering).
+    """
     seller_name    = seller_dict["name"]
     seller_origin  = seller_dict["origin"]
-    value          = round(rng.uniform(_VALUE_MIN, _VALUE_MAX), 2)
+    if value is None:
+        value = round(rng.uniform(_VALUE_MIN, _VALUE_MAX), 2)
     vat_amount     = round(value * declared_rate, 2)
 
     return {
@@ -440,7 +449,8 @@ def seed_simulation_db_from_xlsx() -> int:
 
     for (seller_name, destination, parent_cat), group in cluster_groups:
         seller_dict = seller_by_name[seller_name]
-        target_size = _INVESTIGATE_CLUSTER_SIZE[_dest_tier(destination)]
+        size_lo, size_hi = _INVESTIGATE_CLUSTER_SIZE[_dest_tier(destination)]
+        target_size = rng.randint(size_lo, size_hi)
         target_size = max(len(group), target_size)
 
         xlsx_records = [
@@ -497,6 +507,13 @@ def seed_simulation_db_from_xlsx() -> int:
             vague_positions = (set(rng.sample(sibling_positions, vague_count))
                                if vague_count else set())
 
+            # Cluster-level base price so any two orders inside the
+            # resulting case differ by at most 25%. Window width is
+            # [base/√1.25, base·√1.25] ≈ [base·0.894, base·1.118] so the
+            # max-to-min ratio for any pair stays ≤ 1.25. Base is picked
+            # so the full window stays inside [_VALUE_MIN, _VALUE_MAX].
+            cluster_base_value = rng.uniform(_VALUE_MIN / 0.894, _VALUE_MAX / 1.118)
+
             for member_idx, (rec, sibling_idx) in enumerate(cluster_members):
                 xrow     = rec["data"]
                 orig_idx = rec["orig_idx"]
@@ -509,6 +526,14 @@ def seed_simulation_db_from_xlsx() -> int:
                                                   pool_override=pool_override)
                 description = f"{phrase} unit {member_idx + 1:03d} — {markers}"
 
+                tx_value = round(
+                    min(
+                        rng.uniform(cluster_base_value * 0.894, cluster_base_value * 1.118),
+                        _VALUE_MAX - 0.01,
+                    ),
+                    2,
+                )
+
                 row = _build_tx_row(
                     rng=rng,
                     timestamp_iso="",
@@ -520,6 +545,7 @@ def seed_simulation_db_from_xlsx() -> int:
                     recommended_rate=float(xrow["VAT Rate (Recommended)"]) / 100.0,
                     description=description,
                     fake_ml_row=fml_by_idx[orig_idx],
+                    value=tx_value,
                 )
                 if is_vague_variant:
                     # Vague variants carry a clean invoice (no rate issue, no

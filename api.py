@@ -1533,14 +1533,28 @@ def api_reference():
     # Sourced from the live vat_dataset (same single source of truth used by
     # the risk engines and the transaction seeder) so the FE Tax-Assessment
     # second dropdown has no hardcoded list.
-    from lib.vat_dataset import VAT_CATEGORIES as _VAT_CATS
+    from lib.vat_dataset import (
+        VAT_CATEGORIES as _VAT_CATS,
+        VAT_RATE_LOOKUP as _VAT_LOOKUP,
+        COUNTRY_STANDARD_RATE as _COUNTRY_STD_RATE,
+    )
     vat_subcategories = {
         cat: [{"code": code, "name": name} for (code, name) in subs]
         for cat, subs in _VAT_CATS.items()
     }
+    # Per-(destination, subcategory) rate. Reshaped to
+    # { destination -> { subcategory_code -> rate } } so the FE Tax
+    # projection can look up the correct rate in one hop given the
+    # case's countryOfDestination and the officer-picked subcategory.
+    vat_rates_by_country: dict[str, dict[str, float]] = {}
+    for (dest, subcat), (rate, _rate_type) in _VAT_LOOKUP.items():
+        vat_rates_by_country.setdefault(dest, {})[subcat] = rate
+    country_standard_rate = dict(_COUNTRY_STD_RATE)
     return {
         "vat_categories":        get_vat_categories(),
         "vat_subcategories":     vat_subcategories,
+        "vat_rates_by_country":  vat_rates_by_country,
+        "country_standard_rate": country_standard_rate,
         "risk_levels":           get_risk_levels(),
         "regions":               get_eu_regions(),
         "suspicion_types":       get_suspicion_types(),
@@ -2088,53 +2102,31 @@ AI VAT Fraud Detection Analysis: {ai_analysis}
 Communication log:
 {comm_text}"""
 
+    # ── Agent split: advisor vs action ─────────────────────────────────────
+    # Two focused agents instead of one that juggles both jobs:
+    #   - advisor: pure Q&A, never emits a proposal, short prompt.
+    #   - action:  activated only when the officer clearly wants to act;
+    #              emits the <<PROPOSE>> fence; scoped to this role's
+    #              allowed actions.
+    # Customs only ever runs advisor — customs officers apply via the
+    # Action dropdown, not via chat.
+    #
+    # Routing: the client can force a mode via body.mode ∈ {"advisor",
+    # "action"}. If unset, we auto-route: _question_demands_action picks
+    # action for an unambiguous demand, advisor for everything else.
+    requested_mode = (body.get("mode") or "").strip().lower()
+    if requested_mode in ("advisor", "action"):
+        mode = requested_mode
+    elif role == "customs":
+        mode = "advisor"
+    else:
+        mode = "action" if _question_demands_action(question) else "advisor"
+
     allowed_actions = _AGENTIC_TAX_ACTIONS if role == "tax" else _AGENTIC_CUSTOMS_ACTIONS
     actions_block = "\n".join(f'  - "{k}": {v}' for k, v in allowed_actions.items())
 
-    # Tool-calling contract — the LLM is told to emit a JSON fence ONLY
-    # when the officer has explicitly asked to apply/submit/execute an
-    # action. A card appears in the UI for the officer to confirm; no
-    # write happens until they press Apply.
-    agentic_block = f"""
-You can propose an action, but ONLY when the officer has issued an
-UNAMBIGUOUS demand to take a decision on this case. A request for a
-summary, an analysis, a recommendation, an advice, a what-would-you-do,
-or any other discussion is NEVER enough. The officer must be clearly
-directing you to EXECUTE a specific action now — e.g. "apply Confirm
-Risk", "submit this to Tax Review", "proceed with the retainment",
-"go ahead and close it as release", "do X on this case".
-
-If in doubt, do NOT propose. Answer the question normally. The officer
-will phrase an explicit action demand when they want one.
-
-Allowed actions for this role:
-{actions_block}
-
-When — and only when — the officer has clearly demanded an action, your
-reply MUST be structured as follows:
-
-1. One plain-English sentence naming the action you intend to take,
-   phrased as a statement of intent (e.g. "I'll apply 'Confirm Risk'
-   on this case.").
-2. One short sentence giving the comment/justification that will be
-   posted to the case activity log (e.g. "Rationale: VAT gap of €145
-   and 80% of similar historical cases were retained.").
-3. A single explicit confirmation request — ALWAYS exactly:
-   "Please confirm by replying 'yes', or 'no' to cancel."
-4. A single JSON block wrapped in the exact fences below, on its own
-   lines, with nothing else around it:
-
-<<PROPOSE>>
-{{"action": "<one of the ids above>", "comment": "<the comment from step 2>"}}
-<<END>>
-
-Do NOT offer buttons, links, or other UI affordances — the officer
-confirms by typing "yes" in the chat. If the officer is just asking
-questions, answer normally and do NOT emit the fence.
-"""
-
     if role == "tax":
-        system_prompt = f"""You are a Tax Authority AI assistant specialised in VAT compliance and tax fraud detection.
+        role_expertise = """You are a Tax Authority AI assistant specialised in VAT compliance and tax fraud detection.
 You work for the Irish Revenue Commissioners. Your expertise includes:
 - EU VAT Directive (2006/112/EC) and its application to e-commerce
 - Irish VAT rates (standard 23%, reduced 13.5%/9%, zero-rated, exempt categories)
@@ -2142,52 +2134,11 @@ You work for the Irish Revenue Commissioners. Your expertise includes:
 - Common VAT fraud patterns: misclassification, undervaluation, carousel fraud
 - Transfer pricing and arm's-length principles
 
-When answering, focus on tax implications, applicable VAT rates, potential revenue loss,
-and whether the declared VAT treatment is consistent with the product category and EU legislation.
-Cite relevant VAT rules when possible. Be precise and analytical.
-
-SCOPE OF ACTIONS AVAILABLE TO THE TAX OFFICER:
-The Tax officer can take ONLY two actions on this case: "Confirm Risk"
-or "No/Limited Risk". Every other action — Recommend Control,
-Recommend Release, Submit for Tax Review, Request Input from Deemed
-Importer, closing the case, releasing the case, retaining the goods,
-contacting a third party — belongs to another role (Customs). You
-must NEVER mention, suggest, hint at, or propose any of those
-out-of-scope actions in your reply, even hypothetically or as
-examples. If the data suggests the matter should ultimately become
-e.g. a customs action, refer to it as "a subsequent customs decision"
-without naming the specific action.
-
-HARD RULES on what NOT to put in your answer:
-- Do NOT suggest, recommend, propose, or mention a "next step", "next action",
-  "suggested action", "recommended action", or any similar formulation when the
-  officer asks for a summary, an analysis, an explanation, or any other question
-  that is not an explicit demand to take action.
-- Do NOT end your answer with phrases like "I suggest Confirm Risk",
-  "You could apply X", "The recommended action is Y", "Next, you may want to…",
-  "Shall I apply X?", "Would you like me to proceed with X?".
-- Do NOT offer the officer a choice between actions and ask them to pick by
-  replying "yes" / "no". Specifically: any construction of the shape "If you
-  would like me to apply/confirm/submit/request X (or Y), reply yes to confirm"
-  is FORBIDDEN, even when dressed up as a polite disclaimer. If the officer has
-  not demanded an action, your answer must end on the factual content — no
-  trailing offer, no dangling "let me know if you want me to …".
-- Do NOT list the actions the officer could take unless they explicitly asked
-  "what actions are available?".
-- An answer to a question is just an answer. Stop when the answer is complete.
-  If the officer wants you to act, they will say so unambiguously in a separate
-  message; you do not need to prompt them.
-
-Answer based ONLY on the case data below. If the data doesn't contain the answer, say so.
-{agentic_block}
-
-{case_context}"""
+Focus on tax implications, applicable VAT rates, potential revenue loss, and
+whether the declared VAT treatment is consistent with the product category and
+EU legislation. Cite relevant VAT rules when useful. Be precise and analytical."""
     else:
-        # Customs conversational agent is strictly Q&A — officers apply
-        # customs actions via the explicit Action dropdown, never through
-        # an in-chat Apply button. The agentic_block is therefore omitted
-        # from this persona so the LLM never proposes actions.
-        system_prompt = f"""You are a Customs Authority AI assistant specialised in border control and risk management.
+        role_expertise = """You are a Customs Authority AI assistant specialised in border control and risk management.
 You work for the Irish Customs service. Your expertise includes:
 - EU customs regulations (Union Customs Code - UCC)
 - Risk profiling of shipments and sellers
@@ -2196,13 +2147,76 @@ You work for the Irish Customs service. Your expertise includes:
 - Detection of smuggling, counterfeiting, and misdeclaration patterns
 - Customs procedures: release, retention, investigation escalation
 
-Your role is strictly advisory: answer the officer's questions about the case.
-Do NOT propose actions or instruct the officer to apply something — the officer
-uses the Action dropdown for that. Focus on risk analysis, product classification,
-seller history, route risk, and any red flags for customs enforcement.
-Be direct, concise and analytical. Cite the relevant customs concept when useful.
+Focus on risk analysis, product classification, seller history, route risk,
+and any red flags for customs enforcement. Be direct, concise and analytical."""
 
-Answer based ONLY on the case data below. If the data doesn't contain the answer, say so.
+    if mode == "advisor":
+        # Pure Q&A. No agentic_block, no HARD RULES — the agent simply
+        # cannot propose because the response is never parsed for a fence.
+        system_prompt = f"""{role_expertise}
+
+You are a purely conversational assistant. You answer the officer's questions
+about the case. You do NOT propose, suggest, recommend, or describe any
+action the officer might take on the case. You do not offer to "apply",
+"confirm", or "execute" anything. If the officer wants to take an action,
+a separate assistant will handle that when they explicitly ask — you just
+answer questions.
+
+Answer based ONLY on the case data below. If the data doesn't contain the
+answer, say so briefly.
+
+{case_context}"""
+    else:
+        # Action agent — the officer has signalled a clear intent to act.
+        # Scoped tightly to the role's allowed actions, emits a PROPOSE
+        # fence, asks for yes/no confirmation in chat.
+        if role == "tax":
+            scope_note = """SCOPE: The Tax officer can take ONLY two actions on this case — "Confirm Risk"
+or "No/Limited Risk". Any other action (Recommend Control, Recommend Release,
+Submit for Tax Review, Request Input from Deemed Importer, closing/releasing/
+retaining the goods, contacting third parties) belongs to another role and is
+NOT available to you. If the officer asks for one of those, respond that the
+Tax role cannot take that action and offer to propose the closest in-scope one
+only if they still want to act."""
+        else:
+            scope_note = """SCOPE: Customs officers apply actions through the Action dropdown, not chat.
+If the officer insists on an in-chat action, propose it — otherwise recommend
+they use the dropdown."""
+
+        system_prompt = f"""{role_expertise}
+
+You are the ACTION assistant. The officer has signalled they want to take an
+action on this case. Your job is to identify the right action, state your
+intent clearly, and ask for confirmation before anything is applied.
+
+{scope_note}
+
+Allowed actions for this role:
+{actions_block}
+
+Your reply MUST follow this exact structure, in order:
+
+1. One plain-English sentence stating the action you intend to take
+   (e.g. "I'll apply 'Confirm Risk' on this case.").
+2. One short sentence giving the rationale that will be posted to the case
+   activity log (e.g. "Rationale: VAT gap of €145 and 80% of comparable
+   historical cases were retained.").
+3. Exactly this confirmation line: "Please confirm by replying 'yes', or 'no'
+   to cancel. You can also just ask another question and we'll come back to
+   this later."
+4. A single JSON block wrapped in the exact fences below, on its own lines,
+   with nothing else around it:
+
+<<PROPOSE>>
+{{"action": "<one of the ids above>", "comment": "<the rationale from step 2>"}}
+<<END>>
+
+If the officer's message turned out to be a question rather than a clear
+action demand, drop the fence and just answer their question — the advisor
+assistant will take over on the next turn.
+
+Answer based ONLY on the case data below. If the data doesn't contain the
+answer, say so briefly.
 
 {case_context}"""
 
@@ -2223,21 +2237,22 @@ Answer based ONLY on the case data below. If the data doesn't contain the answer
             {"role": "user", "content": user_turn},
         ], temperature=0.3, max_tokens=500, priority=PRIORITY_INTERACTIVE)
         await client.aclose()
+        if mode == "advisor":
+            # Never parse a proposal — advisor has no allowed actions,
+            # and even if the LLM slipped a fence we ignore it. Scrub
+            # any trailing "Would you like me to …?" in case the model
+            # drifted.
+            answer = _strip_trailing_offer(raw_answer.strip())
+            return {"answer": answer, "proposal": None, "mode": "advisor"}
+        # Action mode — parse the fence. If the LLM decided the
+        # officer's message wasn't actually an action demand and
+        # returned a plain answer, that's fine: proposal is None and
+        # the frontend will treat the next turn as advisor again.
         answer, proposal = _parse_agent_proposal(raw_answer, allowed_actions)
-        # Belt-and-suspenders user-intent guard: even if the LLM tries
-        # to propose an action, drop it unless the officer's latest
-        # message clearly DEMANDS an action. A request for a summary /
-        # analysis / advice / recommendation is not a demand — so any
-        # proposal emitted in that case is noise and gets stripped here.
-        if proposal and not _question_demands_action(question):
-            proposal = None
-        # Strip any "Would you like me to …?" / "If you would like me
-        # to … reply 'yes'" tail the LLM may have appended despite the
-        # prompt's HARD RULES forbidding them.
         answer = _strip_trailing_offer(answer)
-        return {"answer": answer, "proposal": proposal}
+        return {"answer": answer, "proposal": proposal, "mode": "action"}
     except Exception as e:
-        return {"answer": f"Unable to reach AI assistant: {e}", "proposal": None}
+        return {"answer": f"Unable to reach AI assistant: {e}", "proposal": None, "mode": mode}
 
 
 @app.get("/api/rg/agent/queue")
