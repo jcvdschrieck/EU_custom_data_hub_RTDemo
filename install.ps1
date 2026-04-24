@@ -84,12 +84,10 @@ Push-Location frontend
 & npm run build
 Pop-Location
 
-# ── C&T frontend (sibling directory) ────────────────────────────────────
-$ctDir = Join-Path (Split-Path -Parent $ScriptDir) 'customsandtaxriskmanagemensystem'
-if (-not (Test-Path $ctDir)) {
-    Write-Host "==> Cloning C&T frontend to $ctDir"
-    & git clone https://github.com/jcvdschrieck/customsandtaxriskmanagemensystem.git $ctDir
-}
+# ── C&T frontend (vendored subdirectory) ────────────────────────────────
+# The customsandtaxriskmanagemensystem/ sources ship inside this repo,
+# so there's no separate clone step — just install its npm deps.
+$ctDir = Join-Path $ScriptDir 'customsandtaxriskmanagemensystem'
 Write-Host "==> Installing C&T frontend dependencies"
 Push-Location $ctDir
 & npm install

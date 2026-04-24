@@ -22,7 +22,7 @@ if (Test-Path $configFile) {
     }
 }
 
-$ctDir = Join-Path (Split-Path -Parent $ScriptDir) 'customsandtaxriskmanagemensystem'
+$ctDir = Join-Path $ScriptDir 'customsandtaxriskmanagemensystem'
 if (-not (Test-Path $ctDir)) {
     Write-Error "C&T frontend not found at $ctDir. Run .\install.ps1 first."
 }

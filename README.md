@@ -2,7 +2,7 @@
 
 A real-time simulation of the European Commission's **Taxation and Customs Union** transaction monitoring system. Streams B2C cross-border e-commerce transactions across the EU27, scores them in real time for VAT fraud risk, routes cases through two independent operator queues (Customs and Tax), and persists the full lifecycle into a normalised data hub.
 
-The Customs and Tax operator dashboards live in a companion repository: **[C&T Risk Management System](https://github.com/jcvdschrieck/customsandtaxriskmanagemensystem)**.
+The Customs and Tax operator dashboards ship inside this repo under `customsandtaxriskmanagemensystem/` (vendored from the companion project [C&T Risk Management System](https://github.com/jcvdschrieck/customsandtaxriskmanagemensystem)).
 
 ---
 
@@ -141,11 +141,12 @@ cd EU_custom_data_hub_RTDemo
 
 What the installer does:
 1. Installs Python 3.11+ and Node.js 18+ via `brew` / `apt` / `winget` if missing.
-2. Clones the `customsandtaxriskmanagemensystem` frontend as a sibling directory.
-3. Installs Python + Node dependencies.
-4. Builds the internal frontend into `frontend/dist/`.
-5. Generates `customsandtaxriskmanagemensystem/.env` and `vat_fraud_detection/.env` from `config.env`.
-6. Seeds all four SQLite databases.
+2. Installs Python + Node dependencies.
+3. Builds the internal frontend into `frontend/dist/`.
+4. Generates `customsandtaxriskmanagemensystem/.env` and `vat_fraud_detection/.env` from `config.env`.
+5. Seeds all four SQLite databases.
+
+Both `vat_fraud_detection/` and `customsandtaxriskmanagemensystem/` are vendored inside this repo, so a single `git clone` pulls the whole stack — no submodules, no sibling-repo clones.
 
 The installer is idempotent — re-run it any time after changing `config.env` to regenerate the `.env` files.
 
@@ -185,12 +186,7 @@ cd EU_custom_data_hub_RTDemo
 
 `vat_fraud_detection/` ships inside the repo as vendored files — no `--recurse-submodules` or `git submodule init` required.
 
-Clone the companion frontend next to it:
-```bash
-cd ..
-git clone https://github.com/jcvdschrieck/customsandtaxriskmanagemensystem.git
-cd EU_custom_data_hub_RTDemo
-```
+The `customsandtaxriskmanagemensystem/` and `vat_fraud_detection/` projects are vendored inside this repo — no separate clones required.
 
 ### 2. Python dependencies
 
@@ -212,9 +208,9 @@ This compiles the pipeline/dashboard UI into `frontend/dist/`, which FastAPI ser
 ### 4. Install the C&T frontend dependencies
 
 ```bash
-cd ../customsandtaxriskmanagemensystem
+cd customsandtaxriskmanagemensystem
 npm install
-cd ../EU_custom_data_hub_RTDemo
+cd ..
 ```
 
 ### 5. VAT Fraud Detection Agent — LM Studio (optional)
@@ -284,7 +280,7 @@ python -m uvicorn api:app --host 0.0.0.0 --port 8505
 
 ```bash
 # Terminal 2 — C&T operator dashboard
-cd customsandtaxriskmanagemensystem
+cd EU_custom_data_hub_RTDemo/customsandtaxriskmanagemensystem
 npm run dev       # serves on http://localhost:8080
 ```
 
@@ -411,6 +407,10 @@ EU_custom_data_hub_RTDemo/
 │   ├── regions.py               # Country → UN geoscheme sub-region map
 │   └── agent_bridge.py          # Subprocess bridge → vat_fraud_detection
 ├── frontend/                    # Internal React + Vite UI (built → FastAPI serves dist/)
+├── customsandtaxriskmanagemensystem/  # Vendored — C&T operator dashboard (React + Vite)
+│   ├── src/pages/               # Customs / Tax Authority pages, Case Review
+│   ├── src/lib/                 # apiClient, caseStore, referenceStore, caseEnum
+│   └── vite.config.ts           # Dev server port driven by PORT env var
 ├── vat_fraud_detection/         # Vendored — local LLM VAT compliance agent
 │   ├── lib/analyser.py          # Core AI analysis engine
 │   ├── build_knowledge_base.py  # RAG index builder

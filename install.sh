@@ -3,16 +3,16 @@
 #
 # What it does (idempotent):
 #   1. Installs Python 3.11+ and Node.js 18+ via brew / apt if missing.
-#   2. Clones the C&T frontend repo as a sibling directory if absent.
-#   3. Installs Python deps (pip) and Node deps (npm) for both frontends.
-#   4. Builds the internal Vite frontend into frontend/dist/.
-#   5. Writes customsandtaxriskmanagemensystem/.env and
+#   2. Installs Python deps (pip) and Node deps (npm) for both frontends.
+#   3. Builds the internal Vite frontend into frontend/dist/.
+#   4. Writes customsandtaxriskmanagemensystem/.env and
 #      vat_fraud_detection/.env from config.env.
-#   6. Seeds the four SQLite databases.
+#   5. Seeds the four SQLite databases.
 #
-# Note: vat_fraud_detection/ is vendored — its files ship inside this
-# repo as plain tree content, not as a git submodule. No submodule
-# init step is needed.
+# Note: both vat_fraud_detection/ and customsandtaxriskmanagemensystem/
+# are vendored — their sources ship inside this repo as plain tree
+# content. A single "git clone" brings the whole stack; no submodule
+# init, no separate C&T frontend clone needed.
 #
 # Optional after install:
 #   cd vat_fraud_detection && python3 build_knowledge_base.py --minilm-only
@@ -114,12 +114,10 @@ python -m pip install -r requirements.txt
 echo "==> Building internal frontend"
 (cd frontend && npm install && npm run build)
 
-# ── Step 6: C&T frontend (sibling directory) ────────────────────────────
-CT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)/customsandtaxriskmanagemensystem"
-if [[ ! -d "$CT_DIR" ]]; then
-  echo "==> Cloning C&T frontend to $CT_DIR"
-  git clone https://github.com/jcvdschrieck/customsandtaxriskmanagemensystem.git "$CT_DIR"
-fi
+# ── Step 6: C&T frontend (vendored subdirectory) ────────────────────────
+# The customsandtaxriskmanagemensystem/ sources ship inside this repo,
+# so there's no separate clone step — just install its npm deps.
+CT_DIR="$SCRIPT_DIR/customsandtaxriskmanagemensystem"
 echo "==> Installing C&T frontend dependencies"
 (cd "$CT_DIR" && npm install)
 

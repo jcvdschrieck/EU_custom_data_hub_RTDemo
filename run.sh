@@ -13,7 +13,7 @@ if [[ -f "$SCRIPT_DIR/config.env" ]]; then
   source "$SCRIPT_DIR/config.env"
 fi
 
-CT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)/customsandtaxriskmanagemensystem"
+CT_DIR="$SCRIPT_DIR/customsandtaxriskmanagemensystem"
 if [[ ! -d "$CT_DIR" ]]; then
   echo "!! C&T frontend not found at $CT_DIR. Run ./install.sh first." >&2
   exit 1
