@@ -6,7 +6,8 @@ anthropic>=0.28
 
 # --- Vector store & embeddings ---
 chromadb>=0.5
-sentence-transformers>=3.0
+sentence-transformers>=3.0,<5.0    # 5.x pulls huggingface_hub 1.7 transitively
+huggingface_hub<1.7                # 1.7.x has the httpx-client-closed race
 
 # --- OCR ---
 pdfplumber>=0.11

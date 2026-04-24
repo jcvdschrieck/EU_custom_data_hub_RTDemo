@@ -1,15 +1,16 @@
 # ── EU Custom Data Hub API ────────────────────────────────────────────────────
 fastapi>=0.111.0
 uvicorn[standard]>=0.29.0
-httpx>=0.27.0
+httpx>=0.27.0,<0.28             # 0.28.x interacts badly with huggingface_hub 1.7 (client-closed race)
 pydantic>=2.6.0
 aiofiles>=23.0
 
-# ── VAT Fraud Detection agent (submodule: vat_fraud_detection/) ───────────────
+# ── VAT Fraud Detection agent (vendored: vat_fraud_detection/) ────────────────
 chromadb>=0.5
-sentence-transformers>=3.0
+sentence-transformers>=3.0,<5.0 # 5.x pulls huggingface_hub 1.7 transitively
+huggingface_hub<1.7             # 1.7.x has the httpx-client-closed race that broke the embedder load
 python-dotenv>=1.0
-openai>=1.0          # LM Studio OpenAI-compatible API
+openai>=1.0                     # LM Studio OpenAI-compatible API
 pdfplumber>=0.11
 Pillow>=10.0
 requests>=2.32
