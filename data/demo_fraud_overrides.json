@@ -13,15 +13,15 @@
   "overrides": [
     {
       "name": "shenzhen_bone_conduction",
-      "enabled": false,
+      "enabled": true,
       "match": {
         "seller_name": "ShenZhen TechGlobal Co.",
         "item_description_contains": "bone conduction"
       },
       "delay_seconds": 5,
       "recommendation": "incorrect",
-      "rationale": "Open-ear bone-conduction sport headsets declared under EL-08 ('Hearing aid / medical audio device', IE zero-rated) are not eligible for the 0% rate because the product carries no medical certification and is marketed as consumer sports equipment. The correct classification is EL-03 ('Consumer audio device') at the Irish standard rate of 23%.",
-      "source": "Revenue Tax & Duty Manual — Part 05-03-02 (Medical devices and appliances — zero-rating criteria)"
+      "rationale": "Section 46(1)(a) [1] sets the residual rate at 23 per cent. Schedule 2 §11(3)(b) [2] zero-rates deaf aids but the product carries no medical certification, so this carve-out fails. The product is therefore taxed at the residual 23 per cent.",
+      "source": "Section 46(1)(a) and Schedule 2 §11(3)(b) of the Value-Added Tax Consolidation Act 2010 (https://www.irishstatutebook.ie/eli/2010/act/31/enacted/en/pdf)"
     }
   ]
 }
