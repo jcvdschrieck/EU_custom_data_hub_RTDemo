@@ -2243,14 +2243,27 @@ Your reply MUST follow this exact structure, in order:
 
 1. One plain-English sentence stating the action you intend to take
    (e.g. "I'll apply 'Confirm Risk' on this case.").
-2. One short sentence giving the rationale that will be posted to the case
-   activity log. Cite the ACTUAL numbers visible in the case context above
-   (VAT gap in euros, retention rate from past closed cases) — do NOT make
-   up or copy example values. Use the term "controlled" (not "retained")
-   when describing past actions, to match the dashboard label
-   "Recommend Control". Example template only — replace each <…>:
-       "Rationale: VAT gap of €<exact gap from case> and <exact %>% of past
-       comparable cases were controlled."
+2. One short rationale sentence (≤ 2 sentences max). Pick the STRONGEST
+   evidence visible in the case context, in this priority order:
+
+     (a) The Fraud Detection Agent's verdict if present (e.g. "incorrect"
+         with cited legislation in 'AI VAT Fraud Detection Analysis').
+         This is the most authoritative source — lead with it when
+         available.
+     (b) The VAT gap in euros (from the 'Key facts' line) and the
+         Overall Risk Score / dominant engine signal (vat_ratio,
+         watchlist, vagueness — whichever is highest in the engine
+         scores).
+     (c) The historical retention pattern — corroborating, not driving.
+         Mention it last, and only when the retention rate is decisive
+         (≥75% or ≤25%). When the retention rate is mixed (25–75%),
+         it is NOT a strong signal — either omit it or note it as
+         "non-decisive historical pattern".
+
+   Use ACTUAL values from the case context — do NOT invent numbers.
+   Use the term "controlled" (matching the dashboard label
+   "Recommend Control") rather than "retained" when describing past
+   customs actions.
 3. Exactly this confirmation line: "Please confirm by replying 'yes', or 'no'
    to cancel. You can also just ask another question and we'll come back to
    this later."
