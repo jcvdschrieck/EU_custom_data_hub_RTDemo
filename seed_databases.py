@@ -30,15 +30,22 @@ def main():
     print(f"      ✓ {n2:,} transactions inserted ({time.perf_counter()-t0:.1f}s)")
 
     # ── Historical cases (IE closed) — reference data for /previous ──────────
-    print(f"\n[3/3] Seeding Historical Cases ({HISTORICAL_CASES_DB.name})…")
+    print(f"\n[3/4] Seeding Historical Cases ({HISTORICAL_CASES_DB.name})…")
     t0 = time.perf_counter()
     n3 = seed_historical_cases_db()
     print(f"      ✓ {n3} cases inserted ({time.perf_counter()-t0:.1f}s)")
 
-    print(f"\nDone. Total: {n1+n2:,} transactions + {n3} historical cases.")
+    # ── Demo cases (ShenZhen + Delhi) — injected on top so they survive ────
+    # a re-seed that would otherwise wipe the simulation.db rows.
+    print(f"\n[4/4] Injecting two showcase demo cases (ShenZhen + Delhi)…")
+    t0 = time.perf_counter()
+    from scripts.inject_demo_cases import main as inject_demo_main
+    inject_demo_main()
+    print(f"      ✓ done ({time.perf_counter()-t0:.1f}s)")
+
+    print(f"\nDone. Total: {n1+n2:,} transactions + {n3} historical cases + 2 demo cases.")
     print("\nNext steps:")
-    print("  Terminal 1: uvicorn api:app --port 8505")
-    print("  Terminal 2: streamlit run app.py --server.port 8501")
+    print("  ./run.sh   (or  .\\run.ps1  on Windows)")
 
 
 if __name__ == "__main__":

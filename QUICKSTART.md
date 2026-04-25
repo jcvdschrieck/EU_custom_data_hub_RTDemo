@@ -82,6 +82,12 @@ internet at runtime.
 ./run.sh
 ```
 
+> **Don't launch from inside PyCharm or any IDE.** Running uvicorn through
+> PyCharm's Run config wraps the Python process with the IDE's
+> debugger / inspector, doubling memory use (≈ 2 GB for PyCharm + the
+> Python process combined). Plain PowerShell / Terminal keeps the backend
+> at ~ 300 MB.
+
 Two services come up:
 
 | Service | URL | Role |
@@ -152,7 +158,8 @@ You **don't** need to touch any other files for a normal demo.
 | Fraud agent runs but errors with "Cannot send a request, as the client has been closed" | Older code without the offline-mode fix | `git pull` — fix is at commit `41a4e0b` or later |
 | Fraud agent errors with "Context overflow" / "n_keep ≥ n_ctx" | LM Studio context length still at default 4096 | Step 3 above — bump to 8192 |
 | Customs dashboard shows cases that don't disappear after a sim reset | Frontend localStorage cache is stale | Hard refresh the dashboard tab (Ctrl-Shift-R) |
-| Two demo cases don't appear after first install | The injection wasn't part of the seed step on older builds | `python scripts/inject_demo_cases.py` then reset the simulation from the page |
+| Two demo cases don't appear after first install | Old `seed_databases.py` didn't auto-inject them (fixed in commit `a36e772`+) | `git pull` to update + re-run `.\install.ps1` (or run `.venv\Scripts\python seed_databases.py` directly) |
+| Memory ≈ 2 GB on PyCharm | Backend launched through PyCharm's Run config (debugger overhead) | Launch via `.\run.ps1` from a plain PowerShell window; close PyCharm during demos |
 
 ---
 
