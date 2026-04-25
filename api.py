@@ -2102,6 +2102,23 @@ async def api_rg_case_ask(case_id: str, body: dict):
 
     role = body.get("role", "customs")
 
+    # Surface the rule-based AI recommendations + key numerical facts so the
+    # action agent can cite ACTUAL values when proposing an action (instead
+    # of hallucinating numbers from prompt examples).
+    vat_gap = case.get("VAT_Gap_Fee")
+    rec_rate = case.get("Recommended_VAT_Rate")
+    facts_block = (
+        f"VAT Gap on this case (computed by Fraud Detection Agent): "
+        f"€{float(vat_gap):.2f}" if vat_gap is not None else
+        "VAT Gap on this case: not yet computed (Fraud Detection Agent has not run)."
+    )
+    if rec_rate is not None:
+        facts_block += f"  |  Recommended VAT rate: {float(rec_rate)*100:.0f}%"
+    cust_ai = case.get("AI_Suggested_Customs_Action") or "(none)"
+    tax_ai  = case.get("AI_Suggested_Tax_Action") or "(none)"
+    cust_an = (case.get("AI_Customs_Analysis") or "")[:600]
+    tax_an  = (case.get("AI_Tax_Analysis") or "")[:600]
+
     case_context = f"""CASE: {case_id}
 Status: {case.get('Status')}
 Seller: {case.get('Seller_Name')} ({case.get('Country_Origin')})
@@ -2110,6 +2127,14 @@ Category: {case.get('HS_Product_Category')}
 Overall Risk Score: {case.get('Overall_Case_Risk_Score',0):.2f} ({case.get('Overall_Case_Risk_Level','?')})
 {engine_info}
 VAT Problem Type: {case.get('VAT_Problem_Type','None')}
+
+Key facts: {facts_block}
+
+Rule-based AI recommendation for Customs: {cust_ai}
+Reasoning: {cust_an}
+
+Rule-based AI recommendation for Tax: {tax_ai}
+Reasoning: {tax_an}
 
 Orders ({len(orders)}):
 {order_lines}
@@ -2219,8 +2244,13 @@ Your reply MUST follow this exact structure, in order:
 1. One plain-English sentence stating the action you intend to take
    (e.g. "I'll apply 'Confirm Risk' on this case.").
 2. One short sentence giving the rationale that will be posted to the case
-   activity log (e.g. "Rationale: VAT gap of €145 and 80% of comparable
-   historical cases were retained.").
+   activity log. Cite the ACTUAL numbers visible in the case context above
+   (VAT gap in euros, retention rate from past closed cases) — do NOT make
+   up or copy example values. Use the term "controlled" (not "retained")
+   when describing past actions, to match the dashboard label
+   "Recommend Control". Example template only — replace each <…>:
+       "Rationale: VAT gap of €<exact gap from case> and <exact %>% of past
+       comparable cases were controlled."
 3. Exactly this confirmation line: "Please confirm by replying 'yes', or 'no'
    to cancel. You can also just ask another question and we'll come back to
    this later."
