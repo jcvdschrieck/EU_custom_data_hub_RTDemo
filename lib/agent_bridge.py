@@ -68,6 +68,11 @@ def _try_apply_override(tx: dict) -> dict | None:
     return a pre-canned result in the same shape as the real agent.
     Returns None otherwise (caller falls through to the real subprocess)."""
     for ovr in _load_overrides():
+        # Honour an explicit "enabled": false to allow keeping a tuned
+        # entry parked in the file without removing it. Missing field
+        # defaults to true.
+        if ovr.get("enabled", True) is False:
+            continue
         match = ovr.get("match") or {}
         if not _override_matches(tx, match):
             continue

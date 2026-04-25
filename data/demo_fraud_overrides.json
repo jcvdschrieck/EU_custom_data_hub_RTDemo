@@ -2,6 +2,7 @@
   "_description": "Demo-mode overrides for the VAT Fraud Detection agent. Each entry short-circuits the real agent subprocess for transactions matching the 'match' criteria, returning a pre-canned result after the configured 'delay_seconds'. This avoids the ~1 min LLM+RAG round-trip on cases we want to showcase deterministically. Edit this file in place, then POST /api/simulation/reset (or click Reset on the Simulation page) to apply. Changes are picked up on the next agent invocation — no server restart needed.",
   "_fields": {
     "name":            "human-readable identifier for this override (log line uses it)",
+    "enabled":         "boolean — set to false to keep the entry in the file but skip it. Default is true if the field is missing.",
     "match.seller_name": "exact Seller_Name match (case-sensitive); omit or leave empty to match any seller",
     "match.item_description_contains": "substring match (case-insensitive) against the tx item_description; omit or leave empty to match any description",
     "delay_seconds":   "integer — how many real seconds to wait before returning the pre-canned result. Simulates the thinking time of the real agent. Set to 0 for an instant response.",
@@ -12,6 +13,7 @@
   "overrides": [
     {
       "name": "shenzhen_bone_conduction",
+      "enabled": false,
       "match": {
         "seller_name": "ShenZhen TechGlobal Co.",
         "item_description_contains": "bone conduction"

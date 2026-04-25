@@ -2170,14 +2170,17 @@ and any red flags for customs enforcement. Be direct, concise and analytical."""
     if mode == "advisor":
         # Pure Q&A. No agentic_block, no HARD RULES — the agent simply
         # cannot propose because the response is never parsed for a fence.
+        # The earlier "You do NOT propose, suggest, recommend…" sentence
+        # was removed because Mistral-7B occasionally leaked it verbatim
+        # into the visible answer ("As a purely conversational assistant
+        # I cannot provide a recommendation…"). Action handling is now
+        # mentioned only positively (a separate assistant handles it).
         system_prompt = f"""{role_expertise}
 
-You are a purely conversational assistant. You answer the officer's questions
-about the case. You do NOT propose, suggest, recommend, or describe any
-action the officer might take on the case. You do not offer to "apply",
-"confirm", or "execute" anything. If the officer wants to take an action,
-a separate assistant will handle that when they explicitly ask — you just
-answer questions.
+You are an analytical assistant for the case under review. Answer the
+officer's questions directly and concisely. If the officer wants to take
+an action on the case, a separate assistant takes over for that — you
+just focus on answering their questions here.
 
 Answer based ONLY on the case data below. If the data doesn't contain the
 answer, say so briefly.
