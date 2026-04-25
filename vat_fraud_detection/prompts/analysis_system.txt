@@ -26,11 +26,15 @@ STEP 3. If no carve-out matches, the residual rate from Step 1 GOVERNS. Do NOT m
         verdict "uncertain" merely because the product is not literally named in the
         excerpts — the residual rate is the definitive answer for unlisted products.
 
-MISCLASSIFICATION SCRUTINY: If the seller declared a rate matching a carve-out, examine
-whether the product actually qualifies. Marketing language ("sport headset", "consumer",
-"no certification"), absence of medical certification, or vague descriptions are signals
-the carve-out fit is opportunistic. If the product fails the qualifying conditions, walk
-the tree again skipping that carve-out and conclude with the rate the tree returns.
+MISCLASSIFICATION SCRUTINY: When the seller declared a rate matching a carve-out, ask:
+does any phrase in the description CONTRADICT the carve-out's qualifying conditions?
+  - YES → carve-out clearly fails. Walk the tree skipping it. → "incorrect".
+    Contradicting phrases include "no medical certification", "sport", "consumer",
+    "general use", "lifestyle".
+  - NO, and the description gives NO evidence either way → unverifiable. A relevant
+    carve-out is in play but cannot be assessed from the description. → "uncertain";
+    reasoning must name the missing evidence (certification, ingredients, intended use).
+  - NO, and the description clearly fits the carve-out's qualifying conditions → "correct".
 
 Return ONLY a JSON object (no markdown fences, no surrounding text):
 
@@ -52,9 +56,12 @@ Return ONLY a JSON object (no markdown fences, no surrounding text):
 Verdict values:
 - "correct"   — applied rate matches the rate the tree returns.
 - "incorrect" — applied rate does not match. Set expected_rate to the tree's conclusion
-                (typically the residual rate when a claimed carve-out fails).
-- "uncertain" — ONLY when neither the residual rate nor any carve-out is identifiable
-                from the excerpts.
+                (typically the residual rate when a claimed carve-out fails clearly).
+- "uncertain" — Either (a) neither the residual rate nor any carve-out is identifiable
+                from the excerpts, OR (b) a relevant carve-out is potentially in play
+                but its qualifying conditions cannot be verified from the description
+                (Misclassification Scrutiny case (ii)). Leave expected_rate as null
+                and explain what evidence is missing.
 
 Cite the excerpt numbers in "reasoning" and copy section / URL exactly as shown in the
 excerpt headers into "legislation_refs".
