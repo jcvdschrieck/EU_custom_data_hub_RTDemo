@@ -44,15 +44,22 @@ if (-not (Have python)) {
     # winget updates the machine PATH; this process needs a refresh.
     $env:Path = [System.Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path', 'User')
 }
-# Outer quotes MUST be single — PowerShell parses `%` inside double-quoted
-# strings as the ForEach-Object operator and trips over `%d.%d %` in the
-# Python format expression. Single-quoted strings are literal.
-$pyVer = (& python -c 'import sys; print("%d.%d" % sys.version_info[:2])').Trim()
-$pyMajor, $pyMinor = $pyVer.Split('.') | ForEach-Object { [int]$_ }
-if ($pyMajor -lt 3 -or ($pyMajor -eq 3 -and $pyMinor -lt 11)) {
-    Write-Error "Python $pyVer is too old (need 3.11+)."
+# Parse the version out of `python --version` rather than running Python -c
+# with an inline format string. PowerShell on Windows mangles the quotes
+# around `-c` arguments differently across major versions (5.1 vs 7+),
+# turning `'%d.%d' % sys.version_info[:2]` into `%d.%d % sys.version_info`
+# inside Python — a SyntaxError. `python --version` prints a single
+# unambiguous line ("Python 3.11.5") that we can regex-match.
+$pyVerOutput = (& python --version 2>&1 | Out-String).Trim()
+if ($pyVerOutput -notmatch 'Python\s+(\d+)\.(\d+)') {
+    Write-Error "Could not parse Python version from output: $pyVerOutput"
 }
-Write-Host "✓ Python $pyVer"
+$pyMajor = [int]$Matches[1]
+$pyMinor = [int]$Matches[2]
+if ($pyMajor -lt 3 -or ($pyMajor -eq 3 -and $pyMinor -lt 11)) {
+    Write-Error "Python $pyMajor.$pyMinor is too old (need 3.11+)."
+}
+Write-Host "✓ Python $pyMajor.$pyMinor"
 
 # ── Node.js 18+ ─────────────────────────────────────────────────────────
 if (-not (Have node)) {
@@ -63,11 +70,17 @@ if (-not (Have node)) {
     winget install -e --id OpenJS.NodeJS.LTS --accept-package-agreements --accept-source-agreements
     $env:Path = [System.Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path', 'User')
 }
-$nodeMajor = [int](& node -p 'process.versions.node.split(".")[0]').Trim()
-if ($nodeMajor -lt 18) {
-    Write-Error "Node.js is too old (need 18+)."
+# Parse `node -v` output ("v20.10.0") rather than `node -p '<JS>'` for the
+# same quote-robustness reason as the Python check above.
+$nodeVerOutput = (& node -v 2>&1 | Out-String).Trim()
+if ($nodeVerOutput -notmatch '^v(\d+)\.') {
+    Write-Error "Could not parse Node version from output: $nodeVerOutput"
 }
-Write-Host "✓ Node.js $((& node -v).Trim())"
+$nodeMajor = [int]$Matches[1]
+if ($nodeMajor -lt 18) {
+    Write-Error "Node.js $nodeVerOutput is too old (need 18+)."
+}
+Write-Host "✓ Node.js $nodeVerOutput"
 
 # ── Python venv + deps ──────────────────────────────────────────────────
 $venvDir = Join-Path $ScriptDir '.venv'
@@ -115,8 +128,10 @@ LM_STUDIO_MODEL=$($config.LM_STUDIO_MODEL)
 # out when huggingface_hub >= 1.7 tries to reach hub.hf.co on every
 # SentenceTransformer() init.
 Write-Host "==> Warming the Hugging Face embedder cache (~90 MB, one-off)"
-# Single-quoted so PowerShell doesn't try to interpolate anything.
-& $venvPython -c 'from sentence_transformers import SentenceTransformer; SentenceTransformer("all-MiniLM-L6-v2")'
+# Run via a tiny script file rather than -c '…' so PowerShell quoting
+# can't mangle the inline Python (same lesson as the python --version
+# check earlier).
+& $venvPython (Join-Path $ScriptDir 'scripts\warm_hf_cache.py')
 
 # ── Seed databases ──────────────────────────────────────────────────────
 Write-Host "==> Seeding databases"

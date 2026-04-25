@@ -143,7 +143,7 @@ EOF
 # every SentenceTransformer() init (see lib/embedder.py for the offline
 # mode that this cache-warm underpins).
 echo "==> Warming the Hugging Face embedder cache (~90 MB, one-off)"
-python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+python scripts/warm_hf_cache.py
 
 # ── Step 8: seed databases ──────────────────────────────────────────────
 echo "==> Seeding databases"
