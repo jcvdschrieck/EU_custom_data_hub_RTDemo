@@ -91,6 +91,15 @@ export function VATAssessmentSection({
     );
     return labels.size === 1 ? [...labels][0] : null;
   })();
+  // AI-suggested subcategory: the schema does not persist one (the
+  // analyser only emits a parent category). For the ShenZhen showcase
+  // we hard-script EL-02 → "Consumer electronics — general" so the
+  // AI-Suggested VAT row reads with the same depth as the Declared row.
+  // Other cases keep showing the parent category alone.
+  const aiSuggestedSubcategoryDisplay =
+    caseData.seller === "ShenZhen TechGlobal Co."
+      ? "Consumer electronics — general"
+      : null;
   const formatCategoryWithSub = (
     category: string,
     sub: string | null | undefined,
@@ -203,7 +212,7 @@ export function VATAssessmentSection({
             <tbody>
               <tr className="border-b border-border">
                 <td className="px-3 py-2 text-card-foreground">
-                  {formatCategoryWithSub(aiSuggestedCategory, null)}
+                  {formatCategoryWithSub(aiSuggestedCategory, aiSuggestedSubcategoryDisplay)}
                 </td>
                 <td className="px-3 py-2 text-right text-card-foreground">{aiVatRate.toFixed(2)}%</td>
                 <td className="px-3 py-2 text-right text-card-foreground">€{totalItemValue.toFixed(2)}</td>

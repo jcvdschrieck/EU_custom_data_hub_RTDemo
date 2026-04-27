@@ -110,7 +110,8 @@ function getBaseProductFromOrders(orders: { productDescription: string }[]): str
   const text = orders.map((o) => o.productDescription.toLowerCase()).join(" ");
   const map: { match: RegExp; label: string }[] = [
     { match: /airpod|earbud|earphone/, label: "Wireless Earbuds" },
-    { match: /headphone/, label: "Headphones" },
+    { match: /open[ -]?ear|bone conduction/, label: "Open-Ear Headset" },
+    { match: /headphone|headset/, label: "Headphones" },
     { match: /iphone|galaxy|pixel|smartphone|mobile phone/, label: "Smartphone" },
     { match: /macbook|laptop|notebook/, label: "Laptop" },
     { match: /ipad|learning tablet|kids tablet/, label: "Tablet" },

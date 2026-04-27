@@ -2134,9 +2134,9 @@ def _compute_customs_recommendation(case: dict) -> tuple[str, str]:
       1. If the descriptions on this case are too vague to judge the
          nature of the goods, we can neither safely retain nor release
          → recommend requesting clarification from a third party.
-      2. Otherwise, look at how past closed cases from the same seller
-         on the same declared category going to the same destination
-         were resolved:
+      2. Otherwise, look at how past closed cases on the same declared
+         product category going to the same destination were resolved
+         (any seller — see get_previous_cases for the rationale):
            ≥ 75 % retained   → the pattern is a retain; recommend
                                retaining for inspection.
            ≤ 25 % retained   → the pattern is a release; recommend
@@ -2182,30 +2182,30 @@ def _compute_customs_recommendation(case: dict) -> tuple[str, str]:
     retPct = (retained / total) if total else 0.0
 
     if total == 0:
-        base = (f"No past closed cases are on record for seller "
-                f"\"{seller}\" on {category} going to {destination}. "
-                "With no historical pattern to justify holding the goods, "
-                "the default recommendation is to release.")
+        base = (f"No past closed cases are on record on {category} going to "
+                f"{destination}. With no historical pattern to justify "
+                "holding the goods, the default recommendation is to "
+                "release.")
         return ("Recommend Release",
                 base + _confirming_signals_text(case, retain_leaning=False))
     if retPct > 0.75:
-        base = (f"{retained} of the {total} past closed cases for seller "
-                f"\"{seller}\" on {category} going to {destination} ended "
+        base = (f"{retained} of the {total} past closed cases similar to "
+                f"this one (same product category, same destination) ended "
                 f"in retention ({retPct*100:.0f}%). The historical pattern "
                 "strongly points to retainment — the goods should be held "
                 "for further inspection.")
         return ("Recommend Control",
                 base + _confirming_signals_text(case, retain_leaning=True))
     if retPct < 0.25:
-        base = (f"Only {retained} of the {total} past closed cases for "
-                f"seller \"{seller}\" on {category} going to {destination} "
+        base = (f"Only {retained} of the {total} past closed cases similar "
+                f"to this one (same product category, same destination) "
                 f"ended in retention ({retPct*100:.0f}%). The historical "
                 "pattern indicates low risk on this kind of shipment — "
                 "the recommendation is to release.")
         return ("Recommend Release",
                 base + _confirming_signals_text(case, retain_leaning=False))
-    base = (f"{retained} of the {total} past closed cases for seller "
-            f"\"{seller}\" on {category} going to {destination} ended in "
+    base = (f"{retained} of the {total} past closed cases similar to this "
+            f"one (same product category, same destination) ended in "
             f"retention ({retPct*100:.0f}%). The history is inconclusive, "
             "so a Tax Authority review is recommended before deciding.")
     return ("Submit for Tax Review",
@@ -2222,9 +2222,9 @@ def _compute_tax_recommendation(case: dict) -> tuple[str, str]:
     Context/Rules in App.pptx slide 1 row 5):
       1. If the total VAT gap on the case is below €1, there is no
          material tax exposure → no/limited risk.
-      2. Otherwise, look at how past closed cases from the same seller
-         on the same declared category going to the same destination
-         were resolved:
+      2. Otherwise, look at how past closed cases on the same declared
+         product category going to the same destination were resolved
+         (any seller — see get_previous_cases for the rationale):
            ≥ 75 % retained → the pattern backs the gap; confirm risk.
            in-between or no history → evidence is not strong enough on
                                       its own; request third-party input.
@@ -2271,8 +2271,8 @@ def _compute_tax_recommendation(case: dict) -> tuple[str, str]:
 
     if retPct > 0.75:
         base = (f"A VAT gap of €{abs_gap:.2f} has been calculated on this "
-                f"case. {retained} of the {total} past closed cases for "
-                f"seller \"{seller}\" on {category} going to {destination} "
+                f"case. {retained} of the {total} past closed cases similar "
+                f"to this one (same product category, same destination) "
                 f"ended in retention ({retPct*100:.0f}%). The historical "
                 "pattern backs the gap detected on this case — the tax "
                 "risk is confirmed.")
@@ -2280,16 +2280,16 @@ def _compute_tax_recommendation(case: dict) -> tuple[str, str]:
                 base + _confirming_signals_text(case, retain_leaning=True))
     if total == 0:
         base = (f"A VAT gap of €{abs_gap:.2f} has been calculated on this "
-                f"case, but there are no past closed cases on record for "
-                f"seller \"{seller}\" on {category} going to {destination} "
-                "to reinforce or contradict the finding. The AI is unable "
-                "to make a confident recommendation on this case — the "
-                "officer's judgement is required.")
+                f"case, but there are no past closed cases on record on "
+                f"{category} going to {destination} to reinforce or "
+                "contradict the finding. The AI is unable to make a "
+                "confident recommendation on this case — the officer's "
+                "judgement is required.")
         return ("AI Uncertain",
                 base + _confirming_signals_text(case, retain_leaning=True))
     base = (f"A VAT gap of €{abs_gap:.2f} has been calculated on this "
             f"case, but only {retained} of the {total} past closed cases "
-            f"for seller \"{seller}\" on {category} going to {destination} "
+            f"similar to this one (same product category, same destination) "
             f"ended in retention ({retPct*100:.0f}%). The historical "
             "pattern is not strong enough on its own to confirm or dismiss "
             "the finding — the AI is unable to make a confident "
