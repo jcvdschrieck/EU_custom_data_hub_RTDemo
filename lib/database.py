@@ -1807,6 +1807,21 @@ def update_sales_order_status(business_key: str, status: str) -> bool:
     return changed
 
 
+def update_sales_order_statuses_for_case(case_id: str, status: str) -> int:
+    """Apply a status to every Sales_Order belonging to a case.
+    Used when the C&T officer's terminal verdict on a case must propagate
+    to all the orders grouped under it (a case can hold many orders)."""
+    conn = _connect(INVESTIGATION_DB)
+    with conn:
+        cur = conn.execute(
+            "UPDATE Sales_Order SET Status = ?, Update_time = ? WHERE Case_ID = ?",
+            (status, datetime.now(timezone.utc).isoformat(), case_id),
+        )
+    changed = cur.rowcount
+    conn.close()
+    return changed
+
+
 def seed_open_cases_if_empty() -> int:
     """Copy all rows from data/seed_cases.db into investigation.db when
     the latter currently has zero cases. Idempotent: a no-op if cases

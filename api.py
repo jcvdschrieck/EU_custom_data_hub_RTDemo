@@ -1610,29 +1610,48 @@ def api_rg_case_detail(case_id: str):
 
 
 async def _publish_investigation_outcome(case_id: str, outcome: str) -> None:
-    """Emit the C&T factory's exit event when a case is closed."""
-    from lib.database import get_case_hydrated
+    """Emit the C&T factory's exit event when a case is closed.
+
+    A case groups many Sales_Orders (linked via Sales_Order.Case_ID), and
+    each order needs to inherit the case's terminal verdict so downstream
+    consumers (the simulation pipeline, audit log, etc.) can act on the
+    individual order. We therefore fan out one INVESTIGATION_OUTCOME event
+    per order rather than a single case-level event."""
+    from lib.database import get_case_hydrated, get_case_orders
     case = get_case_hydrated(case_id)
     if not case:
         return
-    await broker.publish(INVESTIGATION_OUTCOME, {
-        "Case_ID":                  case_id,
-        # order_id is used by build_file_payload to derive the filename
-        # so each case gets its own persisted event file (not "unknown").
-        "order_id":                 case.get("Sales_Order_Business_Key") or case_id,
-        "Sales_Order_Business_Key": case.get("Sales_Order_Business_Key"),
-        "Sales_Order_ID":           case.get("Sales_Order_ID"),
-        "outcome":                  outcome,   # released | retained | refused
-        "Proposed_Action_Customs":  case.get("Proposed_Action_Customs"),
-        "Proposed_Action_Tax":      case.get("Proposed_Action_Tax"),
-        "VAT_Gap_Fee":              case.get("VAT_Gap_Fee"),
+    orders = get_case_orders(case_id)
+    # Fallback: if for any reason no orders are linked, still emit the
+    # case-level event using the anchor key so the close isn't silent.
+    if not orders:
+        orders = [{
+            "Sales_Order_Business_Key": case.get("Sales_Order_Business_Key"),
+            "Sales_Order_ID":           case.get("Sales_Order_ID"),
+        }]
+    case_level_fields = {
+        "Case_ID":                          case_id,
+        "outcome":                          outcome,   # released | retained | refused
+        "Proposed_Action_Customs":          case.get("Proposed_Action_Customs"),
+        "Proposed_Action_Tax":              case.get("Proposed_Action_Tax"),
+        "VAT_Gap_Fee":                      case.get("VAT_Gap_Fee"),
         "Recommended_Product_Value":        case.get("Recommended_Product_Value"),
         "Recommended_VAT_Product_Category": case.get("Recommended_VAT_Product_Category"),
         "Recommended_VAT_Rate":             case.get("Recommended_VAT_Rate"),
         "Recommended_VAT_Fee":              case.get("Recommended_VAT_Fee"),
-        "closed_by":                case.get("Updated_by"),
-        "closed_at":                case.get("Update_time"),
-    })
+        "closed_by":                        case.get("Updated_by"),
+        "closed_at":                        case.get("Update_time"),
+    }
+    for o in orders:
+        bk = o.get("Sales_Order_Business_Key")
+        await broker.publish(INVESTIGATION_OUTCOME, {
+            **case_level_fields,
+            # order_id is used by build_file_payload to derive the filename
+            # so each order gets its own persisted event file.
+            "order_id":                 bk or o.get("Sales_Order_ID") or case_id,
+            "Sales_Order_Business_Key": bk,
+            "Sales_Order_ID":           o.get("Sales_Order_ID"),
+        })
 
 
 def _emit_case_updated_sse(case_id: str, action: str) -> None:
@@ -2383,12 +2402,12 @@ async def api_rg_customs_action(case_id: str, body: dict):
     if action in ("retainment", "release", "refused"):
         action_map = {"retainment": "retain", "release": "release", "refused": "refuse"}
         updates["Proposed_Action_Customs"] = action_map[action]
-        from lib.database import update_sales_order_status
+        from lib.database import update_sales_order_statuses_for_case
         from lib import sales_order_statuses as SO_STATUS
-        bk = case.get("Sales_Order_Business_Key")
-        if bk:
-            so_status = SO_STATUS.TO_BE_RELEASED if action == "release" else SO_STATUS.TO_BE_RETAINED
-            update_sales_order_status(bk, so_status)
+        # The terminal verdict applies to every order in the case, not just
+        # the anchor order recorded on Sales_Order_Case.
+        so_status = SO_STATUS.TO_BE_RELEASED if action == "release" else SO_STATUS.TO_BE_RETAINED
+        update_sales_order_statuses_for_case(case_id, so_status)
 
     # Append to communication log
     comm = case.get("Communication", [])
