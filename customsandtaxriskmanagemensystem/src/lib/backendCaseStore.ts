@@ -188,6 +188,7 @@ export function backendCaseToCase(bc: BackendCase): Case {
         vatPercent: Math.round((o.VAT_Rate ?? 0) * 100),
         vatValue: o.VAT_Fee ?? 0,
         vatSubcategoryCode: o.VAT_Subcategory_Code ?? null,
+        vatSubcategoryName: o.VAT_Subcategory_Name ?? null,
       }))
     : [{
         id: bc.Sales_Order_ID ?? bc.Sales_Order_Business_Key,

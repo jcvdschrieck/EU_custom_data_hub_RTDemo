@@ -12,6 +12,11 @@ export interface Order {
   // VAT product subcategory code from the transaction (e.g. EL-07).
   // Nullable on historical / seeded cases that pre-date the field.
   vatSubcategoryCode?: string | null;
+  // Human-readable name resolved from the code via lib.vat_dataset
+  // (e.g. "Hearing aid / medical audio device"). Backend-resolved so
+  // the taxonomy stays single-sourced. Null when the code doesn't
+  // exist in the taxonomy or no code is set on the order.
+  vatSubcategoryName?: string | null;
 }
 
 export interface ActivityEntry {

@@ -109,6 +109,11 @@ CASE_1 = {
     "engine_ml":         0.20,
     "engine_ie_wl":      0.0,
     "engine_vagueness":  0.10,
+    # Force the first three ShenZhen orders to fire BEFORE anything in the
+    # main dataset (whose earliest tx sits at SIM_START_DT + 0.5 s). With
+    # these offsets, ShenZhen is guaranteed to be the first case the operator
+    # sees on the Customs dashboard after Start.
+    "head_offsets_s":    [0.1, 0.2, 0.3],
 }
 
 CASE_2 = {
@@ -150,9 +155,20 @@ def _build_tx_rows(case: dict, rng: random.Random) -> list[dict]:
     base    = case["base_value"]
     rows: list[dict] = []
 
-    # Distribute the first 120 seconds evenly across the cluster.
+    # Optional head-offsets: the first len(head_offsets_s) orders use these
+    # exact offsets (in seconds after SIM_START_DT), the rest are evenly
+    # distributed across [5, 120] s as before. Used to pre-empt the main
+    # dataset for the showcase cluster.
+    head_offsets_s = case.get("head_offsets_s") or []
+    n_head = len(head_offsets_s)
+    n_tail = max(1, case["n_orders"] - n_head)
+
     for i in range(case["n_orders"]):
-        offset_s = 5 + (115 * i) / max(1, case["n_orders"] - 1)
+        if i < n_head:
+            offset_s = head_offsets_s[i]
+        else:
+            j = i - n_head
+            offset_s = 5 + (115 * j) / max(1, n_tail - 1)
         ts = (SIM_START_DT + timedelta(seconds=offset_s)).isoformat()
 
         value = round(rng.uniform(base * 0.894, base * 1.118), 2)
@@ -208,10 +224,22 @@ _HIST_OUTCOMES = [
     # This is the showcase flow: the case visibly travels Customs → Tax
     # → back to Customs, and the operator interacts with the fraud
     # agent + tax conversational agent along the way.
-    ("retain",  "2025-11-12"),
-    ("retain",  "2026-01-08"),
-    ("release", "2025-12-04"),
-    ("release", "2026-02-17"),
+    #
+    # Sellers are deliberately DIFFERENT from CASE_1's seller (ShenZhen
+    # TechGlobal Co.): in the showcase, ShenZhen is framed as a brand-new
+    # seller with no prior history of his own. The "Previous cases" panel
+    # (and the Customs/Tax retention rule) match on (category, destination)
+    # only — see lib.database.get_previous_cases — so these four still surface
+    # as relevant precedents even though they're under different sellers.
+    # Tuple shape: (action, date, seller_name, origin_country)
+    # Origin uses the full English country name to stay consistent with
+    # the rest of historical_cases.db (which is populated by
+    # lib.historical_seeder via vat_dataset, returning names like "India"
+    # rather than ISO-2 codes).
+    ("retain",  "2025-11-12", "Guangzhou Audio Industries Ltd.", "China"),
+    ("retain",  "2026-01-08", "Tokyo SoundWave Co.",             "Japan"),
+    ("release", "2025-12-04", "Seoul Acoustics Corp.",           "South Korea"),
+    ("release", "2026-02-17", "Bangalore Electro Solutions",     "India"),
 ]
 
 
@@ -224,8 +252,6 @@ def _inject_historical_cases(case: dict) -> int:
     conn = _connect(HISTORICAL_CASES_DB)
 
     rng = random.Random(42)
-    seller       = vat_dataset.seller_by_name(case["seller_name"])
-    origin       = seller["origin"] if seller else "CN"
     inserted = 0
 
     with conn:
@@ -244,7 +270,7 @@ def _inject_historical_cases(case: dict) -> int:
             conn.execute("DELETE FROM Sales_Order_Risk WHERE Sales_Order_Business_Key = ?", (bk,))
             conn.execute("DELETE FROM Sales_Order WHERE Sales_Order_Business_Key = ?", (bk,))
 
-        for action, ts_case in _HIST_OUTCOMES:
+        for action, ts_case, hist_seller, hist_origin in _HIST_OUTCOMES:
             case_id = f"CASE-H-DEMO-{uuid.UUID(int=rng.getrandbits(128)).hex[:8].upper()}"
             so_bk   = f"SOH-DEMO-{uuid.UUID(int=rng.getrandbits(128)).hex[:12].upper()}"
 
@@ -268,8 +294,8 @@ def _inject_historical_cases(case: dict) -> int:
                     "val":    value,
                     "rate":   applied,
                     "fee":    vat_fee,
-                    "seller": case["seller_name"],
-                    "origin": origin,
+                    "seller": hist_seller,
+                    "origin": hist_origin,
                     "dest":   case["destination"],
                     "ts":     f"{ts_case} 10:00",
                     "cid":    case_id,

@@ -1589,7 +1589,7 @@ def _jaccard_words(a: str, b: str) -> float:
 def get_previous_cases(seller: str, category: str = "", destination: str = "",
                        exclude_case_id: str = "",
                        limit: int = 20) -> list[dict]:
-    """Return past CLOSED cases keyed on (seller, category, destination).
+    """Return past CLOSED cases keyed on (category, destination).
 
     Reads from historical_cases.db (populated once by
     lib.historical_seeder). That DB is independent of investigation.db
@@ -1597,15 +1597,16 @@ def get_previous_cases(seller: str, category: str = "", destination: str = "",
     investigations, not just the cases the current sim happens to
     have closed.
 
-    Slide 1 row 3 of Rules in App.pptx defines the historical-case key
-    as Same seller / Same category / Similar description / Same
-    destination. We enforce the first three SQL-side; description
+    The matching key is intentionally seller-agnostic so a brand-new
+    seller (with no closed history of his own) still surfaces relevant
+    precedents on the same (category, destination) lane. Description
     similarity is applied by the caller via the AI Analysis rule engine.
-    When category / destination are omitted we fall back to seller only
-    (used by legacy callers that haven't been migrated yet)."""
+    The `seller` parameter is kept in the signature for backwards
+    compatibility with existing call sites but is no longer used in the
+    SQL filter."""
     conn = _connect(HISTORICAL_CASES_DB)
-    where = ["o.Seller_Name = ?", "c.Case_ID != ?", "c.Status = 'Closed'"]
-    params: list = [seller, exclude_case_id]
+    where = ["c.Case_ID != ?", "c.Status = 'Closed'"]
+    params: list = [exclude_case_id]
     if category:
         where.append("o.HS_Product_Category = ?")
         params.append(category)
@@ -2008,6 +2009,7 @@ def get_case_orders(case_id: str) -> list[dict]:
 
 def _hydrate_with_orders(r, conn) -> dict:
     """Hydrate a case row and attach all its orders."""
+    from lib.vat_dataset import SUBCATEGORY_BY_CODE
     d = _hydrate_row(r)
     case_id = d.get("Case_ID")
     if case_id:
@@ -2023,7 +2025,17 @@ def _hydrate_with_orders(r, conn) -> dict:
             WHERE o.Case_ID = ?
             ORDER BY o.Sales_Order_ID
         """, (case_id,)).fetchall()
-        d["orders"] = [dict(o) for o in orders]
+        # Resolve the human-readable subcategory name from the taxonomy
+        # so the frontend can display "ELECTRONICS & ACCESSORIES / Hearing
+        # aid / medical audio device" instead of the bare code.
+        rows = []
+        for o in orders:
+            row = dict(o)
+            code = row.get("VAT_Subcategory_Code")
+            entry = SUBCATEGORY_BY_CODE.get(code) if code else None
+            row["VAT_Subcategory_Name"] = entry[1] if entry else None
+            rows.append(row)
+        d["orders"] = rows
     else:
         d["orders"] = []
     # Slide 1 customs + tax recommendations — same rules applied in

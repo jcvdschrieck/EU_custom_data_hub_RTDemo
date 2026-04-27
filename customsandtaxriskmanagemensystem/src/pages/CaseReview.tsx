@@ -442,6 +442,29 @@ export default function CaseReview() {
   const isClosed = caseStatus === "Closed" || caseData.status === "Closed";
   const isAiInvestigating = caseData.status === "AI Investigation in Progress" || caseStatus === "AI Investigation in Progress";
   const orders = caseData.orders;
+  // Case-level declared subcategory: surface it only when every order
+  // agrees on the same code; otherwise treat the case as having no
+  // representative subcategory (mirrors how parent declaredCategory is
+  // already a case-level field, not per order). We prefer the resolved
+  // human-readable name (vatSubcategoryName) over the bare code so the
+  // display reads naturally; fall back to the code if the taxonomy
+  // lookup didn't resolve a name (legacy / unknown codes).
+  const declaredSubcategoryDisplay = (() => {
+    const labels = new Set(
+      orders
+        .map(o => o.vatSubcategoryName ?? o.vatSubcategoryCode)
+        .filter(Boolean) as string[],
+    );
+    return labels.size === 1 ? [...labels][0] : null;
+  })();
+  // Display rule: append "/ <subcategory>" when a subcategory label is
+  // available; otherwise just the parent category. The AI-suggested
+  // category has no persisted subcategory in the current schema, so
+  // calling this with sub=null is the expected behaviour there.
+  const formatCategoryWithSub = (
+    category: string,
+    sub: string | null | undefined,
+  ): string => (sub ? `${category} / ${sub}` : category);
   const valueRange =
     orders.length > 0
       ? `€${Math.min(...orders.map((o) => o.itemValue)).toFixed(2)} – €${Math.max(...orders.map((o) => o.itemValue)).toFixed(2)}`
@@ -1264,7 +1287,9 @@ export default function CaseReview() {
                 <div className="grid grid-cols-2 gap-x-6 gap-y-2">
                   <div className="flex justify-between">
                     <dt className="text-muted-foreground">Declared product category</dt>
-                    <dd className="text-card-foreground">{caseData.declaredCategory}</dd>
+                    <dd className="text-card-foreground">
+                      {formatCategoryWithSub(caseData.declaredCategory, declaredSubcategoryDisplay)}
+                    </dd>
                   </div>
                   <div className="flex justify-between">
                     <dt className="text-muted-foreground">Product description</dt>
@@ -1527,14 +1552,14 @@ export default function CaseReview() {
                         €{declaredVatValue.toFixed(2)}
                       </p>
                       <p className="text-[10px] text-muted-foreground mt-0.5">
-                        {declaredVatRate.toFixed(2)}% — {caseData.declaredCategory}
+                        {declaredVatRate.toFixed(2)}% — {formatCategoryWithSub(caseData.declaredCategory, declaredSubcategoryDisplay)}
                       </p>
                     </div>
                     <div className="rounded-md border border-border p-3">
                       <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Officer Confirmed VAT</p>
                       <p className="text-base font-semibold text-card-foreground mt-1">€{officerVatValue.toFixed(2)}</p>
                       <p className="text-[10px] text-muted-foreground mt-0.5">
-                        {officerVatRate}% — {vatCategory || "—"}
+                        {officerVatRate}% — {vatCategory ? formatCategoryWithSub(vatCategory, null) : "—"}
                       </p>
                     </div>
                     <div className="rounded-md border border-border p-3">
@@ -1804,9 +1829,10 @@ export default function CaseReview() {
                   return (
                     <>
                       <p className="text-xs text-muted-foreground mb-3">
-                        The following similar previous cases were identified, based on seller, declared product
-                        category, product description, country of origin, and the corresponding action taken in the
-                        past.
+                        The following similar previous cases were identified, based on declared product category,
+                        country of destination, product description, and the corresponding action taken in the
+                        past. Seller is intentionally not part of the matching key — a new seller still sees
+                        precedent on the same lane.
                       </p>
                       <div className="flex items-center gap-4 mb-3 flex-wrap">
                         <p className="text-xs text-muted-foreground">Action distribution:</p>
@@ -2275,7 +2301,9 @@ export default function CaseReview() {
             <div className="bg-muted/50 rounded-md p-3 space-y-1 text-xs">
               <p>
                 <span className="text-muted-foreground">Declared Product Category:</span>{" "}
-                <span className="font-medium text-card-foreground">{caseData.declaredCategory}</span>
+                <span className="font-medium text-card-foreground">
+                  {formatCategoryWithSub(caseData.declaredCategory, declaredSubcategoryDisplay)}
+                </span>
               </p>
               <p>
                 <span className="text-muted-foreground">Product Description:</span>{" "}

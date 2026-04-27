@@ -85,6 +85,7 @@ export interface BackendCase {
     Sales_Order_Business_Key: string;
     HS_Product_Category: string | null;
     VAT_Subcategory_Code: string | null;
+    VAT_Subcategory_Name: string | null;
     Product_Description: string | null;
     Product_Value: number | null;
     VAT_Rate: number | null;

@@ -78,6 +78,24 @@ export function VATAssessmentSection({
   const destination = caseData.countryOfDestination;
   const aiSuggestedCategory = caseData.aiSuggestedCategory;
 
+  // Case-level declared subcategory label for the "Declared VAT Product
+  // Category" cell. We surface it only when every order agrees on the
+  // same subcategory; otherwise the case has no representative
+  // subcategory to append. Prefer the resolved human-readable name from
+  // the taxonomy; fall back to the bare code.
+  const declaredSubcategoryDisplay = (() => {
+    const labels = new Set(
+      orders
+        .map((o) => o.vatSubcategoryName ?? o.vatSubcategoryCode)
+        .filter(Boolean) as string[],
+    );
+    return labels.size === 1 ? [...labels][0] : null;
+  })();
+  const formatCategoryWithSub = (
+    category: string,
+    sub: string | null | undefined,
+  ): string => (sub ? `${category} / ${sub}` : category);
+
   // AI-suggested: no subcategory is available (AI only proposes a
   // parent category). Use country standard rate for the destination,
   // fall back to the backend vat_categories rate for the suggested
@@ -148,7 +166,9 @@ export function VATAssessmentSection({
             </thead>
             <tbody>
               <tr className="border-b border-border">
-                <td className="px-3 py-2 text-card-foreground">{caseData.declaredCategory}</td>
+                <td className="px-3 py-2 text-card-foreground">
+                  {formatCategoryWithSub(caseData.declaredCategory, declaredSubcategoryDisplay)}
+                </td>
                 <td className="px-3 py-2 text-right text-card-foreground">{declaredVatRate.toFixed(2)}%</td>
                 <td className="px-3 py-2 text-right text-card-foreground">€{totalItemValue.toFixed(2)}</td>
                 <td className="px-3 py-2 text-right text-card-foreground">€{declaredVatValue.toFixed(2)}</td>
@@ -182,7 +202,9 @@ export function VATAssessmentSection({
             </thead>
             <tbody>
               <tr className="border-b border-border">
-                <td className="px-3 py-2 text-card-foreground">{aiSuggestedCategory}</td>
+                <td className="px-3 py-2 text-card-foreground">
+                  {formatCategoryWithSub(aiSuggestedCategory, null)}
+                </td>
                 <td className="px-3 py-2 text-right text-card-foreground">{aiVatRate.toFixed(2)}%</td>
                 <td className="px-3 py-2 text-right text-card-foreground">€{totalItemValue.toFixed(2)}</td>
                 <td className="px-3 py-2 text-right text-card-foreground">€{aiVatValue.toFixed(2)}</td>
