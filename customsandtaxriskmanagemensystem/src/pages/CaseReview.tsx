@@ -717,6 +717,22 @@ export default function CaseReview() {
     return "other";
   };
 
+  // Surface failures from the action-mutation API calls (taxAction,
+  // customsAction). They were previously fire-and-forget with
+  // `.catch(() => {})`, which silently masked any backend rejection —
+  // local state would update, the success toast would fire, but the
+  // case row in investigation.db would never get the verdict. Channeling
+  // every failure through a single destructive toast + console.error
+  // makes the next regression visible instead of invisible.
+  const reportActionFailure = (operation: string) => (err: unknown) => {
+    console.error(`${operation} POST failed:`, err);
+    toast({
+      variant: "destructive",
+      title: "Backend update failed",
+      description: `${operation} didn't reach the backend — case state may be out of sync. Refresh the page to recover.`,
+    });
+  };
+
   // Core action executor — mirrors the manual Action-dropdown flow so
   // the case-state transition is identical, then navigates back to the
   // dashboard and closes the case tab.
@@ -741,7 +757,7 @@ export default function CaseReview() {
           { id: `agentic-status-${Date.now()}`, timestamp: now, type: "status_update",
             description: `Status changed to Reviewed by Tax.`, by: officer },
         ], { status: "Reviewed by Tax", actionTaken });
-        taxAction(caseData.id, { action, comment, officer }).catch(() => {});
+        taxAction(caseData.id, { action, comment, officer }).catch(reportActionFailure("Tax verdict"));
       } else {
         if (action !== "retainment" && action !== "release"
          && action !== "tax_review" && action !== "input_requested") {
@@ -781,7 +797,7 @@ export default function CaseReview() {
               description: `Status changed to Requested Input by Deemed Importer.`, by: officer },
           ], { status: "Requested Input by Deemed Importer" });
         }
-        customsAction(caseData.id, { action, comment, officer }).catch(() => {});
+        customsAction(caseData.id, { action, comment, officer }).catch(reportActionFailure("Customs action"));
       }
       setActionApplied(true);
       return { ok: true as const, label };
@@ -954,14 +970,15 @@ export default function CaseReview() {
       if (selectedAction === "Confirm Risk" || selectedAction === "No/Limited Risk") {
         // Tax confirms — case is marked "Reviewed by Tax" and returns to Customs (NOT closed)
         returnToCustomsFromTax(caseData.id);
-        persistCaseAction(
+        setCaseAction(
           caseData.id,
           selectedAction === "Confirm Risk" ? "Recommend Control" : "Recommend Release",
         );
         setCaseStatus("Reviewed by Tax");
         appendStatusAndPersist("Reviewed by Tax");
         const backendAction = selectedAction === "Confirm Risk" ? "risk_confirmed" : "no_limited_risk";
-        taxAction(caseData.id, { action: backendAction as any, comment: noteText, officer: "Tax Officer" }).catch(() => {});
+        taxAction(caseData.id, { action: backendAction as any, comment: noteText, officer: "Tax Officer" })
+          .catch(reportActionFailure("Tax verdict"));
         toast({
           title: "Action applied",
           description: `${selectedAction} — case returned to Customs Authority for final action.`,
@@ -979,7 +996,8 @@ export default function CaseReview() {
           closedDate: new Date().toISOString().split("T")[0],
         });
         const backendAction = selectedAction === "Recommend Control" ? "retainment" : "release";
-        customsAction(caseData.id, { action: backendAction as any, comment: noteText, officer: "Customs Officer" }).catch(() => {});
+        customsAction(caseData.id, { action: backendAction as any, comment: noteText, officer: "Customs Officer" })
+          .catch(reportActionFailure("Case close"));
         toast({ title: "Action applied", description: `${selectedAction} — case moved to closed.` });
 
         if (createRule) {
@@ -990,14 +1008,16 @@ export default function CaseReview() {
         submitCaseForTaxReview(caseData.id);
         setCaseStatus("Under Review by Tax");
         appendStatusAndPersist("Under Review by Tax");
-        customsAction(caseData.id, { action: "tax_review", comment: noteText, officer: "Customs Officer" }).catch(() => {});
+        customsAction(caseData.id, { action: "tax_review", comment: noteText, officer: "Customs Officer" })
+          .catch(reportActionFailure("Submit for Tax Review"));
         toast({ title: "Submitted for Tax Review", description: "Case sent to Tax Authority." });
         return;
       } else if (selectedAction === "Request Input from Deemed Importer") {
         requestThirdPartyInput(caseData.id);
         setCaseStatus("Requested Input by Deemed Importer");
         appendStatusAndPersist("Requested Input by Deemed Importer");
-        customsAction(caseData.id, { action: "input_requested", comment: noteText, officer: "Customs Officer" }).catch(() => {});
+        customsAction(caseData.id, { action: "input_requested", comment: noteText, officer: "Customs Officer" })
+          .catch(reportActionFailure("Request Input"));
         toast({ title: "Action applied", description: "Request sent to deemed importer." });
         return;
       }
