@@ -784,7 +784,20 @@ export default function CaseReview() {
         const res = await executeProposal(action, comment);
         setChatLoading(false);
         if (res.ok) {
-          toast({ title: "Action applied", description: `${label} via AI Assistant.` });
+          // The chat-confirm path only fires in Tax view (guarded above).
+          // Surface the downstream Customs recommendation so the officer
+          // knows what the case is being handed back with.
+          const recommendation =
+            action === "risk_confirmed" ? "Recommend Control" :
+            action === "no_limited_risk" ? "Recommend Release" : null;
+          if (recommendation) {
+            toast({
+              title: "Case returned to Customs Authority",
+              description: `Recommendation: ${recommendation}.`,
+            });
+          } else {
+            toast({ title: "Action applied", description: `${label} via AI Assistant.` });
+          }
           setChatMessages(prev => [...prev, {
             role: "assistant",
             text: `Done — ${label} has been applied on case ${caseData.id}. Returning to the dashboard…`,
