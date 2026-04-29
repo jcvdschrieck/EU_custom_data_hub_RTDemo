@@ -5,6 +5,12 @@ backend with an in-memory pub/sub pipeline, two Vite/React frontends,
 four SQLite databases, and an optional locally-hosted LLM. How much
 machine you need depends primarily on **how you run the LLM**.
 
+> Looking for the **software** side (Python / Node version, network
+> endpoints to whitelist, admin-rights requirement, browser support)?
+> See **[PREREQUISITES.md](PREREQUISITES.md)** — this page covers the
+> hardware tier you should aim for; PREREQUISITES covers what software
+> needs to be there before the installer runs.
+
 ---
 
 ## At a glance

@@ -8,9 +8,15 @@ The Customs and Tax operator dashboards ship inside this repo under `customsandt
 >
 > **Use [INSTALL.md](INSTALL.md)** — it's the SharePoint-distributed
 > end-user install guide (download ZIP → extract → run setup → done).
-> No Git, no GitHub knowledge required. See **[HARDWARE.md](HARDWARE.md)**
-> for system requirements and **[QUICKSTART.md](QUICKSTART.md)** for the
-> demo-day cheat sheet.
+> No Git, no GitHub knowledge required.
+>
+> Other end-user docs:
+> - **[PREREQUISITES.md](PREREQUISITES.md)** — software requirements,
+>   network endpoints to whitelist, manual install fallbacks for
+>   locked-down machines.
+> - **[HARDWARE.md](HARDWARE.md)** — RAM/disk/CPU per tier, OS
+>   support matrix.
+> - **[QUICKSTART.md](QUICKSTART.md)** — demo-day cheat sheet.
 >
 > The rest of this README is the **developer reference**: architecture,
 > the Git-based development setup, port wiring, full API reference, and

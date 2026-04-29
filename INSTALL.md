@@ -14,15 +14,22 @@ than just install and demo, see `README.md` § "Development setup".
 
 ### 1.1 Check the requirements
 
-See **[HARDWARE.md](HARDWARE.md)** for the full table. Quick check:
+See **[HARDWARE.md](HARDWARE.md)** for the full hardware table and
+**[PREREQUISITES.md](PREREQUISITES.md)** for software / network /
+permissions detail (especially relevant on locked-down corporate
+machines or behind a firewall). Quick check:
 
 - **8 GB RAM minimum** if you'll use a cloud LLM (OpenAI / Anthropic / Azure)
 - **16 GB RAM** if you want to run the LLM locally via LM Studio
-- **4–10 GB free disk**
+- **2–16 GB free disk** (see [PREREQUISITES.md § 3](PREREQUISITES.md#3-disk-space-breakdown))
 - **Windows 10/11**, **macOS 12+**, or **Ubuntu 22.04+**
 
-Python and Node will be installed automatically by the installer if
-they're not already present, so you don't need them in advance.
+Python 3.11+ and Node 18+ will be installed automatically by the
+installer if they're not already present and you have admin/sudo
+rights. If the auto-install can't run on your machine (corporate
+policy, no admin), see
+[PREREQUISITES.md § 1](PREREQUISITES.md#1-required-software) for the
+manual download links.
 
 ### 1.2 Pick how the AI agent will think
 
