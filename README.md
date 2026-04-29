@@ -4,6 +4,18 @@ A real-time simulation of the European Commission's **Taxation and Customs Union
 
 The Customs and Tax operator dashboards ship inside this repo under `customsandtaxriskmanagemensystem/` (vendored from the companion project [C&T Risk Management System](https://github.com/jcvdschrieck/customsandtaxriskmanagemensystem)).
 
+> ## 📦 Are you here to install and demo, not develop?
+>
+> **Use [INSTALL.md](INSTALL.md)** — it's the SharePoint-distributed
+> end-user install guide (download ZIP → extract → run setup → done).
+> No Git, no GitHub knowledge required. See **[HARDWARE.md](HARDWARE.md)**
+> for system requirements and **[QUICKSTART.md](QUICKSTART.md)** for the
+> demo-day cheat sheet.
+>
+> The rest of this README is the **developer reference**: architecture,
+> the Git-based development setup, port wiring, full API reference, and
+> project structure.
+
 ---
 
 ## Architecture overview
@@ -117,11 +129,13 @@ sudo apt-get install -y nodejs
 
 ---
 
-## Installation
+## Development setup
 
-### Scripted install (recommended for a fresh machine)
+> The Git-based path below is for **developers working on the project
+> itself**. End users installing the demo from SharePoint should use
+> [INSTALL.md](INSTALL.md) instead.
 
-For a colleague installing from a machine with nothing on it, skip the manual steps below and run the one-shot installer:
+### Scripted (recommended for a fresh dev machine)
 
 ```bash
 # macOS / Linux
@@ -139,40 +153,40 @@ cd EU_custom_data_hub_RTDemo
 .\run.ps1
 ```
 
-What the installer does:
-1. Installs Python 3.11+ and Node.js 18+ via `brew` / `apt` / `winget` if missing.
-2. Installs Python + Node dependencies.
-3. Builds the internal frontend into `frontend/dist/`.
-4. Generates `customsandtaxriskmanagemensystem/.env` and `vat_fraud_detection/.env` from `config.env`.
-5. Seeds all four SQLite databases.
+The installer is idempotent and produces the same artefacts as the
+SharePoint package: a `.venv/`, built `frontend/dist/`, generated
+`.env` files, seeded SQLite databases. Re-run after editing
+`config.env` to propagate changes.
 
-Both `vat_fraud_detection/` and `customsandtaxriskmanagemensystem/` are vendored inside this repo, so a single `git clone` pulls the whole stack — no submodules, no sibling-repo clones.
+Both `vat_fraud_detection/` and `customsandtaxriskmanagemensystem/`
+are vendored inside this repo — a single `git clone` pulls the whole
+stack. No submodules, no sibling-repo clones.
 
-The installer is idempotent — re-run it any time after changing `config.env` to regenerate the `.env` files.
-
-**Recommended after install (~5 min)** — build the RAG knowledge base so the VAT Fraud Detection Agent can cite Irish legislation:
+**Recommended after install (~5 min)** — build the RAG knowledge base
+so the VAT Fraud Detection Agent can cite Irish legislation:
 ```bash
 cd vat_fraud_detection && python3 build_knowledge_base.py --minilm-only
 ```
-The installer itself already pre-downloads the embedder model so the agent can run offline; this extra step just populates the legislation index the agent retrieves from at runtime.
 
-#### Customising ports and the LM Studio model
+#### Configurable knobs
 
-Edit `config.env` **before running** `./install.sh`, then re-run the installer if it's already run once. The file holds four knobs:
+`config.env` is the single source of truth for install-time settings.
+The full list of keys + acceptable values is documented in
+[INSTALL.md § Configure](INSTALL.md#3-configure-one-minute), and
+covers:
 
-```
-BACKEND_PORT=8505                                    # FastAPI backend
-CT_FRONTEND_PORT=8080                                # C&T operator dashboard (dev server)
-LM_STUDIO_URL=http://localhost:1234                  # LM Studio local server
-LM_STUDIO_MODEL=mistralai/mistral-7b-instruct-v0.3   # identifier LM Studio is serving
-```
+- **Ports** — `BACKEND_PORT`, `CT_FRONTEND_PORT`
+- **LLM provider** — `LLM_PROVIDER` (`lmstudio` / `openai` /
+  `anthropic` / `azure`), `LLM_MODEL`, `LLM_API_KEY`, `LLM_BASE_URL`
+- **Azure-specific** — `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`,
+  `AZURE_OPENAI_API_VERSION`
+- **LM Studio specifics** — `LM_STUDIO_URL` (legacy alias kept for
+  back-compat)
 
-Changes propagate automatically:
-- `BACKEND_PORT` is read by `run.sh` / `run.ps1` via the `API_PORT` env var, which `lib/config.py` honours. It is also written into `customsandtaxriskmanagemensystem/.env` as `VITE_API_BASE_URL`.
-- `CT_FRONTEND_PORT` is passed to Vite via the `PORT` env var (see `vite.config.ts`).
-- `LM_STUDIO_URL` and `LM_STUDIO_MODEL` are written into `vat_fraud_detection/.env`.
-
-No source files need editing to change ports or the LM Studio model.
+The provider abstraction lives in `vat_fraud_detection/lib/llm_client.py`
+and adapts a uniform `chat(...)` call to LM Studio / OpenAI /
+Anthropic / Azure-OpenAI. Adding a fifth provider is one new adapter
+class plus a branch in the `get_llm_client()` factory.
 
 ---
 

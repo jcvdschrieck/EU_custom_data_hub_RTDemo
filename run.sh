@@ -28,9 +28,16 @@ else
   exit 1
 fi
 
+CT_DIST="$CT_DIR/dist"
+if [[ -f "$CT_DIST/index.html" ]]; then
+  CT_MODE="static (python http.server, dist/)"
+else
+  CT_MODE="dev (npm run dev, requires node_modules)"
+fi
+
 echo "── Starting services ───────────────────────────────────────────"
 echo "  Backend:         http://localhost:${BACKEND_PORT}"
-echo "  C&T dashboard:   http://localhost:${CT_FRONTEND_PORT}"
+echo "  C&T dashboard:   http://localhost:${CT_FRONTEND_PORT}  [${CT_MODE}]"
 echo "  Press Ctrl-C to stop both."
 echo "────────────────────────────────────────────────────────────────"
 
@@ -38,8 +45,15 @@ echo "────────────────────────�
 API_PORT="$BACKEND_PORT" python -m uvicorn api:app --host 0.0.0.0 --port "$BACKEND_PORT" &
 BACKEND_PID=$!
 
-# C&T dashboard — PORT env var drives vite.config.ts
-(cd "$CT_DIR" && PORT="$CT_FRONTEND_PORT" npm run dev) &
+# C&T dashboard — packaged installs ship pre-built dist/ and serve it
+# via Python's http.server (no node at runtime). Dev installs (no
+# dist/) fall back to Vite's dev server.
+if [[ -f "$CT_DIST/index.html" ]]; then
+  (cd "$CT_DIST" && python -m http.server "$CT_FRONTEND_PORT" \
+                                  --bind 0.0.0.0) &
+else
+  (cd "$CT_DIR" && PORT="$CT_FRONTEND_PORT" npm run dev) &
+fi
 CT_PID=$!
 
 cleanup() {

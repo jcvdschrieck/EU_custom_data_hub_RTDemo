@@ -62,9 +62,16 @@ from lib.models import Invoice, VATVerdict, AnalysisResult, LegislationRef
 from lib import rag
 from lib.utils import load_prompt
 
-_LM_BASE_URL = os.getenv("LM_STUDIO_BASE_URL", "http://localhost:1234/v1")
-_LM_MODEL    = os.getenv("LM_STUDIO_ANALYSIS_MODEL",
-               os.getenv("LM_STUDIO_MODEL", "mistralai/mistral-7b-instruct-v0.3"))
+from lib.llm_client import get_llm_client
+
+# Resolved at first call — keeps env-var changes picked up across
+# multiple analyse() invocations without a restart.
+_llm_client = None
+def _get_llm():
+    global _llm_client
+    if _llm_client is None:
+        _llm_client = get_llm_client()
+    return _llm_client
 
 
 def analyse(invoice: Invoice) -> AnalysisResult:
@@ -76,7 +83,6 @@ def analyse(invoice: Invoice) -> AnalysisResult:
     deduplicate across items, then send the combined context to LM Studio
     to produce a verdict per line item.
     """
-    from openai import OpenAI
     from tenacity import retry, stop_after_attempt, wait_exponential
 
     # Retrieve legislation context — one call per line item so the query is
@@ -95,32 +101,24 @@ def analyse(invoice: Invoice) -> AnalysisResult:
     system_prompt = load_prompt("analysis_system.txt")
     invoice_json  = _invoice_summary(invoice)
 
-    # Mistral-family prompt templates loaded in LM Studio reject the
-    # separate "system" role ("Only user and assistant roles are
-    # supported!"). Prepend the instructions to the user turn with
-    # a clear separator — semantically equivalent for a one-shot
-    # query and works with every chat template we ship with.
     user_content = (
-        f"{system_prompt}\n\n"
-        f"-----\n"
         f"## Invoice\n{invoice_json}\n\n"
         f"## Relevant VAT Legislation\n"
         f"{context or 'No legislation documents are available.'}"
     )
 
-    client = OpenAI(base_url=_LM_BASE_URL, api_key="lm-studio")
-
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     def _call() -> str:
-        response = client.chat.completions.create(
-            model=_LM_MODEL,
+        # The LMStudio adapter merges `system` into the first user turn
+        # for Mistral-template safety; OpenAI / Anthropic / Azure
+        # adapters use the proper system field. Same call shape
+        # regardless of provider.
+        return _get_llm().chat(
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_content}],
             max_tokens=4096,
             temperature=0.0,
-            messages=[
-                {"role": "user", "content": user_content},
-            ],
         )
-        return response.choices[0].message.content
 
     raw = _call().strip()
     if raw.startswith("```"):
@@ -186,16 +184,22 @@ def analyse(invoice: Invoice) -> AnalysisResult:
     except (json.JSONDecodeError, KeyError):
         pass
 
+    # Bookkeeping label only — keeps the agent-log "model_used" column
+    # accurate. Reads the same env hierarchy the LMStudioAdapter uses
+    # so the legacy LM_STUDIO_* keys still produce the right answer.
+    _model_label = (os.getenv("LLM_MODEL")
+                    or os.getenv("LM_STUDIO_ANALYSIS_MODEL")
+                    or os.getenv("LM_STUDIO_MODEL", "unknown"))
     result = AnalysisResult(
         invoice=invoice,
         verdicts=verdicts,
         overall_verdict=_overall_verdict(verdicts),
-        model_used=_LM_MODEL,
+        model_used=_model_label,
     )
     analysis_log.write_log(
         invoice_number=invoice.invoice_number or invoice.source_file,
         supplier_name=invoice.supplier_name or "",
-        model_used=_LM_MODEL,
+        model_used=_model_label,
         line_items_count=len(invoice.line_items),
         overall_verdict=result.overall_verdict,
         response_time_ms=(time.perf_counter() - _t0) * 1000,

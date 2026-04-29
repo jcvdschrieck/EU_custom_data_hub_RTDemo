@@ -31,9 +31,13 @@ if (-not (Test-Path $venvPython)) {
     Write-Error "Python venv not found at $(Split-Path -Parent $venvPython). Run .\install.ps1 first."
 }
 
+$ctDist = Join-Path $ctDir 'dist\index.html'
+$ctMode = if (Test-Path $ctDist) { 'static (python http.server, dist\)' }
+          else                   { 'dev (npm run dev, requires node_modules)' }
+
 Write-Host "-- Starting services -------------------------------------------"
 Write-Host "  Backend:       http://localhost:$($config.BACKEND_PORT)"
-Write-Host "  C&T dashboard: http://localhost:$($config.CT_FRONTEND_PORT)"
+Write-Host "  C&T dashboard: http://localhost:$($config.CT_FRONTEND_PORT)  [$ctMode]"
 Write-Host "  Two new PowerShell windows will open. Close them to stop."
 Write-Host "----------------------------------------------------------------"
 
@@ -41,6 +45,12 @@ Write-Host "----------------------------------------------------------------"
 $backendCmd = "`$env:API_PORT='$($config.BACKEND_PORT)'; Set-Location '$ScriptDir'; & '$venvPython' -m uvicorn api:app --host 0.0.0.0 --port $($config.BACKEND_PORT)"
 Start-Process powershell -ArgumentList '-NoExit', '-Command', $backendCmd
 
-# C&T dashboard -- PORT drives vite.config.ts.
-$ctCmd = "`$env:PORT='$($config.CT_FRONTEND_PORT)'; Set-Location '$ctDir'; npm run dev"
+# C&T dashboard -- packaged installs ship pre-built dist\ and serve
+# it via Python's http.server (no node at runtime). Dev installs
+# (no dist\) fall back to Vite's dev server.
+if (Test-Path $ctDist) {
+    $ctCmd = "Set-Location '$ctDir\dist'; & '$venvPython' -m http.server $($config.CT_FRONTEND_PORT) --bind 0.0.0.0"
+} else {
+    $ctCmd = "`$env:PORT='$($config.CT_FRONTEND_PORT)'; Set-Location '$ctDir'; npm run dev"
+}
 Start-Process powershell -ArgumentList '-NoExit', '-Command', $ctCmd

@@ -14,22 +14,47 @@ Set-Location $ScriptDir
 
 # -- Config --------------------------------------------------------------
 $config = [ordered]@{
-    BACKEND_PORT     = '8505'
-    CT_FRONTEND_PORT = '8080'
-    LM_STUDIO_URL    = 'http://localhost:1234'
-    LM_STUDIO_MODEL  = 'mistralai/mistral-7b-instruct-v0.3'
+    BACKEND_PORT             = '8505'
+    CT_FRONTEND_PORT         = '8080'
+    LLM_PROVIDER             = 'lmstudio'
+    LLM_MODEL                = 'mistralai/mistral-7b-instruct-v0.3'
+    LLM_API_KEY              = ''
+    LLM_BASE_URL             = ''
+    LM_STUDIO_URL            = 'http://localhost:1234'
+    LM_STUDIO_MODEL          = 'mistralai/mistral-7b-instruct-v0.3'
+    AZURE_OPENAI_ENDPOINT    = ''
+    AZURE_OPENAI_DEPLOYMENT  = ''
+    AZURE_OPENAI_API_VERSION = '2024-02-15-preview'
 }
 $configFile = Join-Path $ScriptDir 'config.env'
 if (Test-Path $configFile) {
     Get-Content $configFile | ForEach-Object {
-        if ($_ -match '^\s*([A-Z_]+)\s*=\s*(.+?)\s*$') {
+        if ($_ -match '^\s*([A-Z_]+)\s*=\s*(.*)\s*$') {
             $config[$Matches[1]] = $Matches[2]
         }
     }
 }
 
+# Mask the API key in the echoed config so screencaps don't leak it.
+$keyDisplay = if ([string]::IsNullOrEmpty($config.LLM_API_KEY)) { '(unset)' }
+              else { '****' + $config.LLM_API_KEY.Substring([Math]::Max(0, $config.LLM_API_KEY.Length - 4)) }
+
 Write-Host "-- Config -------------------------------------------------------"
-foreach ($k in $config.Keys) { Write-Host ("  {0,-16} = {1}" -f $k, $config[$k]) }
+Write-Host ("  {0,-18} = {1}" -f 'BACKEND_PORT',     $config.BACKEND_PORT)
+Write-Host ("  {0,-18} = {1}" -f 'CT_FRONTEND_PORT', $config.CT_FRONTEND_PORT)
+Write-Host ("  {0,-18} = {1}" -f 'LLM_PROVIDER',     $config.LLM_PROVIDER)
+Write-Host ("  {0,-18} = {1}" -f 'LLM_MODEL',        $config.LLM_MODEL)
+Write-Host ("  {0,-18} = {1}" -f 'LLM_API_KEY',      $keyDisplay)
+if ($config.LLM_BASE_URL) {
+    Write-Host ("  {0,-18} = {1}" -f 'LLM_BASE_URL', $config.LLM_BASE_URL)
+}
+if ($config.LLM_PROVIDER -eq 'lmstudio') {
+    Write-Host ("  {0,-18} = {1}" -f 'LM_STUDIO_URL', $config.LM_STUDIO_URL)
+}
+if ($config.LLM_PROVIDER -eq 'azure') {
+    Write-Host ("  {0,-18} = {1}" -f 'AZURE_ENDPOINT',   $config.AZURE_OPENAI_ENDPOINT)
+    Write-Host ("  {0,-18} = {1}" -f 'AZURE_DEPLOYMENT', $config.AZURE_OPENAI_DEPLOYMENT)
+}
 Write-Host "----------------------------------------------------------------"
 
 function Have($cmd) { [bool](Get-Command $cmd -ErrorAction SilentlyContinue) }
@@ -82,6 +107,10 @@ if ($nodeMajor -lt 18) {
 }
 Write-Host "[OK] Node.js $nodeVerOutput"
 
+# -- Detect packaged-mode artefacts --------------------------------------
+$packaged = Test-Path (Join-Path $ScriptDir '.packaged')
+if ($packaged) { Write-Host "==> Packaged mode detected (.packaged found)" }
+
 # -- Python venv + deps --------------------------------------------------
 $venvDir = Join-Path $ScriptDir '.venv'
 if (-not (Test-Path $venvDir)) {
@@ -89,63 +118,125 @@ if (-not (Test-Path $venvDir)) {
     & python -m venv $venvDir
 }
 $venvPython = Join-Path $venvDir 'Scripts\python.exe'
-Write-Host "==> Installing Python dependencies into venv"
-& $venvPython -m pip install --upgrade pip
-& $venvPython -m pip install -r requirements.txt
+$wheelsDir  = Join-Path $ScriptDir 'wheels'
+$hasWheels  = (Test-Path $wheelsDir) -and ((Get-ChildItem -Path $wheelsDir -Filter '*.whl' -ErrorAction SilentlyContinue).Count -gt 0)
+if ($hasWheels) {
+    Write-Host "==> Installing Python dependencies (offline, from wheels\)"
+    & $venvPython -m pip install --upgrade --no-index --find-links $wheelsDir pip
+    & $venvPython -m pip install --no-index --find-links $wheelsDir -r requirements.txt
+} else {
+    Write-Host "==> Installing Python dependencies from PyPI"
+    & $venvPython -m pip install --upgrade pip
+    & $venvPython -m pip install -r requirements.txt
+}
 
 # -- Internal frontend ---------------------------------------------------
-Write-Host "==> Building internal frontend"
-Push-Location frontend
-& npm install
-& npm run build
-Pop-Location
+$internalDist = Join-Path $ScriptDir 'frontend\dist\index.html'
+if (Test-Path $internalDist) {
+    Write-Host "==> Internal frontend already built (frontend\dist\) -- skipping"
+} else {
+    Write-Host "==> Building internal frontend"
+    Push-Location frontend
+    & npm install
+    & npm run build
+    Pop-Location
+}
 
 # -- C&T frontend (vendored subdirectory) --------------------------------
-# The customsandtaxriskmanagemensystem/ sources ship inside this repo,
-# so there's no separate clone step -- just install its npm deps.
-$ctDir = Join-Path $ScriptDir 'customsandtaxriskmanagemensystem'
-Write-Host "==> Installing C&T frontend dependencies"
-Push-Location $ctDir
-& npm install
-Pop-Location
+$ctDir   = Join-Path $ScriptDir 'customsandtaxriskmanagemensystem'
+$ctDist  = Join-Path $ctDir 'dist\index.html'
+if (Test-Path $ctDist) {
+    Write-Host "==> C&T dashboard already built -- skipping npm install"
+} else {
+    Write-Host "==> Installing C&T frontend dependencies"
+    Push-Location $ctDir
+    & npm install
+    Pop-Location
+}
 
 # -- Generated .env files ------------------------------------------------
 Write-Host "==> Writing $ctDir\.env"
 Set-Content -Path (Join-Path $ctDir '.env') -Value "VITE_API_BASE_URL=http://localhost:$($config.BACKEND_PORT)"
 
 Write-Host "==> Writing vat_fraud_detection\.env"
-@"
-LM_STUDIO_BASE_URL=$($config.LM_STUDIO_URL)/v1
-LM_STUDIO_MODEL=$($config.LM_STUDIO_MODEL)
-"@ | Set-Content -Path (Join-Path $ScriptDir 'vat_fraud_detection\.env')
+$lines = @()
+$lines += '# Generated by install.ps1 from config.env -- do not commit.'
+$lines += "LLM_PROVIDER=$($config.LLM_PROVIDER)"
+$lines += "LLM_MODEL=$($config.LLM_MODEL)"
+if ($config.LLM_API_KEY)  { $lines += "LLM_API_KEY=$($config.LLM_API_KEY)" }
+if ($config.LLM_BASE_URL) { $lines += "LLM_BASE_URL=$($config.LLM_BASE_URL)" }
+$lines += "LM_STUDIO_BASE_URL=$($config.LM_STUDIO_URL)/v1"
+$lines += "LM_STUDIO_MODEL=$($config.LM_STUDIO_MODEL)"
+# Mirror LLM_API_KEY into the provider-specific var so users who only
+# set the generic key still satisfy provider-specific lookups.
+if ($config.LLM_API_KEY) {
+    switch ($config.LLM_PROVIDER) {
+        'openai'    { $lines += "OPENAI_API_KEY=$($config.LLM_API_KEY)" }
+        'anthropic' { $lines += "ANTHROPIC_API_KEY=$($config.LLM_API_KEY)" }
+        'azure'     { $lines += "AZURE_OPENAI_API_KEY=$($config.LLM_API_KEY)" }
+    }
+}
+if ($config.LLM_PROVIDER -eq 'azure') {
+    $lines += "AZURE_OPENAI_ENDPOINT=$($config.AZURE_OPENAI_ENDPOINT)"
+    $lines += "AZURE_OPENAI_DEPLOYMENT=$($config.AZURE_OPENAI_DEPLOYMENT)"
+    $lines += "AZURE_OPENAI_API_VERSION=$($config.AZURE_OPENAI_API_VERSION)"
+}
+$lines -join "`n" | Set-Content -Path (Join-Path $ScriptDir 'vat_fraud_detection\.env')
 
 # -- Warm the HF embedder cache ------------------------------------------
-# Downloads the all-MiniLM-L6-v2 SentenceTransformer weights (~90 MB)
-# into the local HF cache so the VAT Fraud Detection agent can run in
-# offline mode at runtime. Without this, the agent subprocess errors
-# out when huggingface_hub >= 1.7 tries to reach hub.hf.co on every
-# SentenceTransformer() init.
-Write-Host "==> Warming the Hugging Face embedder cache (~90 MB, one-off)"
-# Run via a tiny script file rather than -c '...' so PowerShell quoting
-# can't mangle the inline Python (same lesson as the python --version
-# check earlier).
-& $venvPython (Join-Path $ScriptDir 'scripts\warm_hf_cache.py')
+$hfCacheDir = Join-Path $ScriptDir 'models\hf-cache'
+if (Test-Path $hfCacheDir) {
+    Write-Host "==> HF cache pre-shipped -- appending HF_HOME to .env"
+    Add-Content -Path (Join-Path $ScriptDir 'vat_fraud_detection\.env') `
+                -Value "HF_HOME=$hfCacheDir"
+} else {
+    Write-Host "==> Warming the Hugging Face embedder cache (~90 MB, one-off)"
+    & $venvPython (Join-Path $ScriptDir 'scripts\warm_hf_cache.py')
+}
 
 # -- Seed databases ------------------------------------------------------
-Write-Host "==> Seeding databases"
-& $venvPython seed_databases.py
+$existingDBs = Get-ChildItem -Path (Join-Path $ScriptDir 'data') -Filter '*.db' -ErrorAction SilentlyContinue
+if ($existingDBs.Count -gt 0) {
+    Write-Host "==> Databases already pre-seeded -- skipping"
+} else {
+    Write-Host "==> Seeding databases"
+    & $venvPython seed_databases.py
+}
 
 Write-Host ""
 Write-Host "[DONE] Install complete."
 Write-Host ""
-Write-Host "Next steps:"
-Write-Host "  1. (Optional) Install LM Studio from https://lmstudio.ai and start its"
-Write-Host "     local server with the model '$($config.LM_STUDIO_MODEL)' on $($config.LM_STUDIO_URL)."
-Write-Host "     Without it, the VAT Fraud Detection Agent returns 'uncertain'."
+Write-Host "Active LLM configuration:"
+switch ($config.LLM_PROVIDER) {
+    'lmstudio' {
+        Write-Host "  Provider: LM Studio (local) -- $($config.LM_STUDIO_URL)"
+        Write-Host "  Model:    $($config.LLM_MODEL)"
+        Write-Host "  -> Install LM Studio from https://lmstudio.ai, load this model,"
+        Write-Host "     and click Start Server in the Developer tab before running."
+        Write-Host "     Without LM Studio the agent returns 'uncertain'."
+    }
+    'openai' {
+        Write-Host "  Provider: OpenAI cloud"
+        Write-Host "  Model:    $($config.LLM_MODEL)"
+        Write-Host "  API key:  $keyDisplay"
+    }
+    'anthropic' {
+        Write-Host "  Provider: Anthropic Claude"
+        Write-Host "  Model:    $($config.LLM_MODEL)"
+        Write-Host "  API key:  $keyDisplay"
+    }
+    'azure' {
+        Write-Host "  Provider: Azure OpenAI"
+        Write-Host "  Endpoint: $($config.AZURE_OPENAI_ENDPOINT)"
+        Write-Host "  Deploy:   $($config.AZURE_OPENAI_DEPLOYMENT)"
+        Write-Host "  API key:  $keyDisplay"
+    }
+}
 Write-Host ""
-Write-Host "  2. (Optional, ~5 min) Build the RAG knowledge base:"
+Write-Host "Next steps:"
+Write-Host "  1. (Optional, ~5 min) Build the RAG knowledge base:"
 Write-Host "       cd vat_fraud_detection"
 Write-Host "       python build_knowledge_base.py --minilm-only"
 Write-Host ""
-Write-Host "  3. Launch everything:"
+Write-Host "  2. Launch everything:"
 Write-Host "       .\run.ps1"
