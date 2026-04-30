@@ -83,7 +83,7 @@ try {
         --quiet
     if ($LASTEXITCODE -ne 0) { throw "pip download exit $LASTEXITCODE" }
 } catch {
-    Write-Warning "pip download failed — package will require online install"
+    Write-Warning "pip download failed - package will require online install"
     Remove-Item $WheelsDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
@@ -131,14 +131,14 @@ if (Test-Path (Join-Path $SourceHf 'hub')) {
     New-Item -ItemType Directory -Path $StagedHf -Force | Out-Null
     Copy-Item (Join-Path $SourceHf 'hub') (Join-Path $StagedHf 'hub') -Recurse
 } elseif (Test-Path $WarmScript) {
-    Write-Host "==> Carried HF cache missing — warming on the fly (~90 MB)"
+    Write-Host "==> Carried HF cache missing - warming on the fly (~90 MB)"
     New-Item -ItemType Directory -Path $StagedHf -Force | Out-Null
     try {
         $env:HF_HOME = $StagedHf
         & $pyExe $WarmScript
         if ($LASTEXITCODE -ne 0) { throw "warm_hf_cache exit $LASTEXITCODE" }
     } catch {
-        Write-Warning "HF cache warm failed — package will fetch at install time"
+        Write-Warning "HF cache warm failed - package will fetch at install time"
         Remove-Item (Join-Path $StageDir 'models') -Recurse -Force `
             -ErrorAction SilentlyContinue
     } finally {
@@ -149,15 +149,21 @@ if (Test-Path (Join-Path $SourceHf 'hub')) {
 # -- Step 7: pre-seed databases -------------------------------------------
 Write-Host "==> Seeding databases into staging"
 New-Item -ItemType Directory -Path (Join-Path $StageDir 'data') -Force | Out-Null
+$venvPython = Join-Path $ProjRoot '.venv\Scripts\python.exe'
+$seedPython = if (Test-Path $venvPython) { $venvPython } else { $pyExe }
 Push-Location $StageDir
 try {
-    & $pyExe 'seed_databases.py' *> $null
+    $env:PYTHONUTF8 = '1'
+    & $seedPython 'seed_databases.py'
     if ($LASTEXITCODE -ne 0) { throw "seed exit $LASTEXITCODE" }
 } catch {
-    Write-Warning "Database seed failed — package will seed at install time"
+    Write-Warning "Database seed failed - package will seed at install time"
     Get-ChildItem (Join-Path $StageDir 'data') -Filter '*.db' `
         -ErrorAction SilentlyContinue | Remove-Item -Force
-} finally { Pop-Location }
+} finally {
+    $env:PYTHONUTF8 = $null
+    Pop-Location
+}
 
 # -- Step 8: marker so install.ps1 detects bundled artefacts --------------
 $BuiltAt = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
@@ -172,7 +178,24 @@ Write-Host "==> Compressing to $ZipPath"
 if (Test-Path $ZipPath) { Remove-Item $ZipPath -Force }
 # Compress-Archive on Windows preserves directory structure and is
 # present on every PowerShell 5.1+ install — no external deps.
-Compress-Archive -Path $StageDir -DestinationPath $ZipPath -CompressionLevel Optimal
+# Retry up to 3 times with a short delay: AV scanners can briefly lock
+# newly-written files (e.g. the Vite JS bundles) and cause a first-pass failure.
+$zipDone = $false
+for ($attempt = 1; $attempt -le 3; $attempt++) {
+    try {
+        Compress-Archive -Path $StageDir -DestinationPath $ZipPath -CompressionLevel Optimal
+        $zipDone = $true
+        break
+    } catch {
+        if ($attempt -lt 3) {
+            Write-Host "  Compress attempt $attempt failed (file lock) - retrying in 5s..."
+            Start-Sleep -Seconds 5
+            if (Test-Path $ZipPath) { Remove-Item $ZipPath -Force }
+        } else {
+            throw
+        }
+    }
+}
 
 function Test-Tag([string]$path) {
     if (Test-Path $path) { 'yes' } else { 'no' }
