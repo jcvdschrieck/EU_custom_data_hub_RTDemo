@@ -1,0 +1,208 @@
+EU CUSTOM DATA HUB — INSTALLATION GUIDE (WINDOWS)
+===================================================
+
+The application is delivered as a single ZIP file. Everything it needs
+is already inside — no internet connection is required during installation.
+
+The fraud-detection AI feature is optional and can be set up later
+(see Section 5). All other features work immediately without it.
+
+
+-------------------------------------------------------------------
+SECTION 1 — WHAT YOU NEED BEFORE YOU START
+-------------------------------------------------------------------
+
+  - A Windows 10 or Windows 11 computer
+  - At least 8 GB of RAM
+  - At least 4 GB of free disk space
+  - The ZIP file downloaded from SharePoint
+
+That is all. Python and Node.js are installed automatically if they
+are not already on your computer.
+
+
+-------------------------------------------------------------------
+SECTION 2 — UNZIP THE FILE
+-------------------------------------------------------------------
+
+1. Find the downloaded ZIP file (EU-Custom-Data-Hub-vX.Y.Z-windows.zip).
+
+2. Right-click the ZIP file and select Properties.
+   At the bottom of the Properties window, look for a Security section
+   with an "Unblock" checkbox or button. If you see it, tick it and
+   click OK. This tells Windows the file is safe to use.
+   (If you do not see an "Unblock" option, skip this step.)
+
+3. Right-click the ZIP file again and select "Extract All...".
+   Choose a destination folder. We recommend somewhere simple, such as:
+
+       C:\EU-Custom-Data-Hub
+
+   IMPORTANT: avoid paths that contain spaces, accented characters, or
+   are inside a OneDrive / SharePoint sync folder. These can cause
+   errors during installation.
+
+4. Click Extract. A new folder appears with the application files inside.
+
+
+-------------------------------------------------------------------
+SECTION 3 — OPEN A POWERSHELL WINDOW IN THE APPLICATION FOLDER
+-------------------------------------------------------------------
+
+You will run two commands from inside the application folder. The
+easiest way to open a terminal there:
+
+  ON WINDOWS 11:
+    Open the application folder in Windows Explorer.
+    Right-click on an empty area inside the folder (not on a file).
+    Select "Open in Terminal".
+
+  ON WINDOWS 10:
+    Open the application folder in Windows Explorer.
+    Hold the SHIFT key and right-click on an empty area inside the folder.
+    Select "Open PowerShell window here".
+
+A dark blue or black window (PowerShell) will open, already positioned
+inside the application folder. You are ready for the next step.
+
+  IF NEITHER OPTION APPEARS:
+    Press the Windows key, type "PowerShell", and press Enter.
+    Then type the following (replace the path with your actual folder):
+
+        cd "C:\EU-Custom-Data-Hub\EU-Custom-Data-Hub-v1.0.0-windows"
+
+    Press Enter.
+
+
+-------------------------------------------------------------------
+SECTION 4 — RUN THE INSTALLER
+-------------------------------------------------------------------
+
+In the PowerShell window, type exactly:
+
+    .\install.ps1
+
+Press Enter. The installer will run and print its progress on screen.
+It typically takes 2 to 5 minutes on a first install.
+
+  IF YOU SEE: "running scripts is disabled on this system"
+    Type the following and press Enter:
+
+        Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+
+    Then type .\install.ps1 and press Enter again.
+
+When the installer finishes you will see "[DONE] Install complete."
+
+
+-------------------------------------------------------------------
+SECTION 5 — LAUNCH THE APPLICATION
+-------------------------------------------------------------------
+
+In the same PowerShell window, type:
+
+    .\run.ps1
+
+Press Enter. Two services will start. Leave this window open while
+you are using the application.
+
+Then open a web browser (Chrome or Edge recommended) and go to:
+
+    http://localhost:8505/simulation   <-- the control panel
+    http://localhost:8080/customs-authority   <-- the operator dashboard
+
+Open both addresses. On the control panel page, click the Play button
+(triangle) to start the simulation.
+
+To stop the application, close the PowerShell window.
+
+
+-------------------------------------------------------------------
+SECTION 6 — OPTIONAL: SET UP THE AI FRAUD-DETECTION FEATURE
+-------------------------------------------------------------------
+
+The application runs fully without the AI feature. When the AI is not
+configured, the fraud-detection agent will return "uncertain" instead
+of a verdict — all other screens and functions work normally.
+
+To enable the AI, you need access to one of these services:
+
+  OPTION A — LM Studio (runs entirely on your laptop, free, private)
+    Requires 16 GB RAM and around 6 GB of free disk space.
+    1. Download LM Studio from https://lmstudio.ai and install it.
+    2. Inside LM Studio, search for and download the model:
+           mistralai/mistral-7b-instruct-v0.3
+    3. Open the Developer tab, load the model.
+    4. In the model settings, set Context Length to 8192.
+    5. Click "Start Server".
+    No changes to config.env are needed — LM Studio is the default.
+
+  OPTION B — OpenAI (cloud service, requires an API key)
+    1. Open the file "config.env" in the application folder with
+       Notepad or any text editor.
+    2. Change these two lines:
+           LLM_PROVIDER=openai
+           LLM_MODEL=gpt-4o-mini
+           LLM_API_KEY=your-openai-key-here
+    3. Save the file.
+    4. Re-run .\install.ps1 to apply the change.
+
+  OPTION C — Anthropic Claude (cloud service, requires an API key)
+    1. Open config.env in Notepad.
+    2. Change these lines:
+           LLM_PROVIDER=anthropic
+           LLM_MODEL=claude-sonnet-4-6
+           LLM_API_KEY=your-anthropic-key-here
+    3. Save the file.
+    4. Re-run .\install.ps1 to apply the change.
+
+  OPTION D — Azure OpenAI (your company's Azure deployment)
+    Contact your Azure administrator for the endpoint URL, deployment
+    name, and API key, then fill in config.env accordingly. See
+    INSTALL.md for the full set of Azure fields.
+
+You can switch between options at any time by editing config.env and
+re-running .\install.ps1.
+
+
+-------------------------------------------------------------------
+SECTION 7 — TROUBLESHOOTING
+-------------------------------------------------------------------
+
+The installer says "running scripts is disabled"
+    See the note in Section 4 above.
+
+The installer or launcher fails with a path or permission error
+    Make sure the application folder is not inside a OneDrive or
+    SharePoint sync folder. Move it to C:\EU-Custom-Data-Hub and
+    re-run .\install.ps1.
+
+The browser shows a blank page or "cannot connect"
+    Make sure .\run.ps1 is still running (the PowerShell window
+    must stay open). Try http://localhost:8505 first to confirm
+    the backend started.
+
+The fraud-detection agent always returns "uncertain"
+    The AI feature is not configured or LM Studio is not running.
+    See Section 6 above. The rest of the application is unaffected.
+
+The two demo cases do not appear on the dashboard
+    Click the Reset button on the simulation control page, then
+    click Play again. Wait about two real-time minutes.
+
+Nothing works and I don't know why
+    Scroll up in the PowerShell window to find any error messages
+    shown in red, and send them to the project maintainer.
+
+
+-------------------------------------------------------------------
+SECTION 8 — UNINSTALLING
+-------------------------------------------------------------------
+
+To remove the application completely:
+
+1. Close the PowerShell window running .\run.ps1.
+2. Delete the application folder (e.g. C:\EU-Custom-Data-Hub).
+
+Nothing is installed elsewhere on your computer. Python and Node.js,
+if they were automatically installed, remain available for other use.
