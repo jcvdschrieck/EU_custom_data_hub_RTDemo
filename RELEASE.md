@@ -82,7 +82,7 @@ In PowerShell on Windows 10/11:
 | `wheels/*.whl` | `pip download -r requirements.txt` | ~150 MB (varies) |
 | `frontend/dist/` | `npm run build` for internal frontend | ~1 MB |
 | `customsandtaxriskmanagemensystem/dist/` | `npm run build` for C&T dashboard | ~3 MB |
-| `models/hf-cache/` | `scripts/warm_hf_cache.py` | ~90 MB |
+| `models/hf-cache/hub/` | Repo-tracked (refresh below) | ~87 MB |
 | `data/*.db` | `seed_databases.py` | ~10 MB |
 | `.packaged` marker | Build script | < 1 KB |
 | **Total ZIPped** | | **~120–180 MB** |
@@ -183,6 +183,27 @@ before publishing.
 When you add a Python dependency, the next `build_release.sh` will
 include the new wheel automatically. No build-script change needed.
 Same for `package.json` — `npm install` runs at build time.
+
+### Refreshing the carried HF embedder cache
+
+The repo carries a pre-warmed copy of the `all-MiniLM-L6-v2` Hugging
+Face embedder under `models/hf-cache/hub/` (~87 MB). `build_release.sh`
+copies it straight into the staged release, which means a fresh build
+no longer needs internet access to huggingface.co.
+
+Refresh only when the model version itself changes (rare). The
+procedure:
+
+```bash
+rm -rf models/hf-cache/hub
+HF_HOME="$(pwd)/models/hf-cache" python3 scripts/warm_hf_cache.py
+git add models/hf-cache/hub
+git commit -m "Refresh HF embedder cache"
+```
+
+The inner `models/hf-cache/.gitignore` excludes `xet/`, the runtime
+log directory `huggingface_hub` writes during warm-up — only the model
+blobs themselves get tracked.
 
 ### Cross-platform binaries
 

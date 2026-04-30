@@ -102,11 +102,21 @@ if [[ -d "$CT_DIR" ]]; then
   cp -R "$CT_DIR/dist" "$STAGE_DIR/customsandtaxriskmanagemensystem/dist"
 fi
 
-# ── Step 6: pre-warm HF embedder cache ─────────────────────────────────
-echo "==> Pre-warming Hugging Face embedder cache (~90 MB)"
+# ── Step 6: ship the HF embedder cache ─────────────────────────────────
+# The repo carries a pre-warmed cache at $PROJ_ROOT/models/hf-cache/.
+# We copy it straight into the staged release. Falls back to running
+# warm_hf_cache.py on the fly if the carried cache is missing (e.g.
+# fresh clone before someone refreshed it).
+SOURCE_HF="$PROJ_ROOT/models/hf-cache"
+STAGED_HF="$STAGE_DIR/models/hf-cache"
 WARM_SCRIPT="$PROJ_ROOT/scripts/warm_hf_cache.py"
-if [[ -f "$WARM_SCRIPT" ]]; then
-  STAGED_HF="$STAGE_DIR/models/hf-cache"
+if [[ -d "$SOURCE_HF/hub" ]]; then
+  echo "==> Copying carried HF embedder cache ($(du -sh "$SOURCE_HF" | cut -f1))"
+  mkdir -p "$STAGED_HF"
+  # Copy hub/ only — xet/logs/ are runtime artefacts, gitignored
+  cp -R "$SOURCE_HF/hub" "$STAGED_HF/"
+elif [[ -f "$WARM_SCRIPT" ]]; then
+  echo "==> Carried HF cache missing — warming on the fly (~90 MB)"
   mkdir -p "$STAGED_HF"
   HF_HOME="$STAGED_HF" python3 "$WARM_SCRIPT" || {
     echo "!! HF cache warm failed — package will fetch at install time" >&2

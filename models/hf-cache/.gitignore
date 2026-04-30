@@ -1,0 +1,5 @@
+# huggingface_hub xet writes per-run logs into this dir at install
+# time. They're not useful to ship and would invalidate clones every
+# session. Hub model blobs/refs/snapshots ARE committed so the cache
+# arrives pre-warmed.
+xet/
