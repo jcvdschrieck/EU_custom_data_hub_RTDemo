@@ -71,8 +71,10 @@ In PowerShell on Windows 10/11:
 ```
 
 > **Build environment**: each builder needs Python 3.11+, Node 18+,
-> and internet access (the build script downloads wheels and the HF
-> embedder cache). Allow 5–10 minutes per platform.
+> and internet access for wheels (`pip download`) and `npm install`.
+> The HF embedder cache is now carried in the repo at
+> `models/hf-cache/hub/`, so no huggingface.co fetch is required at
+> build time. Allow 5–10 minutes per platform.
 
 #### What's in each ZIP
 
