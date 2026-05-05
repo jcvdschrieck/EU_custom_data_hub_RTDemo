@@ -1371,7 +1371,7 @@ function PipelineDiagram({ pipeline, status, riskSignals }) {
               </div>
 
               <div style={{ height: RT_H, display: 'flex', alignItems: 'center' }}>
-                <Zone label="Near Real-Time Risk Signals Engine" style={{ width: ZONE_W, height: '100%', boxSizing: 'border-box' }}>
+                <Zone label="Near Real-Time Risk Signals Factory" style={{ width: ZONE_W, height: '100%', boxSizing: 'border-box' }}>
                   {/* The inner content was visually biased toward the bottom of
                       the zone (large gap above the boxes, small gap below). A
                       small upward translate balances the gap on either side
