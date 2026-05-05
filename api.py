@@ -1,5 +1,5 @@
 """
-European Custom Data Hub — Real-Time Demo API
+Transaction Monitoring System — Real-Time Demo API
 FastAPI backend on port 8000.
 
 Message flow (publish-subscribe)
@@ -1256,7 +1256,7 @@ async def lifespan(app: FastAPI):
 # ── App ───────────────────────────────────────────────────────────────────────
 
 app = FastAPI(
-    title="European Custom Data Hub — RTDemo",
+    title="Transaction Monitoring System — RTDemo",
     version="4.0.0",
     lifespan=lifespan,
 )

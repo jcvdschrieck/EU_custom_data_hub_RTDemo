@@ -8,7 +8,7 @@ from lib.config import API_BASE_URL, MIN_SPEED, MAX_SPEED, DEFAULT_SPEED
 st.set_page_config(page_title="Simulation Control", page_icon="⚙️", layout="wide")
 st.title("⚙️ Simulation Control")
 st.caption(
-    "Controls the replay of March-2026 transactions into the European Custom Database. "
+    "Controls the replay of March-2026 transactions into the Customs Database. "
     "Speed = simulated minutes per real second (120 = 2 sim-hours/sec ≈ 6 real min for full March)."
 )
 
@@ -73,7 +73,7 @@ if c2.button("⏸ Pause", use_container_width=True):
 
 if c3.button("🔄 Reset", use_container_width=True, type="secondary"):
     _api("post", "/api/simulation/reset")
-    st.success("Simulation reset. European Custom DB simulation data cleared from the live queue.")
+    st.success("Simulation reset. Customs DB simulation data cleared from the live queue.")
     st.rerun()
 
 st.divider()
@@ -132,7 +132,7 @@ st.divider()
 
 # ── XML message preview ───────────────────────────────────────────────────────
 st.subheader("Latest XML message")
-st.caption("The XML format sent to the European Custom Database when each transaction fires.")
+st.caption("The XML format sent to the Customs Database when each transaction fires.")
 
 try:
     q = _api("get", "/api/queue")

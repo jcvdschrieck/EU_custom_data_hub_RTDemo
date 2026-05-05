@@ -1,4 +1,4 @@
-"""EU VAT Hub — Streamlit dashboard entry point (port 8502).
+"""VAT Risk Hub — Streamlit dashboard entry point (port 8502).
 
 Start with:
     streamlit run app.py --server.port 8502
@@ -15,7 +15,7 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).parent))
 
 st.set_page_config(
-    page_title="EU VAT Hub",
+    page_title="VAT Risk Hub",
     page_icon="🇪🇺",
     layout="wide",
 )

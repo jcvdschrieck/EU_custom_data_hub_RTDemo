@@ -1,4 +1,4 @@
-"""HTTP client for querying the EU VAT Hub API.
+"""HTTP client for querying the VAT Risk Hub API.
 
 All outgoing requests include X-Client-Country: IE and are logged to
 data/eu_query_log.db for the local activity audit trail.

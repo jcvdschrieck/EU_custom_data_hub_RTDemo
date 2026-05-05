@@ -1,4 +1,4 @@
-"""Ireland VAT App — EU VAT Hub Query Interface.
+"""Ireland VAT App — VAT Risk Hub Query Interface.
 
 Tabs:
   1. Query & Results  — filtered browse of EU Hub invoices
@@ -17,7 +17,7 @@ if "analysis_queue"         not in st.session_state: st.session_state.analysis_q
 if "increment_data"         not in st.session_state: st.session_state.increment_data         = None
 if "increment_checks"       not in st.session_state: st.session_state.increment_checks       = {}
 
-st.markdown("## 🌍 EU VAT Hub — Query Interface")
+st.markdown("## 🌍 VAT Risk Hub — Query Interface")
 st.caption(
     "Query the central European VAT invoice database from Ireland. "
     "All requests carry `X-Client-Country: IE` and are logged locally."
@@ -27,10 +27,10 @@ from lib import eu_client
 
 _hub_ok = eu_client.health_check()
 if _hub_ok:
-    st.success("🟢 EU VAT Hub is online at `http://localhost:8503`")
+    st.success("🟢 VAT Risk Hub is online at `http://localhost:8503`")
 else:
     st.error(
-        "🔴 EU VAT Hub is **offline** — start it with:\n"
+        "🔴 VAT Risk Hub is **offline** — start it with:\n"
         "```\ncd eu_vat_hub && uvicorn api:app --port 8503\n```"
     )
 
@@ -75,7 +75,7 @@ with tab_query:
         q_limit = st.slider("Max results", 20, 500, 100, 20)
 
     if st.button("🔎 Fetch from EU Hub", type="primary", disabled=not _hub_ok):
-        with st.spinner("Querying EU VAT Hub…"):
+        with st.spinner("Querying VAT Risk Hub…"):
             st.session_state.eu_query_results = eu_client.list_invoices(
                 country           = None if q_country == "All" else q_country,
                 date_from         = q_date_from.isoformat() if q_date_from else None,
@@ -295,7 +295,7 @@ with tab_increment:
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab_log:
     st.markdown("### 📡 Ireland → EU Hub Activity Log")
-    st.caption("Requests sent from this application to the EU VAT Hub.")
+    st.caption("Requests sent from this application to the VAT Risk Hub.")
 
     col_r, col_cl = st.columns([3, 1])
     with col_r:

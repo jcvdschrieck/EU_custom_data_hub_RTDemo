@@ -76,7 +76,7 @@ export default function Dashboard() {
   return (
     <div className="page-container">
       <div className="page-title">Dashboard</div>
-      <div className="page-subtitle">VAT compliance metrics · European Custom Database</div>
+      <div className="page-subtitle">VAT compliance metrics · Customs Database</div>
 
       {/* Filters */}
       <div className="filter-bar">

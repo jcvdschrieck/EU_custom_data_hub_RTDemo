@@ -1,4 +1,4 @@
-"""EU VAT Hub — Invoice Browser (factual invoice data, no risk scoring)."""
+"""VAT Risk Hub — Invoice Browser (factual invoice data, no risk scoring)."""
 from __future__ import annotations
 import sys
 from pathlib import Path

@@ -1,4 +1,4 @@
-"""EU VAT Hub — Overview (factual data only)."""
+"""VAT Risk Hub — Overview (factual data only)."""
 from __future__ import annotations
 import sys
 from pathlib import Path
@@ -8,7 +8,7 @@ import pandas as pd
 import streamlit as st
 from lib.database import count_invoices, stats_by_country, stats_by_tx_type, total_count
 
-st.markdown("## 🌍 EU VAT Hub — Overview")
+st.markdown("## 🌍 VAT Risk Hub — Overview")
 st.caption(
     "Central repository of factual VAT invoice data submitted by EU member states. "
     "Risk assessment is performed by each country's own system."

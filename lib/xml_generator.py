@@ -6,7 +6,7 @@ import xml.etree.ElementTree as ET
 def transaction_to_xml(row: dict) -> str:
     """
     Convert a transaction dict to an XML string conforming to the
-    European Custom Data Hub message format.
+    Customs Data Hub message format.
     """
     root = ET.Element(
         "Transaction",

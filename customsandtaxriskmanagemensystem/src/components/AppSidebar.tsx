@@ -1,5 +1,4 @@
 import { FileText, Settings, Shield, Landmark, Home, FlaskConical, ListChecks, FolderOpen, FolderClosed, X } from "lucide-react";
-import revenueLogo from "@/assets/revenue-logo.png";
 import { NavLink } from "@/components/NavLink";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useContext } from "react";
@@ -101,11 +100,10 @@ export function AppSidebar() {
       <SidebarHeader className="p-4 border-b border-sidebar-border">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <img src={revenueLogo} alt="Irish Revenue" className="w-8 h-8 object-contain" />
             {!collapsed && (
               <div>
-                <p className="font-bold text-sidebar-primary text-xl tracking-tight">DG TAXUD</p>
-                <p className="text-[10px] text-sidebar-muted uppercase tracking-wider">European Commission</p>
+                <p className="font-bold text-sidebar-primary text-xl tracking-tight">European Custom Authority</p>
+                <p className="text-[10px] text-sidebar-muted uppercase tracking-wider">Risk Management Console</p>
                 <p className="text-[10px] text-sidebar-foreground/80 mt-0.5 flex items-center gap-1">
                   <span aria-hidden>🇮🇪</span>
                   <span>Ireland</span>

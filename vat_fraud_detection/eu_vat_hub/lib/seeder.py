@@ -1,4 +1,4 @@
-"""Seed the EU VAT Hub database with ~3 000 synthetic multi-country invoices.
+"""Seed the VAT Risk Hub database with ~3 000 synthetic multi-country invoices.
 
 The EU Hub stores ONLY factual data extracted from invoices.
 No verdicts, no risk scores — those are computed by each member state.

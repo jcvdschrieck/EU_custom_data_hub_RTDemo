@@ -1,4 +1,4 @@
-"""SQLite backend for the EU VAT Hub.
+"""SQLite backend for the VAT Risk Hub.
 
 Schema
 ------

@@ -1,4 +1,4 @@
-"""EU VAT Hub — API Activity Log (inbound requests from member states)."""
+"""VAT Risk Hub — API Activity Log (inbound requests from member states)."""
 from __future__ import annotations
 
 import sys

@@ -1,4 +1,4 @@
-"""EU VAT Hub — Analytics (VAT flows, transaction patterns, country volumes)."""
+"""VAT Risk Hub — Analytics (VAT flows, transaction patterns, country volumes)."""
 from __future__ import annotations
 import sys
 from pathlib import Path

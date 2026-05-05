@@ -329,7 +329,7 @@ function DBSinkNode({ count, newCount, tooltip }) {
         fontSize: 9, color: dbDark,
         textTransform: 'uppercase', letterSpacing: '0.08em',
         fontWeight: 700, marginBottom: 2,
-      }}>Custom Data Hub</div>
+      }}>Transaction Monitoring System</div>
       <div style={{ fontSize: 9, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 4, lineHeight: 1.2 }}>
         MongoDB · Stored transactions
       </div>

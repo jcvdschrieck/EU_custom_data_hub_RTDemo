@@ -300,7 +300,7 @@ export default function MainPage() {
     <div className="page-container">
       <div className="page-title">Main</div>
       <div className="page-subtitle">
-        European Custom Database — real-time B2C e-commerce transaction monitoring
+        Customs Database — real-time B2C e-commerce transaction monitoring
       </div>
 
       {/* Period selector */}

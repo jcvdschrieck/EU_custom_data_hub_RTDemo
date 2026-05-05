@@ -78,7 +78,7 @@ function CountryQueueDropdown() {
 export default function EclLayout({ children }) {
   return (
     <>
-      {/* EC institutional top strip */}
+      {/* Institutional top strip — EU flag (no specific DG branding) */}
       <div className="ec-top-strip">
         <svg width="28" height="20" viewBox="0 0 28 20" aria-hidden="true">
           <rect width="28" height="20" fill="#003399"/>
@@ -91,18 +91,16 @@ export default function EclLayout({ children }) {
                          fontSize="3.5" fill="#FFED00">★</text>
           })}
         </svg>
-        <span className="ec-commission">European Commission</span>
-        <span className="ec-separator">|</span>
-        <span>Taxation and Customs Union</span>
+        <span className="ec-commission">European Custom Authority</span>
       </div>
 
       {/* Site header */}
       <header className="site-header">
         <NavLink to="/" className="site-header__title">
-          <span style={{ fontSize: 28 }}>🇪🇺</span>
+          <span style={{ fontSize: 28 }}>🛡️</span>
           <div>
-            <h1>European Custom Data Hub</h1>
-            <span>Real-Time Transaction Monitoring</span>
+            <h1>Transaction Monitoring System</h1>
+            <span>Real-Time Customs Risk Monitoring</span>
           </div>
         </NavLink>
 
@@ -141,7 +139,7 @@ export default function EclLayout({ children }) {
       </main>
 
       <footer className="site-footer">
-        © European Commission — European Custom Data Hub — Real-Time Demo
+        © Transaction Monitoring System — Real-Time Demo
       </footer>
     </>
   )

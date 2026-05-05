@@ -9,7 +9,7 @@ import time
 
 
 def main():
-    print("European Custom Data Hub — Database Seeder")
+    print("Customs Data Hub — Database Seeder")
     print("=" * 50)
 
     from lib.seeder             import seed_european_custom_db

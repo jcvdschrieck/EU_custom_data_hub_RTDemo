@@ -1,4 +1,4 @@
-"""EU VAT Hub — FastAPI REST API (port 8503).
+"""VAT Risk Hub — FastAPI REST API (port 8503).
 
 Serves factual invoice data only. Risk assessment is the member states' responsibility.
 
@@ -51,14 +51,14 @@ async def lifespan(app: FastAPI):
     init_db()
     added = seed_if_empty()
     if added:
-        print(f"[EU VAT Hub] Seeded {added:,} invoice records.")
+        print(f"[VAT Risk Hub] Seeded {added:,} invoice records.")
     else:
-        print(f"[EU VAT Hub] DB ready — {total_count():,} records.")
+        print(f"[VAT Risk Hub] DB ready — {total_count():,} records.")
     yield
 
 
 app = FastAPI(
-    title="EU VAT Hub API",
+    title="VAT Risk Hub API",
     description=(
         "Central EU VAT invoice repository. "
         "Stores factual invoice data submitted by member states. "
