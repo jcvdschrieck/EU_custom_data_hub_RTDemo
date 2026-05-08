@@ -1045,7 +1045,8 @@ async def _ct_risk_management_factory() -> None:
                     "Updated_by":                  "system",
                 }
 
-                existing = find_similar_open_case(
+                existing = await asyncio.to_thread(
+                    find_similar_open_case,
                     seller      = tx.get("seller_name", ""),
                     destination = tx.get("buyer_country", ""),
                     category    = tx.get("item_category", ""),
@@ -1054,10 +1055,10 @@ async def _ct_risk_management_factory() -> None:
 
                 if existing:
                     existing_case_id = existing["Case_ID"]
-                    append_order_to_case(existing_case_id, so_row, sor_row)
+                    await asyncio.to_thread(append_order_to_case, existing_case_id, so_row, sor_row)
                     # Recompute averages across all orders in the case
-                    n = get_case_transaction_count(existing_case_id)
-                    old = get_case_hydrated(existing_case_id) or {}
+                    n = await asyncio.to_thread(get_case_transaction_count, existing_case_id)
+                    old = await asyncio.to_thread(get_case_hydrated, existing_case_id) or {}
                     avg = {}
                     for field in ("Engine_VAT_Ratio", "Engine_ML_Watchlist",
                                   "Engine_IE_Seller_Watchlist", "Engine_Description_Vagueness"):
@@ -1066,11 +1067,12 @@ async def _ct_risk_management_factory() -> None:
                         avg[field] = ((old_val * (n - 1)) + new_val) / n if n > 0 else new_val
                     old_overall = float(old.get("Overall_Case_Risk_Score") or 0)
                     new_overall = ((old_overall * (n - 1)) + order_risk_score) / n if n > 0 else order_risk_score
-                    update_case_engine_scores(
+                    await asyncio.to_thread(
+                        update_case_engine_scores,
                         existing_case_id, avg,
                         overall_score=new_overall,
                         risk_level=case_risk_level(new_overall))
-                    hydrated = get_case_hydrated(existing_case_id)
+                    hydrated = await asyncio.to_thread(get_case_hydrated, existing_case_id)
                     _push_rg_case_sse({"event": "case_updated", "action": "tx_appended", "case": hydrated})
                 else:
                     case_id = f"CASE-{_uuid.uuid4().hex[:12].upper()}"
@@ -1099,11 +1101,11 @@ async def _ct_risk_management_factory() -> None:
                         "Overall_Case_Risk_Level":          case_risk_level(order_risk_score),
                         **eng_scores,
                     }
-                    upsert_investigation_set(so_row, sor_row, soc_row)
-                    hydrated = get_case_hydrated(case_id) or {"Case_ID": case_id}
+                    await asyncio.to_thread(upsert_investigation_set, so_row, sor_row, soc_row)
+                    hydrated = await asyncio.to_thread(get_case_hydrated, case_id) or {"Case_ID": case_id}
                     _push_rg_case_sse({"event": "new_case", "case": hydrated})
                     print(f"  [C&T] case {case_id} created for {tx.get('seller_name','?')}")
-                    insert_agent_log({
+                    await asyncio.to_thread(insert_agent_log, {
                         "transaction_id": case_id,
                         "seller_name": tx.get("seller_name"),
                         "buyer_country": tx.get("buyer_country"),
@@ -1218,6 +1220,12 @@ async def lifespan(app: FastAPI):
     import concurrent.futures
     _model_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     _model_pool.submit(_get_vagueness_model)
+
+    # Pre-warm lazy imports and first DB connections so the initial HTTP
+    # requests don't pay the cold-start import + WAL-setup cost.
+    from lib.broker import broker as _broker_warmup  # noqa: F401
+    get_sim_counts()
+    get_alarms(active_only=True)
 
     asyncio.create_task(simulation_loop(_fire_transactions))
     asyncio.create_task(_RT_risk_monitoring_1_factory())
@@ -1379,7 +1387,7 @@ async def _sim_state_broadcaster() -> None:
         if not _sim_state_sse:
             continue
         try:
-            snapshot = _compute_sim_state_snapshot()
+            snapshot = await asyncio.to_thread(_compute_sim_state_snapshot)
             payload  = _json.dumps(snapshot)
         except Exception:
             continue
@@ -1404,7 +1412,7 @@ async def simulation_stream(request: Request):
     # Snapshot the current state immediately so reconnects / fresh subscribers
     # get a full frame without waiting up to 200 ms for the broadcaster tick.
     try:
-        initial = _json.dumps(_compute_sim_state_snapshot())
+        initial = _json.dumps(await asyncio.to_thread(_compute_sim_state_snapshot))
     except Exception:
         initial = None
 

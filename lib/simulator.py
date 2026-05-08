@@ -91,7 +91,8 @@ async def simulation_loop(fire_callback) -> None:
     """
     from lib.database import get_next_sim_transaction, mark_fired, get_sim_counts
 
-    state.total_count = get_sim_counts()["total"]
+    state.total_count = await asyncio.to_thread(get_sim_counts)
+    state.total_count = state.total_count["total"]
 
     _next_tx: dict | None    = None   # pre-loaded next event
     _last_real: float | None = None   # monotonic real time of the previous tick
@@ -105,7 +106,8 @@ async def simulation_loop(fire_callback) -> None:
             state._reset_flag = False
             _next_tx = None
             _last_real = None
-            state.total_count = get_sim_counts()["total"]
+            counts = await asyncio.to_thread(get_sim_counts)
+            state.total_count = counts["total"]
             continue
 
         if not state.running:
@@ -129,7 +131,7 @@ async def simulation_loop(fire_callback) -> None:
         # ── Fire every event whose timestamp has been reached ─────────────────
         while True:
             if _next_tx is None:
-                _next_tx = get_next_sim_transaction()
+                _next_tx = await asyncio.to_thread(get_next_sim_transaction)
                 if _next_tx is None:
                     # No more events. Stop once the clock has reached the end.
                     if state.sim_time >= SIM_END_DT:
@@ -143,7 +145,7 @@ async def simulation_loop(fire_callback) -> None:
             if state.sim_time < next_time:
                 break   # not yet — wait for the clock to catch up
 
-            mark_fired([_next_tx["transaction_id"]])
+            await asyncio.to_thread(mark_fired, [_next_tx["transaction_id"]])
             await fire_callback([_next_tx])
             state.fired_count += 1
             state.add_recent(_next_tx)

@@ -378,14 +378,16 @@ export const allCases = [...mockCases, ...mockClosedCases];
 
 // ── Live case accessor ─────────────────────────────────────────────────
 // Returns backend cases when connected, otherwise mock data.
-import { isBackendConnected, getAllBackendCases } from "./backendCaseStore";
+import { isBackendConnected, isBackendLoading, getAllBackendCases } from "./backendCaseStore";
 
 export function getLiveCases(): Case[] {
+  if (isBackendLoading()) return [];
   if (isBackendConnected()) return getAllBackendCases();
   return mockCases;
 }
 
 export function getLiveClosedCases(): Case[] {
+  if (isBackendLoading()) return [];
   if (isBackendConnected()) {
     return getAllBackendCases().filter(c => c.status === "Closed");
   }

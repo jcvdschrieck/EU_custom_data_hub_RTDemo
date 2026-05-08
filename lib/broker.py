@@ -76,12 +76,16 @@ class MessageBroker:
 
     async def publish(self, topic: str, message: dict) -> None:
         """
-        Enrich → persist → fan-out.
-        Delivers *message* to every subscriber queue for *topic*.
+        Enrich → fan-out → persist (background thread).
+
+        The file write is submitted to the thread pool before fan-out so it
+        runs concurrently with downstream processing and never blocks the
+        event loop. Counter updates inside write_event are GIL-safe.
         """
+        import asyncio as _asyncio
         from lib.event_store import write_event
         _inject_sales_order_id(message)
-        write_event(topic, message)
+        _asyncio.get_running_loop().run_in_executor(None, write_event, topic, message)
         for q in self._queues[topic]:
             await q.put(message)
 

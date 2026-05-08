@@ -1,10 +1,11 @@
 // Thin client for Backend-V2 C&T Risk Management REST + SSE.
 //
-// Backend lives at VITE_API_BASE_URL (defaults to http://localhost:8505,
-// matching lib/config.py:API_PORT in the EU Custom Data Hub repo).
+// Backend lives at VITE_API_BASE_URL (defaults to http://127.0.0.1:8505,
+// using the IP literal — "localhost" triggers Windows WPAD proxy-detection
+// on first connection, adding ~2s latency; 127.0.0.1 bypasses it entirely).
 // CORS is open on the backend (allow_origins=["*"]).
 
-const BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "http://localhost:8505";
+const BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "http://127.0.0.1:8505";
 
 // ── Backend "hydrated case" shape ───────────────────────────────────────────
 // Mirrors the SELECT in lib/database.py:get_case_hydrated. Snake_case kept.

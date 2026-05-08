@@ -43,6 +43,38 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+# ── In-memory counters ─────────────────────────────────────────────────────────
+# Maintained incrementally in write_event() and cleared in flush_events().
+# Because flush_events() is called at every server startup the counters always
+# start from zero, matching the freshly-emptied event directory.
+#
+# These replace the previous filesystem-scan + TTL-cache approach:
+#   Old: event_count / count_field_value → O(n files) disk scan per call
+#   New: O(1) dict lookup, updated once at write time
+#
+# Thread safety: CPython's GIL makes individual dict reads/writes atomic.
+# The read-modify-write in _inc() is not atomic, but a rare ±1 counter
+# discrepancy during concurrent writes is harmless for live UI counters.
+
+_topic_counts: dict[str, int] = {}
+_field_counts: dict[tuple, int] = {}  # (topic, dot.path, value) → count
+
+
+def _inc(d: dict, key) -> None:
+    d[key] = d.get(key, 0) + 1
+
+
+def _extract_field_counts(topic: str, payload: dict) -> None:
+    """Walk *payload* and increment _field_counts for every leaf value."""
+    def _walk(obj: object, prefix: str) -> None:
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                _walk(v, f"{prefix}.{k}" if prefix else k)
+        elif prefix:
+            _inc(_field_counts, (topic, prefix, obj))
+    _walk(payload, "")
+
+
 EVENTS_DIR = Path(__file__).parent.parent / "data" / "events"
 
 
@@ -90,16 +122,22 @@ def write_event(topic: str, message: dict) -> None:
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(envelope, fh, indent=2, default=str)
 
+    # Update in-memory counters so callers never need to re-scan the directory.
+    _inc(_topic_counts, topic)
+    _extract_field_counts(topic, file_payload)
+
 
 def flush_events() -> None:
     """
-    Delete all persisted event files.
+    Delete all persisted event files and reset in-memory counters.
     Called at simulation start and reset to ensure a clean slate.
 
     Uses ignore_errors=True because background workers may still be writing
     events to disk while reset is in progress (esp. after a fast ×100 run);
     any orphan files left behind will be overwritten on the next start.
     """
+    _topic_counts.clear()
+    _field_counts.clear()
     if EVENTS_DIR.exists():
         shutil.rmtree(EVENTS_DIR, ignore_errors=True)
     EVENTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -108,9 +146,8 @@ def flush_events() -> None:
 def event_count(topic: str | None = None) -> int:
     """Return total number of persisted event files, optionally filtered by topic."""
     if topic:
-        d = EVENTS_DIR / topic
-        return len(list(d.glob("*.json"))) if d.exists() else 0
-    return sum(1 for _ in EVENTS_DIR.rglob("*.json")) if EVENTS_DIR.exists() else 0
+        return _topic_counts.get(topic, 0)
+    return sum(_topic_counts.values())
 
 
 def get_events_for_order(order_identifier: str) -> list[dict]:
@@ -147,21 +184,4 @@ def count_field_value(topic: str, field: str, value) -> int:
     *field* supports dot-notation for nested fields, e.g. "outcome.flagged"
     to reach {"outcome": {"flagged": true}}.
     """
-    d = EVENTS_DIR / topic
-    if not d.exists():
-        return 0
-    parts = field.split(".")
-    n = 0
-    for f in d.glob("*.json"):
-        try:
-            data = json.loads(f.read_text())
-            cur: object = data
-            for part in parts:
-                if not isinstance(cur, dict):
-                    break
-                cur = cur.get(part)
-            if cur == value:
-                n += 1
-        except Exception:
-            pass
-    return n
+    return _field_counts.get((topic, field, value), 0)

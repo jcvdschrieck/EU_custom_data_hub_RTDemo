@@ -17,6 +17,7 @@ import type { Case, Order, CaseStatus, AISuggestedAction } from "./caseData";
 let _backendCases: Map<string, BackendCase> = new Map();
 let _started = false;
 let _connected = false;  // true once initial fetch succeeds (even if 0 cases)
+let _loading = false;    // true while the initial fetch is in-flight
 let _unsubscribe: (() => void) | null = null;
 
 function notify(): void {
@@ -33,6 +34,7 @@ function upsert(c: BackendCase): void {
 export async function startBackendCaseStore(): Promise<void> {
   if (_started) return;
   _started = true;
+  _loading = true;
   // Helper used for the bootstrap AND for SSE (re)connects. Always
   // replaces the map contents so the tab can never drift from the
   // backend — e.g. after uvicorn restarts or a re-seed happens while
@@ -43,11 +45,13 @@ export async function startBackendCaseStore(): Promise<void> {
       _backendCases.clear();
       list.forEach(upsert);
       _connected = true;
+      _loading = false;
       notify();
       console.log(`[backendCaseStore] ${label}: ${list.length} cases from backend`);
     } catch (err) {
       console.error(`[backendCaseStore] ${label} failed`, err);
       _connected = false;
+      _loading = false;
     }
   };
 
@@ -94,6 +98,7 @@ export function stopBackendCaseStore(): void {
   _unsubscribe?.();
   _unsubscribe = null;
   _started = false;
+  _loading = false;
   _backendCases.clear();
 }
 
@@ -101,6 +106,10 @@ export function stopBackendCaseStore(): void {
 
 export function isBackendConnected(): boolean {
   return _connected;
+}
+
+export function isBackendLoading(): boolean {
+  return _loading;
 }
 
 export function hasBackendCases(): boolean {

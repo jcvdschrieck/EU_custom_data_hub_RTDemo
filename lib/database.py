@@ -7,6 +7,7 @@ which March-2026 transactions have been replayed.
 from __future__ import annotations
 
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -440,12 +441,33 @@ _SEED_RISK_ENGINE_SIGNALS = [
 
 
 
+# Thread-local connection cache — each OS thread (including every
+# asyncio.to_thread worker) gets its own sqlite3 connection per DB file.
+# This eliminates the concurrent-access bug that shared a single connection
+# across threads: Python's sqlite3 module doesn't protect its own state
+# machine from simultaneous calls even with check_same_thread=False.
+# SQLite WAL handles concurrent readers/writers across separate connections
+# safely without extra locking on our side.
+_tl = threading.local()
+
+
 def _connect(path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(path, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    return conn
+    cache: dict[Path, sqlite3.Connection] = getattr(_tl, "conn_cache", None)
+    if cache is None:
+        _tl.conn_cache = {}
+        cache = _tl.conn_cache
+    if path not in cache:
+        conn = sqlite3.connect(str(path), timeout=10)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        # OFF skips fsync after each write — safe for a demo (no crash
+        # recovery needed) and cuts write latency ~10× vs NORMAL.
+        conn.execute("PRAGMA synchronous=OFF")
+        # Checkpoint WAL every 200 pages so reads never have to scan a
+        # large WAL file (default 1000 pages is too high for our write rate).
+        conn.execute("PRAGMA wal_autocheckpoint=200")
+        cache[path] = conn
+    return cache[path]
 
 
 _NEW_DATASET_TX_COLUMNS: list[tuple[str, str]] = [
@@ -552,7 +574,6 @@ def init_european_custom_db() -> None:
                     conn.execute(s)
                 except sqlite3.OperationalError:
                     pass  # index already exists
-    conn.close()
     # Backfill the new data hub table from the legacy transactions table.
     # Idempotent (uses INSERT OR REPLACE keyed on the synthetic SKU), so it's
     # Create the new data model tables (Sales_Order + Sales_Order_Risk)
@@ -586,7 +607,6 @@ def init_historical_cases_db() -> None:
             conn.execute("ALTER TABLE Sales_Order ADD COLUMN VAT_Subcategory_Code TEXT")
         except sqlite3.OperationalError:
             pass
-    conn.close()
 
 
 def init_investigation_db() -> None:
@@ -616,6 +636,12 @@ def init_investigation_db() -> None:
             except sqlite3.OperationalError:
                 pass
         conn.execute("UPDATE Sales_Order_Case SET Created_time = Update_time WHERE Created_time IS NULL")
+        # Index for find_similar_open_case — the query filters on all three
+        # of these columns and was a full-table scan without this index.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_so_similarity "
+            "ON Sales_Order(Seller_Name, Country_Destination, HS_Product_Category)"
+        )
         # Reseed risk_engine_signals on every startup so label renames
         # propagate without a separate migration.
         conn.execute("DELETE FROM risk_engine_signals")
@@ -624,7 +650,6 @@ def init_investigation_db() -> None:
             "(field_name, engine_key, display_name, description) VALUES (?, ?, ?, ?)",
             _SEED_RISK_ENGINE_SIGNALS,
         )
-    conn.close()
 
 
 def _init_ddl(db_path, ddl: str) -> None:
@@ -646,7 +671,6 @@ def _init_ddl(db_path, ddl: str) -> None:
                     conn.execute(s)
                 except sqlite3.OperationalError:
                     pass
-    conn.close()
 
 
 def upsert_sales_order(row: dict) -> None:
@@ -670,7 +694,6 @@ def upsert_sales_order(row: dict) -> None:
                 :Status, :Update_time, :Updated_by
             )
         """, row)
-    conn.close()
 
 
 def upsert_sales_order_risk(row: dict) -> None:
@@ -696,7 +719,6 @@ def upsert_sales_order_risk(row: dict) -> None:
                 :Evaluation_by, :Update_time, :Updated_by
             )
         """, row)
-    conn.close()
 
 
 def upsert_sales_order_case(row: dict) -> None:
@@ -724,7 +746,6 @@ def upsert_sales_order_case(row: dict) -> None:
                 :Update_time, :Updated_by
             )
         """, row)
-    conn.close()
 
 
 def init_simulation_db() -> None:
@@ -760,7 +781,6 @@ def init_simulation_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_fired "
             "ON transactions(fired, transaction_date)"
         )
-    conn.close()
 
 
 # ── European Custom DB write ───────────────────────────────────────────────────
@@ -835,7 +855,6 @@ def insert_transaction(row: dict) -> None:
             """,
             row,
         )
-    conn.close()
 
 
 def bulk_insert(rows: list[dict], path: Path = EUROPEAN_CUSTOM_DB) -> None:
@@ -849,7 +868,6 @@ def bulk_insert(rows: list[dict], path: Path = EUROPEAN_CUSTOM_DB) -> None:
             """,
             rows,
         )
-    conn.close()
 
 
 # ── European Custom DB read ────────────────────────────────────────────────────
@@ -860,7 +878,6 @@ def get_latest_transactions(limit: int = 30) -> list[dict]:
         "SELECT * FROM transactions ORDER BY transaction_date DESC, id DESC LIMIT ?",
         (limit,),
     ).fetchall()
-    conn.close()
     return [dict(r) for r in rows]
 
 
@@ -870,14 +887,12 @@ def get_transaction_by_id(transaction_id: str) -> dict | None:
         "SELECT * FROM transactions WHERE transaction_id=? LIMIT 1",
         (transaction_id,),
     ).fetchone()
-    conn.close()
     return dict(row) if row else None
 
 
 def get_transaction_count() -> int:
     conn = _connect(EUROPEAN_CUSTOM_DB)
     n = conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
-    conn.close()
     return n
 
 
@@ -912,7 +927,6 @@ def query_transactions(
     params += [limit, offset]
     conn = _connect(EUROPEAN_CUSTOM_DB)
     rows = conn.execute(sql, params).fetchall()
-    conn.close()
     return [dict(r) for r in rows]
 
 
@@ -976,7 +990,6 @@ def get_vat_metrics(
         params,
     ).fetchall()
 
-    conn.close()
     return {
         "total_transactions": totals["n"] or 0,
         "total_value": round(totals["total_value"] or 0, 2),
@@ -997,7 +1010,6 @@ def get_next_sim_transaction() -> dict | None:
     row = conn.execute(
         "SELECT * FROM transactions WHERE fired=0 ORDER BY transaction_date LIMIT 1"
     ).fetchone()
-    conn.close()
     return dict(row) if row else None
 
 
@@ -1009,7 +1021,6 @@ def get_pending_sim_transactions(up_to_date: str, batch: int = 100) -> list[dict
         "ORDER BY transaction_date LIMIT ?",
         (up_to_date, batch),
     ).fetchall()
-    conn.close()
     return [dict(r) for r in rows]
 
 
@@ -1020,21 +1031,18 @@ def mark_fired(transaction_ids: list[str]) -> None:
             "UPDATE transactions SET fired=1 WHERE transaction_id=?",
             [(tid,) for tid in transaction_ids],
         )
-    conn.close()
 
 
 def reset_simulation_db() -> None:
     conn = _connect(SIMULATION_DB)
     with conn:
         conn.execute("UPDATE transactions SET fired=0")
-    conn.close()
 
 
 def get_sim_counts() -> dict[str, int]:
     conn = _connect(SIMULATION_DB)
     total = conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
     fired = conn.execute("SELECT COUNT(*) FROM transactions WHERE fired=1").fetchone()[0]
-    conn.close()
     return {"total": total, "fired": fired, "remaining": total - fired}
 
 
@@ -1046,7 +1054,6 @@ def get_alarms(active_only: bool = False, limit: int = 50) -> list[dict]:
     rows = conn.execute(
         f"SELECT * FROM alarms {where} ORDER BY id DESC LIMIT ?", (limit,)
     ).fetchall()
-    conn.close()
     return [dict(r) for r in rows]
 
 
@@ -1058,7 +1065,6 @@ def expire_old_alarms(as_of: str) -> None:
             "UPDATE alarms SET active=0 WHERE active=1 AND expires_at <= ?",
             (as_of,),
         )
-    conn.close()
 
 
 def get_suspicious_transactions(limit: int = 50) -> list[dict]:
@@ -1075,7 +1081,6 @@ def get_suspicious_transactions(limit: int = 50) -> list[dict]:
         """,
         (limit,),
     ).fetchall()
-    conn.close()
     return [dict(r) for r in rows]
 
 
@@ -1098,7 +1103,6 @@ def reset_alarms() -> None:
         conn.execute(
             "UPDATE transactions SET suspicious=0, alarm_id=NULL, suspicion_level=NULL"
         )
-    conn.close()
 
 
 def historical_transaction_count() -> int:
@@ -1108,7 +1112,6 @@ def historical_transaction_count() -> int:
     n = conn.execute(
         "SELECT COUNT(*) FROM transactions WHERE transaction_date < ?", (SIM_START_STR,)
     ).fetchone()[0]
-    conn.close()
     return n
 
 
@@ -1133,8 +1136,6 @@ def insert_agent_log(entry: dict) -> None:
             )
     except Exception as e:
         print(f"  [agent_log] INSERT failed: {e}")
-    finally:
-        conn.close()
 
 
 def get_agent_log(limit: int = 100) -> list[dict]:
@@ -1143,7 +1144,6 @@ def get_agent_log(limit: int = 100) -> list[dict]:
     rows = conn.execute(
         "SELECT * FROM agent_log ORDER BY id DESC LIMIT ?", (limit,)
     ).fetchall()
-    conn.close()
     result = []
     for r in rows:
         d = dict(r)
@@ -1162,7 +1162,6 @@ def get_agent_log_by_tx(transaction_id: str) -> dict | None:
         "SELECT * FROM agent_log WHERE transaction_id=? ORDER BY id DESC LIMIT 1",
         (transaction_id,),
     ).fetchone()
-    conn.close()
     if not row:
         return None
     d = dict(row)
@@ -1192,7 +1191,6 @@ def flag_transaction_suspicious(
             "WHERE transaction_id=?",
             (alarm_id, risk_score, transaction_id),
         )
-    conn.close()
 
 
 def update_suspicion_level(transaction_id: str, level: str) -> None:
@@ -1202,7 +1200,6 @@ def update_suspicion_level(transaction_id: str, level: str) -> None:
             "UPDATE transactions SET suspicion_level=? WHERE transaction_id=?",
             (level, transaction_id),
         )
-    conn.close()
 
 
 def clear_suspicious_flag(transaction_id: str) -> None:
@@ -1214,7 +1211,6 @@ def clear_suspicious_flag(transaction_id: str) -> None:
             "WHERE transaction_id=?",
             (transaction_id,),
         )
-    conn.close()
 
 
 # ── Ireland queue ─────────────────────────────────────────────────────────────
@@ -1237,7 +1233,6 @@ def insert_ireland_queue(entry: dict) -> None:
             """,
             entry,
         )
-    conn.close()
 
 
 def get_ireland_queue(limit: int = 100) -> list[dict]:
@@ -1245,7 +1240,6 @@ def get_ireland_queue(limit: int = 100) -> list[dict]:
     rows = conn.execute(
         "SELECT * FROM ireland_queue ORDER BY id DESC LIMIT ?", (limit,)
     ).fetchall()
-    conn.close()
     return [dict(r) for r in rows]
 
 
@@ -1261,7 +1255,6 @@ def get_ireland_case(transaction_id: str) -> dict | None:
         "SELECT * FROM agent_log WHERE transaction_id=? ORDER BY id DESC LIMIT 1",
         (transaction_id,),
     ).fetchone()
-    conn.close()
     if not iq:
         return None
     result = dict(iq)
@@ -1292,7 +1285,6 @@ def get_all_cases(status: str | None = None, limit: int = 200) -> list[dict]:
             "SELECT * FROM Sales_Order_Case ORDER BY Update_time DESC LIMIT ?",
             (limit,),
         ).fetchall()
-    conn.close()
     result = []
     for r in rows:
         d = dict(r)
@@ -1313,7 +1305,6 @@ def get_case_by_id(case_id: str) -> dict | None:
         "SELECT * FROM Sales_Order_Case WHERE Case_ID = ? LIMIT 1",
         (case_id,),
     ).fetchone()
-    conn.close()
     if not row:
         return None
     d = dict(row)
@@ -1341,7 +1332,6 @@ def update_case(case_id: str, updates: dict) -> bool:
             values,
         )
     changed = cur.rowcount > 0
-    conn.close()
     return changed
 
 
@@ -1415,7 +1405,6 @@ def _seed_reference_tables() -> None:
             )
         except sqlite3.OperationalError:
             pass
-    conn.close()
 
 
 def get_vat_categories() -> list[dict]:
@@ -1423,7 +1412,6 @@ def get_vat_categories() -> list[dict]:
     rows = conn.execute(
         "SELECT label, rate, description FROM vat_categories ORDER BY sort_order, label"
     ).fetchall()
-    conn.close()
     return [dict(r) for r in rows]
 
 
@@ -1432,7 +1420,6 @@ def get_risk_levels() -> list[dict]:
     rows = conn.execute(
         "SELECT name, display_color FROM risk_levels ORDER BY sort_order, name"
     ).fetchall()
-    conn.close()
     return [dict(r) for r in rows]
 
 
@@ -1441,7 +1428,6 @@ def get_eu_regions() -> list[dict]:
     rows = conn.execute(
         "SELECT country_code, country_name, region FROM eu_regions ORDER BY region, country_code"
     ).fetchall()
-    conn.close()
     return [dict(r) for r in rows]
 
 
@@ -1503,7 +1489,6 @@ def _seed_ml_risk_rules_from_xlsx() -> None:
                 float(r[8]) if r[8] is not None else None,
                 float(r[9]) if r[9] is not None else None,
             ))
-    conn.close()
 
 
 def lookup_ml_risk_rule(seller: str, country_origin: str,
@@ -1519,7 +1504,6 @@ def lookup_ml_risk_rule(seller: str, country_origin: str,
         LIMIT 1
     """, (seller or "", country_origin or "",
           vat_product_category or "", country_destination or "")).fetchone()
-    conn.close()
     return dict(row) if row else None
 
 
@@ -1528,7 +1512,6 @@ def get_case_statuses() -> list[dict]:
     rows = conn.execute(
         "SELECT name, description FROM case_statuses ORDER BY sort_order, name"
     ).fetchall()
-    conn.close()
     return [dict(r) for r in rows]
 
 
@@ -1537,7 +1520,6 @@ def get_sales_order_statuses() -> list[dict]:
     rows = conn.execute(
         "SELECT name, description FROM sales_order_statuses ORDER BY sort_order, name"
     ).fetchall()
-    conn.close()
     return [dict(r) for r in rows]
 
 
@@ -1546,7 +1528,6 @@ def get_customs_actions() -> list[dict]:
     rows = conn.execute(
         "SELECT code, label, description FROM customs_actions ORDER BY sort_order, code"
     ).fetchall()
-    conn.close()
     return [dict(r) for r in rows]
 
 
@@ -1555,7 +1536,6 @@ def get_tax_actions() -> list[dict]:
     rows = conn.execute(
         "SELECT code, label, description FROM tax_actions ORDER BY sort_order, code"
     ).fetchall()
-    conn.close()
     return [dict(r) for r in rows]
 
 
@@ -1564,7 +1544,6 @@ def get_suspicion_types() -> list[dict]:
     rows = conn.execute(
         "SELECT name, description, icon, color FROM suspicion_types ORDER BY sort_order, name"
     ).fetchall()
-    conn.close()
     return [dict(r) for r in rows]
 
 
@@ -1629,7 +1608,6 @@ def get_previous_cases(seller: str, category: str = "", destination: str = "",
         "ORDER BY c.Update_time DESC LIMIT ?"
     )
     rows = conn.execute(sql, tuple(params)).fetchall()
-    conn.close()
     return [dict(r) for r in rows]
 
 
@@ -1657,7 +1635,6 @@ def get_correlated_cases(seller: str, category: str, destination: str,
           AND c.Case_ID != ? AND c.Status != 'Closed'
         ORDER BY c.Overall_Case_Risk_Score DESC LIMIT ?
     """, (seller, category, destination, exclude_case_id, limit)).fetchall()
-    conn.close()
     return [dict(r) for r in rows]
 
 
@@ -1683,7 +1660,6 @@ def find_similar_open_case(
           AND c.Status               != 'Closed'
           AND o.Case_ID IS NOT NULL
     """, (seller or "", destination or "", category or "")).fetchall()
-    conn.close()
 
     best_case_id = None
     best_sim     = 0.0
@@ -1703,46 +1679,43 @@ def append_order_to_case(case_id: str, so_row: dict, sor_row: dict) -> None:
     Sets Case_ID on the Sales_Order row. Single transaction."""
     so_row["Case_ID"] = case_id
     conn = _connect(INVESTIGATION_DB)
-    try:
-        with conn:
-            conn.execute("""
-                INSERT OR REPLACE INTO Sales_Order (
-                    Sales_Order_ID, Sales_Order_Business_Key,
-                    HS_Product_Category, VAT_Subcategory_Code,
-                    Product_Description, Product_Value,
-                    VAT_Rate, VAT_Fee, Seller_Name,
-                    Country_Origin, Country_Destination,
-                    Status, Update_time, Updated_by, Case_ID
-                ) VALUES (
-                    :Sales_Order_ID, :Sales_Order_Business_Key,
-                    :HS_Product_Category, :VAT_Subcategory_Code,
-                    :Product_Description, :Product_Value,
-                    :VAT_Rate, :VAT_Fee, :Seller_Name,
-                    :Country_Origin, :Country_Destination,
-                    :Status, :Update_time, :Updated_by, :Case_ID
-                )
-            """, so_row)
-            conn.execute("""
-                INSERT OR REPLACE INTO Sales_Order_Risk (
-                    Sales_Order_Risk_ID, Sales_Order_Business_Key,
-                    Risk_Type, Overall_Risk_Score, Overall_Risk_Level,
-                    Seller_Risk_Score, Country_Risk_Score,
-                    Product_Category_Risk_Score, Manufacturer_Risk_Score,
-                    Confidence_Score, Overall_Risk_Description,
-                    Proposed_Risk_Action, Risk_Comment,
-                    Evaluation_by, Update_time, Updated_by
-                ) VALUES (
-                    :Sales_Order_Risk_ID, :Sales_Order_Business_Key,
-                    :Risk_Type, :Overall_Risk_Score, :Overall_Risk_Level,
-                    :Seller_Risk_Score, :Country_Risk_Score,
-                    :Product_Category_Risk_Score, :Manufacturer_Risk_Score,
-                    :Confidence_Score, :Overall_Risk_Description,
-                    :Proposed_Risk_Action, :Risk_Comment,
-                    :Evaluation_by, :Update_time, :Updated_by
-                )
-            """, sor_row)
-    finally:
-        conn.close()
+    with conn:
+        conn.execute("""
+            INSERT OR REPLACE INTO Sales_Order (
+                Sales_Order_ID, Sales_Order_Business_Key,
+                HS_Product_Category, VAT_Subcategory_Code,
+                Product_Description, Product_Value,
+                VAT_Rate, VAT_Fee, Seller_Name,
+                Country_Origin, Country_Destination,
+                Status, Update_time, Updated_by, Case_ID
+            ) VALUES (
+                :Sales_Order_ID, :Sales_Order_Business_Key,
+                :HS_Product_Category, :VAT_Subcategory_Code,
+                :Product_Description, :Product_Value,
+                :VAT_Rate, :VAT_Fee, :Seller_Name,
+                :Country_Origin, :Country_Destination,
+                :Status, :Update_time, :Updated_by, :Case_ID
+            )
+        """, so_row)
+        conn.execute("""
+            INSERT OR REPLACE INTO Sales_Order_Risk (
+                Sales_Order_Risk_ID, Sales_Order_Business_Key,
+                Risk_Type, Overall_Risk_Score, Overall_Risk_Level,
+                Seller_Risk_Score, Country_Risk_Score,
+                Product_Category_Risk_Score, Manufacturer_Risk_Score,
+                Confidence_Score, Overall_Risk_Description,
+                Proposed_Risk_Action, Risk_Comment,
+                Evaluation_by, Update_time, Updated_by
+            ) VALUES (
+                :Sales_Order_Risk_ID, :Sales_Order_Business_Key,
+                :Risk_Type, :Overall_Risk_Score, :Overall_Risk_Level,
+                :Seller_Risk_Score, :Country_Risk_Score,
+                :Product_Category_Risk_Score, :Manufacturer_Risk_Score,
+                :Confidence_Score, :Overall_Risk_Description,
+                :Proposed_Risk_Action, :Risk_Comment,
+                :Evaluation_by, :Update_time, :Updated_by
+            )
+        """, sor_row)
 
 
 def update_case_engine_scores(case_id: str, engine_scores: dict,
@@ -1765,7 +1738,6 @@ def update_case_engine_scores(case_id: str, engine_scores: dict,
               "Overall_Case_Risk_Level": risk_level,
               "Case_ID": case_id,
               "Update_time": datetime.now(timezone.utc).isoformat()})
-    conn.close()
 
 
 def get_risk_engine_signals() -> list[dict]:
@@ -1781,7 +1753,6 @@ def get_risk_engine_signals() -> list[dict]:
         "       description, field_name "
         "FROM risk_engine_signals"
     ).fetchall()
-    conn.close()
     return [dict(r) for r in rows]
 
 
@@ -1791,7 +1762,6 @@ def get_case_transaction_count(case_id: str) -> int:
     n = conn.execute(
         "SELECT COUNT(*) FROM Sales_Order WHERE Case_ID = ?", (case_id,)
     ).fetchone()[0]
-    conn.close()
     return n
 
 
@@ -1804,7 +1774,6 @@ def update_sales_order_status(business_key: str, status: str) -> bool:
             (status, datetime.now(timezone.utc).isoformat(), business_key),
         )
     changed = cur.rowcount > 0
-    conn.close()
     return changed
 
 
@@ -1819,7 +1788,6 @@ def update_sales_order_statuses_for_case(case_id: str, status: str) -> int:
             (status, datetime.now(timezone.utc).isoformat(), case_id),
         )
     changed = cur.rowcount
-    conn.close()
     return changed
 
 
@@ -1833,30 +1801,27 @@ def seed_open_cases_if_empty() -> int:
     if not SEED_CASES_DB.exists():
         return 0
     target = _connect(INVESTIGATION_DB)
+    n = target.execute("SELECT COUNT(*) FROM Sales_Order_Case").fetchone()[0]
+    if n > 0:
+        return 0
+    src = sqlite3.connect(str(SEED_CASES_DB))
+    src.row_factory = sqlite3.Row
     try:
-        n = target.execute("SELECT COUNT(*) FROM Sales_Order_Case").fetchone()[0]
-        if n > 0:
-            return 0
-        src = sqlite3.connect(SEED_CASES_DB)
-        src.row_factory = sqlite3.Row
-        try:
-            with target:
-                # Order matters because of the FK from Risk → Order
-                for table in ("Sales_Order", "Sales_Order_Risk", "Sales_Order_Case"):
-                    rows = src.execute(f"SELECT * FROM {table}").fetchall()
-                    for r in rows:
-                        cols = ",".join(r.keys())
-                        placeholders = ",".join("?" * len(r.keys()))
-                        target.execute(
-                            f"INSERT OR REPLACE INTO {table} ({cols}) VALUES ({placeholders})",
-                            list(r),
-                        )
-            inserted = target.execute("SELECT COUNT(*) FROM Sales_Order_Case").fetchone()[0]
-            return inserted
-        finally:
-            src.close()
+        with target:
+            # Order matters because of the FK from Risk → Order
+            for table in ("Sales_Order", "Sales_Order_Risk", "Sales_Order_Case"):
+                rows = src.execute(f"SELECT * FROM {table}").fetchall()
+                for r in rows:
+                    cols = ",".join(r.keys())
+                    placeholders = ",".join("?" * len(r.keys()))
+                    target.execute(
+                        f"INSERT OR REPLACE INTO {table} ({cols}) VALUES ({placeholders})",
+                        list(r),
+                    )
+        inserted = target.execute("SELECT COUNT(*) FROM Sales_Order_Case").fetchone()[0]
+        return inserted
     finally:
-        target.close()
+        src.close()
 
 
 def reset_cases() -> None:
@@ -1866,7 +1831,6 @@ def reset_cases() -> None:
         conn.execute("DELETE FROM Sales_Order_Case")
         conn.execute("DELETE FROM Sales_Order_Risk")
         conn.execute("DELETE FROM Sales_Order")
-    conn.close()
 
 
 # ── Atomic 3-row insert into investigation.db ────────────────────────────────
@@ -1878,73 +1842,70 @@ def upsert_investigation_set(so_row: dict, sor_row: dict, soc_row: dict) -> None
     """Atomic insert of Sales_Order + Sales_Order_Risk + Sales_Order_Case
     into investigation.db. Single transaction."""
     conn = _connect(INVESTIGATION_DB)
-    try:
-        with conn:
-            conn.execute("""
-                INSERT OR REPLACE INTO Sales_Order (
-                    Sales_Order_ID, Sales_Order_Business_Key,
-                    HS_Product_Category, VAT_Subcategory_Code,
-                    Product_Description, Product_Value,
-                    VAT_Rate, VAT_Fee, Seller_Name,
-                    Country_Origin, Country_Destination,
-                    Status, Update_time, Updated_by, Case_ID
-                ) VALUES (
-                    :Sales_Order_ID, :Sales_Order_Business_Key,
-                    :HS_Product_Category, :VAT_Subcategory_Code,
-                    :Product_Description, :Product_Value,
-                    :VAT_Rate, :VAT_Fee, :Seller_Name,
-                    :Country_Origin, :Country_Destination,
-                    :Status, :Update_time, :Updated_by, :Case_ID
-                )
-            """, so_row)
-            conn.execute("""
-                INSERT OR REPLACE INTO Sales_Order_Risk (
-                    Sales_Order_Risk_ID, Sales_Order_Business_Key,
-                    Risk_Type, Overall_Risk_Score, Overall_Risk_Level,
-                    Seller_Risk_Score, Country_Risk_Score,
-                    Product_Category_Risk_Score, Manufacturer_Risk_Score,
-                    Confidence_Score, Overall_Risk_Description,
-                    Proposed_Risk_Action, Risk_Comment,
-                    Evaluation_by, Update_time, Updated_by
-                ) VALUES (
-                    :Sales_Order_Risk_ID, :Sales_Order_Business_Key,
-                    :Risk_Type, :Overall_Risk_Score, :Overall_Risk_Level,
-                    :Seller_Risk_Score, :Country_Risk_Score,
-                    :Product_Category_Risk_Score, :Manufacturer_Risk_Score,
-                    :Confidence_Score, :Overall_Risk_Description,
-                    :Proposed_Risk_Action, :Risk_Comment,
-                    :Evaluation_by, :Update_time, :Updated_by
-                )
-            """, sor_row)
-            conn.execute("""
-                INSERT OR REPLACE INTO Sales_Order_Case (
-                    Case_ID, Sales_Order_Business_Key, Status,
-                    VAT_Problem_Type, Recommended_Product_Value,
-                    Recommended_VAT_Product_Category, Recommended_VAT_Rate,
-                    Recommended_VAT_Fee, AI_Analysis, AI_Confidence,
-                    VAT_Gap_Fee, Evaluation_by,
-                    Proposed_Action_Tax, Proposed_Action_Customs,
-                    Communication, Additional_Evidence,
-                    Update_time, Updated_by, Created_time,
-                    Overall_Case_Risk_Score, Overall_Case_Risk_Level,
-                    Engine_VAT_Ratio, Engine_ML_Watchlist,
-                    Engine_IE_Seller_Watchlist, Engine_Description_Vagueness
-                ) VALUES (
-                    :Case_ID, :Sales_Order_Business_Key, :Status,
-                    :VAT_Problem_Type, :Recommended_Product_Value,
-                    :Recommended_VAT_Product_Category, :Recommended_VAT_Rate,
-                    :Recommended_VAT_Fee, :AI_Analysis, :AI_Confidence,
-                    :VAT_Gap_Fee, :Evaluation_by,
-                    :Proposed_Action_Tax, :Proposed_Action_Customs,
-                    :Communication, :Additional_Evidence,
-                    :Update_time, :Updated_by, :Created_time,
-                    :Overall_Case_Risk_Score, :Overall_Case_Risk_Level,
-                    :Engine_VAT_Ratio, :Engine_ML_Watchlist,
-                    :Engine_IE_Seller_Watchlist, :Engine_Description_Vagueness
-                )
-            """, soc_row)
-    finally:
-        conn.close()
+    with conn:
+        conn.execute("""
+            INSERT OR REPLACE INTO Sales_Order (
+                Sales_Order_ID, Sales_Order_Business_Key,
+                HS_Product_Category, VAT_Subcategory_Code,
+                Product_Description, Product_Value,
+                VAT_Rate, VAT_Fee, Seller_Name,
+                Country_Origin, Country_Destination,
+                Status, Update_time, Updated_by, Case_ID
+            ) VALUES (
+                :Sales_Order_ID, :Sales_Order_Business_Key,
+                :HS_Product_Category, :VAT_Subcategory_Code,
+                :Product_Description, :Product_Value,
+                :VAT_Rate, :VAT_Fee, :Seller_Name,
+                :Country_Origin, :Country_Destination,
+                :Status, :Update_time, :Updated_by, :Case_ID
+            )
+        """, so_row)
+        conn.execute("""
+            INSERT OR REPLACE INTO Sales_Order_Risk (
+                Sales_Order_Risk_ID, Sales_Order_Business_Key,
+                Risk_Type, Overall_Risk_Score, Overall_Risk_Level,
+                Seller_Risk_Score, Country_Risk_Score,
+                Product_Category_Risk_Score, Manufacturer_Risk_Score,
+                Confidence_Score, Overall_Risk_Description,
+                Proposed_Risk_Action, Risk_Comment,
+                Evaluation_by, Update_time, Updated_by
+            ) VALUES (
+                :Sales_Order_Risk_ID, :Sales_Order_Business_Key,
+                :Risk_Type, :Overall_Risk_Score, :Overall_Risk_Level,
+                :Seller_Risk_Score, :Country_Risk_Score,
+                :Product_Category_Risk_Score, :Manufacturer_Risk_Score,
+                :Confidence_Score, :Overall_Risk_Description,
+                :Proposed_Risk_Action, :Risk_Comment,
+                :Evaluation_by, :Update_time, :Updated_by
+            )
+        """, sor_row)
+        conn.execute("""
+            INSERT OR REPLACE INTO Sales_Order_Case (
+                Case_ID, Sales_Order_Business_Key, Status,
+                VAT_Problem_Type, Recommended_Product_Value,
+                Recommended_VAT_Product_Category, Recommended_VAT_Rate,
+                Recommended_VAT_Fee, AI_Analysis, AI_Confidence,
+                VAT_Gap_Fee, Evaluation_by,
+                Proposed_Action_Tax, Proposed_Action_Customs,
+                Communication, Additional_Evidence,
+                Update_time, Updated_by, Created_time,
+                Overall_Case_Risk_Score, Overall_Case_Risk_Level,
+                Engine_VAT_Ratio, Engine_ML_Watchlist,
+                Engine_IE_Seller_Watchlist, Engine_Description_Vagueness
+            ) VALUES (
+                :Case_ID, :Sales_Order_Business_Key, :Status,
+                :VAT_Problem_Type, :Recommended_Product_Value,
+                :Recommended_VAT_Product_Category, :Recommended_VAT_Rate,
+                :Recommended_VAT_Fee, :AI_Analysis, :AI_Confidence,
+                :VAT_Gap_Fee, :Evaluation_by,
+                :Proposed_Action_Tax, :Proposed_Action_Customs,
+                :Communication, :Additional_Evidence,
+                :Update_time, :Updated_by, :Created_time,
+                :Overall_Case_Risk_Score, :Overall_Case_Risk_Level,
+                :Engine_VAT_Ratio, :Engine_ML_Watchlist,
+                :Engine_IE_Seller_Watchlist, :Engine_Description_Vagueness
+            )
+        """, soc_row)
 
 
 _HYDRATED_CASE_SQL = """
@@ -2003,7 +1964,6 @@ def get_case_orders(case_id: str) -> list[dict]:
         WHERE o.Case_ID = ?
         ORDER BY o.Sales_Order_ID
     """, (case_id,)).fetchall()
-    conn.close()
     return [dict(r) for r in rows]
 
 
@@ -2308,7 +2268,6 @@ def get_all_cases_hydrated(status: str | None = None, limit: int = 200) -> list[
         sql = _HYDRATED_CASE_SQL + " ORDER BY c.Created_time ASC LIMIT ?"
         rows = conn.execute(sql, (limit,)).fetchall()
     result = [_hydrate_with_orders(r, conn) for r in rows]
-    conn.close()
     return result
 
 
@@ -2318,10 +2277,8 @@ def get_case_hydrated(case_id: str) -> dict | None:
     sql = _HYDRATED_CASE_SQL + " WHERE c.Case_ID = ? LIMIT 1"
     row = conn.execute(sql, (case_id,)).fetchone()
     if not row:
-        conn.close()
         return None
     result = _hydrate_with_orders(row, conn)
-    conn.close()
     return result
 
 

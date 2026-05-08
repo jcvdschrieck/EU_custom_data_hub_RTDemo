@@ -31,8 +31,18 @@ if (-not (Test-Path $venvPython)) {
     Write-Error "Python venv not found at $(Split-Path -Parent $venvPython). Run .\install.ps1 first."
 }
 
+# Eliminate ~2s Windows Defender loopback-inspection delay on first HTTP request.
+# Adds the project folder and venv Python to Defender exclusions so the AV
+# scanner does not stall on the initial TCP connection. Silently skipped if
+# the session is not elevated (exclusions already set from a prior run are kept).
+try {
+    Add-MpPreference -ExclusionPath $ScriptDir `
+                     -ExclusionProcess (Split-Path $venvPython -Leaf) `
+                     -ErrorAction Stop | Out-Null
+} catch { }
+
 $ctDist = Join-Path $ctDir 'dist\index.html'
-$ctMode = if (Test-Path $ctDist) { 'static (python http.server, dist\)' }
+$ctMode = if (Test-Path $ctDist) { 'static (spa_server.py, dist\)' }
           else                   { 'dev (npm run dev, requires node_modules)' }
 
 Write-Host "-- Starting services -------------------------------------------"
@@ -49,7 +59,7 @@ Start-Process powershell -ArgumentList '-NoExit', '-Command', $backendCmd
 # it via Python's http.server (no node at runtime). Dev installs
 # (no dist\) fall back to Vite's dev server.
 if (Test-Path $ctDist) {
-    $ctCmd = "Set-Location '$ctDir\dist'; & '$venvPython' -m http.server $($config.CT_FRONTEND_PORT) --bind 0.0.0.0"
+    $ctCmd = "& '$venvPython' '$ScriptDir\spa_server.py' '$ctDir\dist' $($config.CT_FRONTEND_PORT)"
 } else {
     $ctCmd = "`$env:PORT='$($config.CT_FRONTEND_PORT)'; Set-Location '$ctDir'; npm run dev"
 }
